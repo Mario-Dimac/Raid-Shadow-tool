@@ -50,6 +50,12 @@ Enrichment HellHades:
 python hellhades_enrich.py
 ```
 
+Export registry skill locale:
+
+```bash
+python build_local_skill_registry.py
+```
+
 Avvio web UI locale:
 
 ```bash
@@ -74,10 +80,12 @@ Pagine principali:
 - `forge_db.py`: schema e import dati principali
 - `account_stats.py`: calcolo stats account runtime
 - `hellhades_enrich.py`: enrichment skill e metadata da HellHades
+- `build_local_skill_registry.py`: export del registry skill locale a partire dal DB
 - `gear_advisor.py`: logica decisionale sui pezzi gear
 - `build_planner.py`: generazione proposte build per campioni
 - `cbforge_web.py`: server HTTP locale e API
 - `web/`: frontend statico per roster, gear e build planner
+- `data_sources/`: sorgenti locali versionabili, incluso il registry skill
 - `test_*.py`: suite test
 
 ## Stato del progetto

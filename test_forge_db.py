@@ -7,6 +7,7 @@ from pathlib import Path
 from enrichment_sources import ChampionSkillMatch, register_skill_enrichment_provider
 from forge_db import bootstrap_database, refresh_account_stat_models
 from hellhades_enrich import HellHadesChampionMatch, enrich_registry_from_hellhades, enrich_registry_from_source
+from providers.local_registry_provider import export_local_skill_registry
 
 
 def test_bootstrap_database_builds_relational_tables(tmp_path: Path) -> None:
@@ -363,6 +364,55 @@ def test_enrichment_can_run_through_generic_provider_layer(tmp_path: Path) -> No
     ]
     assert "decrease_def" in effect_types
     assert "hp_burn" in effect_types
+
+
+def test_local_skill_registry_export_roundtrips_db_skill_data(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    registry_path = tmp_path / "local_skill_registry.json"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 50000},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A1",
+                        "skill_id": "geo_a1",
+                        "name": "Stone Hammer",
+                        "cooldown": 0,
+                        "description": "Places [HP Burn].",
+                        "effects": [{"type": "hp_burn", "target": "enemy", "duration": 2}],
+                    }
+                ],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    summary = export_local_skill_registry(db_path=db_path, output_path=registry_path)
+
+    exported = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert summary["champion_count"] == 1
+    assert summary["skill_count"] == 1
+    assert exported["champions"][0]["champion_name"] == "Geomancer"
+    assert exported["champions"][0]["skills"][0]["name"] == "Stone Hammer"
+    assert exported["champions"][0]["skills"][0]["effects"][0]["effect_type"] == "hp_burn"
 
 
 def test_bootstrap_derives_total_stats_when_raw_dump_is_empty(tmp_path: Path) -> None:

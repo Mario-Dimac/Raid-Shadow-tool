@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from enrichment_sources import SkillEnrichmentProvider, get_skill_enrichment_provider
 from forge_db import DB_PATH, ensure_schema, now_utc_iso, save_app_state
 from providers.hellhades_provider import HellHadesChampionMatch
+import providers.local_registry_provider  # noqa: F401
 
 LEVEL_LINE_RE = re.compile(r"^Level\s+\d+\s*:", re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
@@ -225,6 +226,29 @@ def extract_effect_rows(description_clean: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def normalize_explicit_effect_rows(effects: Any) -> List[Dict[str, Any]]:
+    if not isinstance(effects, list):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for effect in effects:
+        if not isinstance(effect, dict):
+            continue
+        effect_type = normalize_space(str(effect.get("effect_type") or effect.get("type") or ""))
+        if not effect_type:
+            continue
+        rows.append(
+            {
+                "effect_type": effect_type,
+                "target": normalize_space(str(effect.get("target") or "")) or None,
+                "effect_value": nullable_float(first_non_empty(effect.get("effect_value"), effect.get("value"), effect.get("amount"))),
+                "duration": nullable_int(effect.get("duration")),
+                "chance": nullable_float(effect.get("chance")),
+                "condition_text": normalize_space(str(effect.get("condition_text") or effect.get("condition") or "")),
+            }
+        )
+    return rows
+
+
 def load_target_champions(
     conn: sqlite3.Connection,
     champion_names: Optional[Sequence[str]] = None,
@@ -374,10 +398,17 @@ def enrich_registry_from_provider(
             for (slot, skill_order), remote_skill in aligned_rows:
                 skill_name = normalize_space(str(remote_skill.get("name") or "")) or None
                 skill_type = normalize_space(str(remote_skill.get("type") or "")) or None
-                description_full, description_clean, book_lines = split_description(html_to_text(remote_skill.get("description")))
+                description_source = first_non_empty(
+                    remote_skill.get("description"),
+                    remote_skill.get("description_clean"),
+                    "",
+                )
+                description_full, description_clean, book_lines = split_description(html_to_text(description_source))
 
                 base_cooldown = nullable_int(remote_skill.get("cooldown"))
-                booked_cooldown = infer_booked_cooldown(base_cooldown, book_lines, remote_skill.get("books"))
+                booked_cooldown = nullable_int(first_non_empty(remote_skill.get("booked_cooldown"), remote_skill.get("cooldown_booked")))
+                if booked_cooldown is None:
+                    booked_cooldown = infer_booked_cooldown(base_cooldown, book_lines, remote_skill.get("books"))
 
                 conn.execute(
                     """
@@ -406,7 +437,8 @@ def enrich_registry_from_provider(
                     ),
                 )
 
-                for effect_row in extract_effect_rows(description_clean):
+                explicit_effects = normalize_explicit_effect_rows(remote_skill.get("effects"))
+                for effect_row in (explicit_effects or extract_effect_rows(description_clean)):
                     conn.execute(
                         """
                         INSERT INTO champion_skill_effects (
@@ -525,6 +557,25 @@ def nullable_int(value: Any) -> Optional[int]:
         return int(float(value))
     except (TypeError, ValueError):
         return None
+
+
+def nullable_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
 
 
 def parse_args() -> argparse.Namespace:
