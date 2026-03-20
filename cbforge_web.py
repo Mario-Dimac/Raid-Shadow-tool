@@ -222,7 +222,13 @@ def list_owned_champions(
                 CASE WHEN rt.champion_name IS NOT NULL THEN 1 ELSE 0 END AS is_registry_target,
                 cc.hellhades_post_id,
                 COUNT(DISTINCT CASE WHEN cs.slot IS NOT NULL THEN cs.slot || ':' || cs.skill_order END) AS skill_rows,
-                COUNT(DISTINCT CASE WHEN cs.skill_type IS NOT NULL THEN cs.slot || ':' || cs.skill_order END) AS skill_rows_with_type
+                COUNT(DISTINCT CASE WHEN (
+                    cs.cooldown IS NOT NULL
+                    OR cs.booked_cooldown IS NOT NULL
+                    OR NULLIF(TRIM(COALESCE(cs.skill_type, '')), '') IS NOT NULL
+                    OR NULLIF(TRIM(COALESCE(cs.description_clean, cs.description, '')), '') IS NOT NULL
+                ) THEN cs.slot || ':' || cs.skill_order END) AS skill_rows_with_data,
+                COUNT(DISTINCT CASE WHEN cse.effect_order IS NOT NULL THEN cs.slot || ':' || cs.skill_order END) AS skill_rows_with_effects
             FROM account_champions ac
             LEFT JOIN registry_targets rt
                 ON rt.champion_name = ac.champion_name
@@ -230,6 +236,9 @@ def list_owned_champions(
                 ON cc.champion_name = ac.champion_name
             LEFT JOIN champion_skills cs
                 ON cs.champion_name = ac.champion_name
+            LEFT JOIN champion_skill_effects cse
+                ON cse.champion_name = cs.champion_name
+                AND cse.slot = cs.slot
             GROUP BY
                 ac.champ_id,
                 ac.champion_name,
@@ -258,18 +267,19 @@ def list_owned_champions(
             "is_registry_target": bool(row["is_registry_target"]),
             "hellhades_post_id": row["hellhades_post_id"],
             "skill_rows": int(row["skill_rows"] or 0),
-            "skill_rows_with_type": int(row["skill_rows_with_type"] or 0),
+            "skill_rows_with_data": int(row["skill_rows_with_data"] or 0),
+            "skill_rows_with_effects": int(row["skill_rows_with_effects"] or 0),
         }
-        champion["enriched"] = (
-            champion["hellhades_post_id"] is not None
-            and champion["skill_rows"] > 0
-            and champion["skill_rows_with_type"] >= champion["skill_rows"]
+        champion["data_status"] = classify_skill_data_status(
+            champion["skill_rows"],
+            champion["skill_rows_with_data"],
         )
+        champion["enriched"] = champion["data_status"] == "complete"
         if search_text and search_text not in champion["champion_name"].lower():
             continue
         if scope == "target" and not champion["is_registry_target"]:
             continue
-        if scope == "missing" and champion["enriched"]:
+        if scope == "missing" and champion["data_status"] == "complete":
             continue
         current = champions_by_name.get(champion["champion_name"])
         if current is None or champion_sort_key(champion) > champion_sort_key(current):
@@ -299,6 +309,14 @@ def champion_sort_key(champion: Dict[str, Any]) -> tuple[int, int, int, int]:
         1 if champion["booked"] else 0,
         1 if champion["enriched"] else 0,
     )
+
+
+def classify_skill_data_status(skill_rows: int, skill_rows_with_data: int) -> str:
+    if skill_rows <= 0 or skill_rows_with_data <= 0:
+        return "missing"
+    if skill_rows_with_data < skill_rows:
+        return "partial"
+    return "complete"
 
 
 def list_gear_items(
@@ -788,6 +806,24 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
                 "condition_text": str(row["condition_text"] or ""),
             }
         )
+    skill_rows_with_data = 0
+    for row in skill_rows:
+        slot_key = str(row["slot"])
+        has_data = (
+            row["cooldown"] is not None
+            or row["booked_cooldown"] is not None
+            or bool(str(row["skill_type"] or "").strip())
+            or bool(str(row["description_clean"] or row["description"] or "").strip())
+            or bool(effects_by_slot.get(slot_key))
+        )
+        if has_data:
+            skill_rows_with_data += 1
+    skill_data_status = classify_skill_data_status(len(skill_rows), skill_rows_with_data)
+    external_provider = "hellhades" if catalog_row and (
+        catalog_row["hellhades_post_id"] is not None
+        or str(catalog_row["hellhades_url"] or "").strip()
+        or str(catalog_row["last_enriched_at"] or "").strip()
+    ) else ""
 
     return {
         "account": {
@@ -803,6 +839,10 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
             "booked": bool(account_row["booked"]),
         },
         "catalog": {
+            "external_provider": external_provider,
+            "external_ref_id": int(catalog_row["hellhades_post_id"]) if catalog_row and catalog_row["hellhades_post_id"] is not None else None,
+            "external_url": str(catalog_row["hellhades_url"] or "") if catalog_row else "",
+            "external_synced_at": str(catalog_row["last_enriched_at"] or "") if catalog_row else "",
             "hellhades_post_id": int(catalog_row["hellhades_post_id"]) if catalog_row and catalog_row["hellhades_post_id"] is not None else None,
             "hellhades_url": str(catalog_row["hellhades_url"] or "") if catalog_row else "",
             "last_enriched_at": str(catalog_row["last_enriched_at"] or "") if catalog_row else "",
@@ -834,6 +874,12 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
             }
             for row in skill_rows
         ],
+        "skill_data": {
+            "skill_rows": len(skill_rows),
+            "skill_rows_with_data": skill_rows_with_data,
+            "skill_rows_with_effects": sum(1 for effects in effects_by_slot.values() if effects),
+            "data_status": skill_data_status,
+        },
     }
 
 

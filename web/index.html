@@ -12,7 +12,7 @@
       <div class="hero">
         <div class="eyebrow">CB Forge</div>
         <h1>Roster Control</h1>
-        <p class="subtext">Gestione locale dei tuoi campioni, con refresh del database e update HellHades direttamente da qui.</p>
+        <p class="subtext">Gestione locale dei tuoi campioni, con refresh del database e sincronizzazione opzionale di dati esterni direttamente da qui.</p>
         <div class="nav-links">
           <a class="nav-link active" href="/">Campioni</a>
           <a class="nav-link" href="/gear">Equip</a>
@@ -24,7 +24,7 @@
         <select id="scope">
           <option value="all">Tutti i posseduti</option>
           <option value="target">Solo target livello 60</option>
-          <option value="missing">Solo enrichment mancanti</option>
+          <option value="missing">Solo dati skill incompleti</option>
         </select>
         <select id="sort">
           <option value="power">Ordina per livello/rank</option>
@@ -40,8 +40,8 @@
       <section class="main-toolbar">
         <button id="rebuildBtn" class="warn">Ricostruisci DB</button>
         <button id="recomputeStatsBtn" class="ghost">Ricalcola Stats</button>
-        <button id="refreshAllBtn" class="primary">Aggiorna HellHades target</button>
-        <button id="refreshOneBtn" class="ghost">Aggiorna campione selezionato</button>
+        <button id="refreshAllBtn" class="primary">Aggiorna dati esterni target</button>
+        <button id="refreshOneBtn" class="ghost">Aggiorna dati esterni campione</button>
         <button id="reloadBtn" class="ghost">Ricarica vista</button>
       </section>
       <section id="details" class="details">

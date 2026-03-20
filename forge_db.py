@@ -355,8 +355,8 @@ def bootstrap_database(
                     """
                     INSERT INTO champion_skills (
                         champion_name, slot, skill_order, skill_id, skill_name,
-                        cooldown, booked_cooldown, description
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        cooldown, booked_cooldown, description, skill_type, description_clean, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         champion_name,
@@ -384,6 +384,9 @@ def bootstrap_database(
                             )
                         ),
                         optional_string(first_non_empty(skill.get("description"), skill.get("text"))),
+                        optional_string(first_non_empty(skill.get("skill_type"), skill.get("type"))),
+                        optional_string(first_non_empty(skill.get("description_clean"), skill.get("description"), skill.get("text"))),
+                        optional_string(first_non_empty(skill.get("source"), "import")),
                     ),
                 )
                 for effect_order, effect in enumerate(list_value(skill.get("effects")), start=1):

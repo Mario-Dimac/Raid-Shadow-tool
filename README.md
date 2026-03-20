@@ -100,6 +100,7 @@ Priorita' attuali:
 
 - riallineare e stabilizzare il database runtime rispetto agli ultimi enrichment eseguiti
 - verificare la copertura reale dei campioni target HellHades nel DB corrente
+- ridurre la dipendenza da HellHades fino a poter lavorare anche senza quella sorgente esterna
 - ampliare la modellazione dei set speciali ancora trattati come parziali nel motore stats
 - migliorare il planner build con piu' profili, vincoli e criteri di scoring
 - aggiungere una vista piu' operativa per gli upgrade gear realmente perseguibili

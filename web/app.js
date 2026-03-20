@@ -111,8 +111,8 @@ function renderSummary() {
   summaryEl.innerHTML = [
     metricCard("Posseduti", summary.owned_champions || 0, "Campioni presenti nel tuo account"),
     metricCard("Target L60", summary.registry_targets || 0, "Roster gestito per Clan Boss"),
-    metricCard("Enriched", summary.registry_targets_fully_enriched || 0, "Target con skill complete"),
-    metricCard("Effect Rows", summary.skill_effect_rows || 0, summary.hellhades_last_enrich_utc || "Mai aggiornato"),
+    metricCard("Target Pronti", summary.registry_targets_ready || 0, "Target con skill ed effetti utilizzabili"),
+    metricCard("Skill Con Dati", summary.skill_rows_with_description || 0, summary.external_sync_last_utc || "Nessun sync esterno"),
   ].join("");
 }
 
@@ -122,7 +122,9 @@ function championPills(champion) {
   pills.push(`<span class="pill">R${champion.rank}</span>`);
   pills.push(`<span class="pill">${escapeHtml(champion.rarity || "n/d")}</span>`);
   if (champion.is_registry_target) pills.push('<span class="pill gold">Target</span>');
-  pills.push(champion.enriched ? '<span class="pill ok">Enriched</span>' : '<span class="pill warn">Da arricchire</span>');
+  if (champion.data_status === "complete") pills.push('<span class="pill ok">Dati completi</span>');
+  else if (champion.data_status === "partial") pills.push('<span class="pill warn">Dati parziali</span>');
+  else pills.push('<span class="pill warn">Dati mancanti</span>');
   return pills.join("");
 }
 
@@ -135,7 +137,7 @@ function renderRoster() {
     <button class="champ-row ${state.selectedChampion === champion.champion_name ? "active" : ""}" data-name="${escapeHtml(champion.champion_name)}">
       <div class="champ-topline">
         <div class="champ-name">${escapeHtml(champion.champion_name)}</div>
-        <div class="pill">${champion.skill_rows_with_type}/${champion.skill_rows}</div>
+        <div class="pill">${champion.skill_rows_with_data}/${champion.skill_rows}</div>
       </div>
       <div class="pillbar">${championPills(champion)}</div>
     </button>
@@ -168,7 +170,11 @@ function renderDetails() {
     `<span class="pill">${escapeHtml(detail.account.affinity || "n/d")}</span>`,
     `<span class="pill">${escapeHtml(detail.account.faction || "n/d")}</span>`,
     detail.account.booked ? '<span class="pill ok">Bookato</span>' : '<span class="pill">Non bookato</span>',
-    detail.catalog.hellhades_post_id ? `<span class="pill ok">HH ${detail.catalog.hellhades_post_id}</span>` : '<span class="pill warn">HH mancante</span>',
+    detail.skill_data?.data_status === "complete"
+      ? '<span class="pill ok">Skill complete</span>'
+      : detail.skill_data?.data_status === "partial"
+        ? '<span class="pill warn">Skill parziali</span>'
+        : '<span class="pill warn">Skill da completare</span>',
   ].join("");
 
   const profileRows = [
@@ -190,9 +196,13 @@ function renderDetails() {
     `${displaySetName(setRow.set_name)} x${setRow.completed_sets}`
   )).join(", ") || "nessuno";
   const enrichRows = [
-    ["HellHades ID", detail.catalog.hellhades_post_id ?? "n/d"],
-    ["Ultimo enrich", detail.catalog.last_enriched_at || "n/d"],
+    ["Fonte esterna", detail.catalog.external_provider || "n/d"],
+    ["Ref esterno", detail.catalog.external_ref_id ?? "n/d"],
+    ["Ultimo sync esterno", detail.catalog.external_synced_at || "n/d"],
     ["Skill", `${detail.skills.length}`],
+    ["Skill con dati", `${detail.skill_data?.skill_rows_with_data ?? 0}/${detail.skill_data?.skill_rows ?? 0}`],
+    ["Skill con effetti", `${detail.skill_data?.skill_rows_with_effects ?? 0}`],
+    ["Stato skill", detail.skill_data?.data_status || "n/d"],
     ["Effect rows", `${detail.skills.reduce((count, skill) => count + (skill.effects || []).length, 0)}`],
     ["Ruoli", detail.roles.length ? detail.roles.join(", ") : "n/d"],
     ["Stats source", statsLabel(detail.stat_model)],
@@ -337,7 +347,7 @@ async function recomputeStats() {
 }
 
 async function refreshAll() {
-  setSidebarStatus("Refresh HellHades di tutti i target in corso...");
+  setSidebarStatus("Aggiornamento dati esterni di tutti i target in corso...");
   const payload = await postAction("/api/update-targets");
   setSidebarStatus(`Aggiornati ${payload.summary.updated}/${payload.summary.requested} target.`);
   await loadSummary();
@@ -347,7 +357,7 @@ async function refreshAll() {
 
 async function refreshSelected() {
   if (!state.selectedChampion) return;
-  setSidebarStatus(`Aggiornamento ${state.selectedChampion} in corso...`);
+  setSidebarStatus(`Aggiornamento dati esterni per ${state.selectedChampion} in corso...`);
   const payload = await postAction("/api/update-champion", { champion_name: state.selectedChampion });
   setSidebarStatus(`Aggiornato ${payload.summary.updated}/${payload.summary.requested}: ${state.selectedChampion}.`);
   await loadSummary();

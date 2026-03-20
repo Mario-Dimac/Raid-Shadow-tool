@@ -86,14 +86,18 @@ def test_web_queries_expose_owned_roster_and_detail(tmp_path: Path) -> None:
     detail = champion_detail("Geomancer", db_path)
 
     assert summary["owned_champions"] == 2
+    assert summary["registry_targets_ready"] == 1
     assert [item["champion_name"] for item in roster["champions"]] == ["Coldheart", "Geomancer"]
     assert roster["champions"][1]["is_registry_target"] is True
+    assert roster["champions"][1]["enriched"] is True
+    assert roster["champions"][1]["data_status"] == "complete"
     assert detail["account"]["champion_name"] == "Geomancer"
     assert detail["roles"] == ["attack", "support"]
     assert detail["base_stats"]["hp"] == 20000.0
     assert detail["base_totals"]["hp"] == 20000.0
     assert detail["total_stats"]["spd"] == 210.0
     assert detail["stat_model"]["source"] == "raw"
+    assert detail["skill_data"]["data_status"] == "complete"
     assert detail["skills"][0]["skill_name"] == "Stone Hammer"
     assert detail["skills"][1]["effects"][0]["effect_type"] == "hp_burn"
 
@@ -132,6 +136,7 @@ def test_web_roster_filters_missing_enrichment(tmp_path: Path) -> None:
     assert len(missing["champions"]) == 1
     assert missing["champions"][0]["champion_name"] == "Geomancer"
     assert missing["champions"][0]["enriched"] is False
+    assert missing["champions"][0]["data_status"] == "missing"
 
 
 def test_web_roster_deduplicates_multiple_owned_instances(tmp_path: Path) -> None:
