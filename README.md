@@ -79,7 +79,6 @@ Pagine principali:
 - `cbforge_web.py`: server HTTP locale e API
 - `web/`: frontend statico per roster, gear e build planner
 - `test_*.py`: suite test
-- `old/legacy_20260318/`: archivio del codice precedente
 
 ## Stato del progetto
 
@@ -118,4 +117,5 @@ Roadmap successiva:
 
 - `data/` contiene il database runtime locale e non dovrebbe essere trattato come sorgente canonica del codice
 - `input/` puo' contenere dump sensibili o voluminosi, quindi conviene gestirlo fuori dalla repo
+- `old/` e' un archivio locale del codice precedente e resta fuori dalla repo Git
 - il progetto e' pensato per lavorare in locale, con iterazioni rapide su dati reali dell'account

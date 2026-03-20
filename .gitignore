@@ -7,19 +7,8 @@ __pycache__/
 data/
 input/
 
-# Legacy archive runtime and build outputs
-old/**/bin/
-old/**/obj/
-old/**/input_runtime/
-old/**/vendor/
-old/**/*.dll
-old/**/*.exe
-old/**/*.pdb
-old/**/*.deps.json
-old/**/*.runtimeconfig.json
-old/**/*.cache
-old/**/*.bin
-old/**/*.png
+# Legacy archive kept only in local workspace
+old/
 
 # Local environment
 .env
