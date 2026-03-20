@@ -62,6 +62,12 @@ Export registry skill locale:
 python build_local_skill_registry.py
 ```
 
+Audit fonti locali e copertura registry:
+
+```bash
+python game_data_probe.py
+```
+
 Avvio web UI locale:
 
 ```bash
@@ -87,6 +93,7 @@ Pagine principali:
 - `account_stats.py`: calcolo stats account runtime
 - `hellhades_enrich.py`: enrichment skill e metadata da HellHades
 - `build_local_skill_registry.py`: export del registry skill locale a partire dal DB
+- `game_data_probe.py`: audit rapido di client RAID locale, bundle disponibili e copertura del registry skill
 - `providers/local_registry_provider.py`: provider locale prioritario per skill e cooldown
 - `gear_advisor.py`: logica decisionale sui pezzi gear
 - `build_planner.py`: generazione proposte build per campioni

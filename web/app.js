@@ -111,7 +111,8 @@ function renderSummary() {
   summaryEl.innerHTML = [
     metricCard("Posseduti", summary.owned_champions || 0, "Campioni presenti nel tuo account"),
     metricCard("Target L60", summary.registry_targets || 0, "Roster gestito per Clan Boss"),
-    metricCard("Target Pronti", summary.registry_targets_ready || 0, "Target con skill ed effetti utilizzabili"),
+    metricCard("Target Pronti", summary.registry_targets_ready || 0, "Target con skill complete e utilizzabili"),
+    metricCard("Con Effetti", summary.registry_targets_with_effect_data || 0, `${summary.skill_effect_rows || 0} effetti strutturati`),
     metricCard("Registry Locale", summary.registry_targets_ready_from_local_registry || 0, `${summary.skill_rows_from_local_registry || 0} skill locali`),
     metricCard("Fallback HH", summary.registry_targets_ready_from_hellhades || 0, formatProviderHits(summary.skill_registry_last_sync_provider_hits)),
   ].join("");

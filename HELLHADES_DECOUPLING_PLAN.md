@@ -195,6 +195,7 @@ Esito atteso:
 Task:
 
 - analizzare quali dati arrivano gia' dai file/DB locali
+- consolidare un audit rapido delle sorgenti locali disponibili nel client installato
 - ricostruire roster e inventory senza `hh_reader_bridge`
 - costruire un importer locale equivalente a `normalize.py`
 - eliminare la dipendenza da `raidoptimiser.hellhades.com/api/StaticData/hero_types`

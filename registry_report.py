@@ -117,13 +117,37 @@ def build_registry_report(db_path: Path = DB_PATH, limit: int = 25) -> Dict[str,
             HAVING
                 skill_rows = 0
                 OR skill_rows_with_data < skill_rows
-                OR effect_rows = 0
             ORDER BY
                 skill_rows_with_data ASC,
                 with_description ASC,
                 with_skill_type ASC,
                 with_cooldown ASC,
                 effect_rows ASC,
+                skill_rows DESC,
+                rt.champion_name ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        effect_gap_rows = conn.execute(
+            f"""
+            SELECT
+                rt.champion_name,
+                COUNT(DISTINCT CASE WHEN cs.slot IS NOT NULL THEN cs.slot || ':' || cs.skill_order END) AS skill_rows,
+                COUNT(DISTINCT CASE WHEN {SKILL_DATA_EXPR} THEN cs.slot || ':' || cs.skill_order END) AS skill_rows_with_data,
+                COUNT(cse.effect_order) AS effect_rows
+            FROM registry_targets rt
+            LEFT JOIN champion_skills cs
+                ON cs.champion_name = rt.champion_name
+            LEFT JOIN champion_skill_effects cse
+                ON cse.champion_name = cs.champion_name
+                AND cse.slot = cs.slot
+            GROUP BY rt.champion_name
+            HAVING
+                skill_rows > 0
+                AND skill_rows_with_data = skill_rows
+                AND effect_rows = 0
+            ORDER BY
                 skill_rows DESC,
                 rt.champion_name ASC
             LIMIT ?
@@ -187,7 +211,8 @@ def build_registry_report(db_path: Path = DB_PATH, limit: int = 25) -> Dict[str,
         "registry_targets": int(summary_row[9] if summary_row else 0),
         "registry_targets_with_skill_data": int(summary_row[10] if summary_row else 0),
         "registry_targets_with_complete_skill_data": int(summary_row[11] if summary_row else 0),
-        "registry_targets_ready": int(summary_row[12] if summary_row else 0),
+        "registry_targets_ready": int(summary_row[11] if summary_row else 0),
+        "registry_targets_with_effect_data": int(summary_row[12] if summary_row else 0),
         "skill_rows_by_source": {str(row[0]): int(row[1] or 0) for row in source_rows},
         "skill_rows_from_local_registry": int(next((row[1] for row in source_rows if str(row[0]) == "local_registry"), 0)),
         "skill_rows_from_hellhades": int(next((row[1] for row in source_rows if str(row[0]) == "hellhades"), 0)),
@@ -213,13 +238,22 @@ def build_registry_report(db_path: Path = DB_PATH, limit: int = 25) -> Dict[str,
             }
             for row in missing_rows
         ],
+        "targets_needing_effects": [
+            {
+                "champion_name": str(row[0]),
+                "skill_rows": int(row[1] or 0),
+                "skill_rows_with_data": int(row[2] or 0),
+                "effect_rows": int(row[3] or 0),
+            }
+            for row in effect_gap_rows
+        ],
     }
 
     # Temporary compatibility aliases while UI and callers migrate away from HellHades terminology.
     summary["champion_catalog_with_hellhades_match"] = summary["champion_catalog_with_external_ref"]
     summary["registry_targets_with_hellhades_match"] = summary["champion_catalog_with_external_ref"]
     summary["registry_targets_with_skill_types"] = summary["registry_targets_with_complete_skill_data"]
-    summary["registry_targets_fully_enriched"] = summary["registry_targets_ready"]
+    summary["registry_targets_fully_enriched"] = summary["registry_targets_with_effect_data"]
     summary["hellhades_last_enrich_utc"] = summary["external_sync_last_utc"]
     summary["needs_enrichment"] = summary["targets_needing_data"]
     return summary
