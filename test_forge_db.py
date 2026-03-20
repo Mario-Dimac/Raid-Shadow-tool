@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from enrichment_sources import ChampionSkillMatch, register_skill_enrichment_provider
+from enrichment_sources import ChampionSkillMatch, get_skill_enrichment_provider, register_skill_enrichment_provider
 from forge_db import bootstrap_database, refresh_account_stat_models
 from hellhades_enrich import HellHadesChampionMatch, enrich_registry_from_hellhades, enrich_registry_from_source
 from providers.local_registry_provider import export_local_skill_registry
@@ -413,6 +413,168 @@ def test_local_skill_registry_export_roundtrips_db_skill_data(tmp_path: Path) ->
     assert exported["champions"][0]["champion_name"] == "Geomancer"
     assert exported["champions"][0]["skills"][0]["name"] == "Stone Hammer"
     assert exported["champions"][0]["skills"][0]["effects"][0]["effect_type"] == "hp_burn"
+
+
+def test_auto_provider_prefers_local_registry_before_hellhades(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 50000},
+                "equipped_item_ids": [],
+                "skills": [
+                    {"slot": "A1", "skill_id": "48801", "name": "48801", "effects": []},
+                    {"slot": "A2", "skill_id": "48802", "name": "48802", "effects": []},
+                ],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    original_local = get_skill_enrichment_provider("local_registry")
+    original_hh = get_skill_enrichment_provider("hellhades")
+
+    class LocalProvider:
+        source_name = "local_registry"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, champion_name, champion_name, "")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "Local A1", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Decrease ATK] debuff.</p>", "effects": []},
+                {"name": "Local A2", "type": "Active", "cooldown": 4, "description": "<p>Places a [HP Burn] debuff.</p>", "effects": []},
+            ]
+
+    class HellHadesProvider:
+        source_name = "hellhades"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, "17837", champion_name, "https://example.invalid/hh")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "HH A1", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Decrease DEF] debuff.</p>", "effects": []},
+                {"name": "HH A2", "type": "Active", "cooldown": 4, "description": "<p>Places a [Weaken] debuff.</p>", "effects": []},
+            ]
+
+    register_skill_enrichment_provider(LocalProvider())
+    register_skill_enrichment_provider(HellHadesProvider())
+    try:
+        summary = enrich_registry_from_source("auto", db_path=db_path)
+    finally:
+        register_skill_enrichment_provider(original_local)
+        register_skill_enrichment_provider(original_hh)
+
+    assert summary["provider"] == "auto"
+    assert summary["provider_hits"]["local_registry"] == 1
+    assert summary["provider_hits"]["hellhades"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT skill_name, source
+            FROM champion_skills
+            WHERE champion_name = 'Geomancer'
+            ORDER BY skill_order ASC
+            """
+        ).fetchall()
+
+    assert rows == [("Local A1", "local_registry"), ("Local A2", "local_registry")]
+
+
+def test_auto_provider_falls_back_to_hellhades_when_local_registry_missing(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 50000},
+                "equipped_item_ids": [],
+                "skills": [
+                    {"slot": "A1", "skill_id": "48801", "name": "48801", "effects": []},
+                ],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    original_local = get_skill_enrichment_provider("local_registry")
+    original_hh = get_skill_enrichment_provider("hellhades")
+
+    class EmptyLocalProvider:
+        source_name = "local_registry"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return None
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return []
+
+    class HellHadesProvider:
+        source_name = "hellhades"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, "17837", champion_name, "https://example.invalid/hh")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "HH A1", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Decrease DEF] debuff.</p>", "effects": []},
+            ]
+
+    register_skill_enrichment_provider(EmptyLocalProvider())
+    register_skill_enrichment_provider(HellHadesProvider())
+    try:
+        summary = enrich_registry_from_source("auto", db_path=db_path)
+    finally:
+        register_skill_enrichment_provider(original_local)
+        register_skill_enrichment_provider(original_hh)
+
+    assert summary["provider_hits"]["local_registry"] == 0
+    assert summary["provider_hits"]["hellhades"] == 1
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT skill_name, source
+            FROM champion_skills
+            WHERE champion_name = 'Geomancer'
+            ORDER BY skill_order ASC
+            """
+        ).fetchall()
+
+    assert rows == [("HH A1", "hellhades")]
 
 
 def test_bootstrap_derives_total_stats_when_raw_dump_is_empty(tmp_path: Path) -> None:

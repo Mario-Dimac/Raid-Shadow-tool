@@ -130,6 +130,48 @@ def build_registry_report(db_path: Path = DB_PATH, limit: int = 25) -> Dict[str,
             """,
             (int(limit),),
         ).fetchall()
+        source_rows = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(TRIM(COALESCE(source, '')), ''), '(none)') AS source_name, COUNT(*)
+            FROM champion_skills
+            GROUP BY source_name
+            ORDER BY COUNT(*) DESC, source_name ASC
+            """
+        ).fetchall()
+        local_ready_row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT
+                    rt.champion_name,
+                    COUNT(DISTINCT CASE WHEN cs.slot IS NOT NULL THEN cs.slot || ':' || cs.skill_order END) AS skill_rows,
+                    COUNT(DISTINCT CASE WHEN {SKILL_DATA_EXPR} THEN cs.slot || ':' || cs.skill_order END) AS skill_rows_with_data,
+                    COUNT(DISTINCT CASE WHEN cs.source = 'local_registry' THEN cs.slot || ':' || cs.skill_order END) AS local_skill_rows
+                FROM registry_targets rt
+                LEFT JOIN champion_skills cs
+                    ON cs.champion_name = rt.champion_name
+                GROUP BY rt.champion_name
+                HAVING skill_rows > 0 AND skill_rows_with_data = skill_rows AND local_skill_rows = skill_rows
+            )
+            """
+        ).fetchone()
+        hellhades_ready_row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT
+                    rt.champion_name,
+                    COUNT(DISTINCT CASE WHEN cs.slot IS NOT NULL THEN cs.slot || ':' || cs.skill_order END) AS skill_rows,
+                    COUNT(DISTINCT CASE WHEN {SKILL_DATA_EXPR} THEN cs.slot || ':' || cs.skill_order END) AS skill_rows_with_data,
+                    COUNT(DISTINCT CASE WHEN cs.source = 'hellhades' THEN cs.slot || ':' || cs.skill_order END) AS hellhades_skill_rows
+                FROM registry_targets rt
+                LEFT JOIN champion_skills cs
+                    ON cs.champion_name = rt.champion_name
+                GROUP BY rt.champion_name
+                HAVING skill_rows > 0 AND skill_rows_with_data = skill_rows AND hellhades_skill_rows = skill_rows
+            )
+            """
+        ).fetchone()
 
     summary = {
         "database": str(db_path),
@@ -146,9 +188,16 @@ def build_registry_report(db_path: Path = DB_PATH, limit: int = 25) -> Dict[str,
         "registry_targets_with_skill_data": int(summary_row[10] if summary_row else 0),
         "registry_targets_with_complete_skill_data": int(summary_row[11] if summary_row else 0),
         "registry_targets_ready": int(summary_row[12] if summary_row else 0),
+        "skill_rows_by_source": {str(row[0]): int(row[1] or 0) for row in source_rows},
+        "skill_rows_from_local_registry": int(next((row[1] for row in source_rows if str(row[0]) == "local_registry"), 0)),
+        "skill_rows_from_hellhades": int(next((row[1] for row in source_rows if str(row[0]) == "hellhades"), 0)),
+        "registry_targets_ready_from_local_registry": int(local_ready_row[0] if local_ready_row else 0),
+        "registry_targets_ready_from_hellhades": int(hellhades_ready_row[0] if hellhades_ready_row else 0),
         "registry_last_refresh_utc": app_state.get("registry_last_refresh_utc", ""),
         "registry_target_policy": app_state.get("registry_target_policy", ""),
         "external_sync_last_utc": app_state.get("hellhades_last_enrich_utc", ""),
+        "skill_registry_last_sync_provider_order": app_state.get("skill_registry_last_sync_provider_order", []),
+        "skill_registry_last_sync_provider_hits": app_state.get("skill_registry_last_sync_provider_hits", {}),
         "targets_needing_data": [
             {
                 "champion_name": str(row[0]),

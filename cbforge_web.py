@@ -16,7 +16,7 @@ from build_planner import build_champion_plan, list_build_profiles
 from forge_db import DB_PATH, NORMALIZED_SOURCE_PATH, bootstrap_database, ensure_schema, refresh_account_stats_from_source
 from gear_advisor import evaluate_gear_item, summarize_gear_verdicts
 import hellhades_live
-from hellhades_enrich import enrich_registry_from_hellhades
+from hellhades_enrich import enrich_registry_from_source
 from registry_report import build_registry_report
 
 
@@ -807,6 +807,7 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
             }
         )
     skill_rows_with_data = 0
+    skill_sources = sorted({str(row["source"] or "").strip() for row in skill_rows if str(row["source"] or "").strip()})
     for row in skill_rows:
         slot_key = str(row["slot"])
         has_data = (
@@ -819,11 +820,13 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
         if has_data:
             skill_rows_with_data += 1
     skill_data_status = classify_skill_data_status(len(skill_rows), skill_rows_with_data)
-    external_provider = "hellhades" if catalog_row and (
+    external_provider = skill_sources[0] if len(skill_sources) == 1 else ""
+    if not external_provider and catalog_row and (
         catalog_row["hellhades_post_id"] is not None
         or str(catalog_row["hellhades_url"] or "").strip()
         or str(catalog_row["last_enriched_at"] or "").strip()
-    ) else ""
+    ):
+        external_provider = "hellhades"
 
     return {
         "account": {
@@ -879,6 +882,8 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
             "skill_rows_with_data": skill_rows_with_data,
             "skill_rows_with_effects": sum(1 for effects in effects_by_slot.values() if effects),
             "data_status": skill_data_status,
+            "sources": skill_sources,
+            "primary_source": skill_sources[0] if len(skill_sources) == 1 else "",
         },
     }
 
@@ -1013,7 +1018,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "summary": summary})
                 return
             if parsed.path == "/api/update-targets":
-                summary = enrich_registry_from_hellhades(db_path=self.app.db_path)
+                summary = enrich_registry_from_source("auto", db_path=self.app.db_path)
                 self._send_json({"ok": True, "summary": summary})
                 return
             if parsed.path == "/api/recompute-stats":
@@ -1035,7 +1040,8 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                 if not champion_name:
                     self._send_error_json(HTTPStatus.BAD_REQUEST, "champion_name mancante.")
                     return
-                summary = enrich_registry_from_hellhades(
+                summary = enrich_registry_from_source(
+                    "auto",
                     db_path=self.app.db_path,
                     champion_names=[champion_name],
                 )

@@ -112,8 +112,16 @@ function renderSummary() {
     metricCard("Posseduti", summary.owned_champions || 0, "Campioni presenti nel tuo account"),
     metricCard("Target L60", summary.registry_targets || 0, "Roster gestito per Clan Boss"),
     metricCard("Target Pronti", summary.registry_targets_ready || 0, "Target con skill ed effetti utilizzabili"),
-    metricCard("Skill Con Dati", summary.skill_rows_with_description || 0, summary.external_sync_last_utc || "Nessun sync esterno"),
+    metricCard("Registry Locale", summary.registry_targets_ready_from_local_registry || 0, `${summary.skill_rows_from_local_registry || 0} skill locali`),
+    metricCard("Fallback HH", summary.registry_targets_ready_from_hellhades || 0, formatProviderHits(summary.skill_registry_last_sync_provider_hits)),
   ].join("");
+}
+
+function formatProviderHits(providerHits) {
+  const payload = providerHits || {};
+  const entries = Object.entries(payload).filter(([, value]) => Number(value) > 0);
+  if (!entries.length) return "Nessun sync recente";
+  return entries.map(([key, value]) => `${key}:${value}`).join(" | ");
 }
 
 function championPills(champion) {
@@ -196,7 +204,7 @@ function renderDetails() {
     `${displaySetName(setRow.set_name)} x${setRow.completed_sets}`
   )).join(", ") || "nessuno";
   const enrichRows = [
-    ["Fonte esterna", detail.catalog.external_provider || "n/d"],
+    ["Fonte skill", detail.skill_data?.primary_source || detail.catalog.external_provider || "n/d"],
     ["Ref esterno", detail.catalog.external_ref_id ?? "n/d"],
     ["Ultimo sync esterno", detail.catalog.external_synced_at || "n/d"],
     ["Skill", `${detail.skills.length}`],

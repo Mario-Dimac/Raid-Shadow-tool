@@ -50,6 +50,12 @@ Enrichment HellHades:
 python hellhades_enrich.py
 ```
 
+Sync skill provider-first:
+
+```bash
+python hellhades_enrich.py --provider auto
+```
+
 Export registry skill locale:
 
 ```bash
@@ -81,6 +87,7 @@ Pagine principali:
 - `account_stats.py`: calcolo stats account runtime
 - `hellhades_enrich.py`: enrichment skill e metadata da HellHades
 - `build_local_skill_registry.py`: export del registry skill locale a partire dal DB
+- `providers/local_registry_provider.py`: provider locale prioritario per skill e cooldown
 - `gear_advisor.py`: logica decisionale sui pezzi gear
 - `build_planner.py`: generazione proposte build per campioni
 - `cbforge_web.py`: server HTTP locale e API
