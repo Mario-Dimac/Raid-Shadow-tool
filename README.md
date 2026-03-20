@@ -56,6 +56,12 @@ Sync skill provider-first:
 python hellhades_enrich.py --provider auto
 ```
 
+Provider supportati oggi:
+
+- `local_registry` come prima scelta
+- `ayumilove` come catalogo skill/cooldown da pagine campione
+- `hellhades` come fallback aggiuntivo
+
 Export registry skill locale:
 
 ```bash
@@ -94,6 +100,7 @@ Pagine principali:
 - `hellhades_enrich.py`: enrichment skill e metadata da HellHades
 - `build_local_skill_registry.py`: export del registry skill locale a partire dal DB
 - `game_data_probe.py`: audit rapido di client RAID locale, bundle disponibili e copertura del registry skill
+- `providers/ayumilove_provider.py`: provider catalogo campioni da AyumiLove
 - `providers/local_registry_provider.py`: provider locale prioritario per skill e cooldown
 - `gear_advisor.py`: logica decisionale sui pezzi gear
 - `build_planner.py`: generazione proposte build per campioni

@@ -11,13 +11,14 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from enrichment_sources import SkillEnrichmentProvider, get_skill_enrichment_provider
 from forge_db import DB_PATH, ensure_schema, now_utc_iso, save_app_state
 from providers.hellhades_provider import HellHadesChampionMatch
+import providers.ayumilove_provider  # noqa: F401
 import providers.local_registry_provider  # noqa: F401
 
 LEVEL_LINE_RE = re.compile(r"^Level\s+\d+\s*:", re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
 BRACKET_EFFECT_RE = re.compile(r"\[([^\]]+)\]")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-DEFAULT_PROVIDER_ORDER = ("local_registry", "hellhades")
+DEFAULT_PROVIDER_ORDER = ("local_registry", "ayumilove", "hellhades")
 
 
 def html_to_text(value: Any) -> str:

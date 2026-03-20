@@ -448,6 +448,7 @@ def test_auto_provider_prefers_local_registry_before_hellhades(tmp_path: Path) -
     bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
 
     original_local = get_skill_enrichment_provider("local_registry")
+    original_ayumi = get_skill_enrichment_provider("ayumilove")
     original_hh = get_skill_enrichment_provider("hellhades")
 
     class LocalProvider:
@@ -474,16 +475,31 @@ def test_auto_provider_prefers_local_registry_before_hellhades(tmp_path: Path) -
                 {"name": "HH A2", "type": "Active", "cooldown": 4, "description": "<p>Places a [Weaken] debuff.</p>", "effects": []},
             ]
 
+    class AyumiLoveProvider:
+        source_name = "ayumilove"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, champion_name, champion_name, "https://example.invalid/ayumi")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "Ayumi A1", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Leech] debuff.</p>", "effects": []},
+                {"name": "Ayumi A2", "type": "Active", "cooldown": 4, "description": "<p>Places a [Fear] debuff.</p>", "effects": []},
+            ]
+
     register_skill_enrichment_provider(LocalProvider())
+    register_skill_enrichment_provider(AyumiLoveProvider())
     register_skill_enrichment_provider(HellHadesProvider())
     try:
         summary = enrich_registry_from_source("auto", db_path=db_path)
     finally:
         register_skill_enrichment_provider(original_local)
+        register_skill_enrichment_provider(original_ayumi)
         register_skill_enrichment_provider(original_hh)
 
     assert summary["provider"] == "auto"
     assert summary["provider_hits"]["local_registry"] == 1
+    assert summary["provider_hits"]["ayumilove"] == 0
     assert summary["provider_hits"]["hellhades"] == 0
 
     with sqlite3.connect(db_path) as conn:
@@ -531,6 +547,7 @@ def test_auto_provider_falls_back_to_hellhades_when_local_registry_missing(tmp_p
     bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
 
     original_local = get_skill_enrichment_provider("local_registry")
+    original_ayumi = get_skill_enrichment_provider("ayumilove")
     original_hh = get_skill_enrichment_provider("hellhades")
 
     class EmptyLocalProvider:
@@ -553,15 +570,120 @@ def test_auto_provider_falls_back_to_hellhades_when_local_registry_missing(tmp_p
                 {"name": "HH A1", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Decrease DEF] debuff.</p>", "effects": []},
             ]
 
+    class AyumiLoveProvider:
+        source_name = "ayumilove"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, champion_name, champion_name, "https://example.invalid/ayumi")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "Ayumi A1", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Leech] debuff.</p>", "effects": []},
+            ]
+
     register_skill_enrichment_provider(EmptyLocalProvider())
+    register_skill_enrichment_provider(AyumiLoveProvider())
     register_skill_enrichment_provider(HellHadesProvider())
     try:
         summary = enrich_registry_from_source("auto", db_path=db_path)
     finally:
         register_skill_enrichment_provider(original_local)
+        register_skill_enrichment_provider(original_ayumi)
         register_skill_enrichment_provider(original_hh)
 
     assert summary["provider_hits"]["local_registry"] == 0
+    assert summary["provider_hits"]["ayumilove"] == 1
+    assert summary["provider_hits"]["hellhades"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT skill_name, source
+            FROM champion_skills
+            WHERE champion_name = 'Geomancer'
+            ORDER BY skill_order ASC
+            """
+        ).fetchall()
+
+    assert rows == [("Ayumi A1", "ayumilove")]
+
+
+def test_auto_provider_falls_back_to_hellhades_when_ayumilove_missing(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 50000},
+                "equipped_item_ids": [],
+                "skills": [
+                    {"slot": "A1", "skill_id": "48801", "name": "48801", "effects": []},
+                ],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    original_local = get_skill_enrichment_provider("local_registry")
+    original_ayumi = get_skill_enrichment_provider("ayumilove")
+    original_hh = get_skill_enrichment_provider("hellhades")
+
+    class EmptyLocalProvider:
+        source_name = "local_registry"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return None
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return []
+
+    class EmptyAyumiLoveProvider:
+        source_name = "ayumilove"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return None
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return []
+
+    class HellHadesProvider:
+        source_name = "hellhades"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, "17837", champion_name, "https://example.invalid/hh")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "HH A1", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Decrease DEF] debuff.</p>", "effects": []},
+            ]
+
+    register_skill_enrichment_provider(EmptyLocalProvider())
+    register_skill_enrichment_provider(EmptyAyumiLoveProvider())
+    register_skill_enrichment_provider(HellHadesProvider())
+    try:
+        summary = enrich_registry_from_source("auto", db_path=db_path)
+    finally:
+        register_skill_enrichment_provider(original_local)
+        register_skill_enrichment_provider(original_ayumi)
+        register_skill_enrichment_provider(original_hh)
+
+    assert summary["provider_hits"]["local_registry"] == 0
+    assert summary["provider_hits"]["ayumilove"] == 0
     assert summary["provider_hits"]["hellhades"] == 1
 
     with sqlite3.connect(db_path) as conn:
