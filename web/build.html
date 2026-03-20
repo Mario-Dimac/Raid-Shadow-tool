@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CB Forge Build</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="hero">
+        <div class="eyebrow">CB Forge</div>
+        <h1>Build Lab</h1>
+        <p class="subtext">Scegli un campione, imposta il profilo build e confronta attuale vs proposte con delta veri.</p>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Campioni</a>
+          <a class="nav-link" href="/gear">Equip</a>
+          <a class="nav-link active" href="/build">Build</a>
+        </div>
+      </div>
+      <div class="toolbar">
+        <input id="buildSearch" type="search" placeholder="Cerca campione...">
+        <select id="buildSort">
+          <option value="power">Ordina per livello/rank</option>
+          <option value="name">Ordina per nome</option>
+        </select>
+      </div>
+      <div id="buildStatus" class="status"></div>
+      <div id="buildRoster" class="roster"></div>
+    </aside>
+
+    <main class="panel main">
+      <section id="buildSummary" class="summary"></section>
+      <section class="main-toolbar">
+        <select id="profileSelect"></select>
+        <button id="buildCalcBtn" class="primary">Calcola build</button>
+        <button id="buildReloadBtn" class="ghost">Ricarica vista</button>
+      </section>
+      <section id="buildDetails" class="details">
+        <div class="empty">Seleziona un campione dalla lista per vedere build attuale e proposte.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/build.js"></script>
+</body>
+</html>

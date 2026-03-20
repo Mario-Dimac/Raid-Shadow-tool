@@ -1,0 +1,190 @@
+CB FORGE - ANTEPRIMA DATABASE ANALYTICS
+Data: 2026-03-15
+
+SCOPO
+Questo file serve solo per farti vedere "come appariranno" i dati dentro il database SQLite.
+Il database NON sostituisce i file raw: i JSON e i capture restano il materiale sorgente.
+
+RAW CHE RESTANO SU DISCO
+- input/cb_manual_runs.jsonl
+- input/battle_result_captures/*.bin
+- input/battle_result_captures/*.json
+- input/battle_result_captures/*.meta.json
+- input/loadout_snapshots/*.json
+
+IDEA BASE
+Ogni run salvata nel jsonl verra' spezzata in piu' tabelle:
+- 1 riga principale in runs
+- 0..5 righe in run_champions
+- 0..5 righe in run_damage
+- 0..molte righe in run_events
+- 1 riga in run_raw_assets
+
+TABELLA 1 - runs
+Serve per la vista principale dello storico.
+
+Campi previsti:
+- id
+- saved_at
+- source
+- team_name
+- difficulty
+- affinity
+- damage
+- damage_known
+- boss_turn
+- battle_id
+- started_at
+- ended_at
+- elapsed_seconds
+- snapshot_path
+- loadout_latest_path
+- loadout_saved_at
+- notes
+
+ESEMPIO REALE
+Questa e' la run piu' recente trovata nello storico al momento:
+
+runs
+id: 8
+saved_at: 2026-03-15T07:29:56+00:00
+source: recovered_session
+team_name: Alice the Wanderer / Rowan + 2
+difficulty:
+affinity:
+damage: 90005.8
+damage_known: true
+boss_turn: 0
+battle_id: 62350770-5c43-43bc-a058-266df2ee6099
+started_at:
+ended_at: 2026-03-15T07:29:56+00:00
+elapsed_seconds: 0
+snapshot_path: D:\Programmi python\CB Forge\input\loadout_snapshots\...
+loadout_latest_path: D:\Programmi python\CB Forge\input\latest_loadout_snapshot.json
+loadout_saved_at: ...
+notes:
+
+TABELLA 2 - run_champions
+Serve per sapere chi c'era in squadra, in che slot, e con quale nome.
+
+Campi previsti:
+- id
+- run_id
+- slot
+- champion_name
+- champion_type_id
+- found_in_snapshot
+
+ESEMPIO REALE
+run_champions
+run_id: 8 | slot: 1 | champion_name: Alice the Wanderer | champion_type_id: null | found_in_snapshot: true
+run_id: 8 | slot: 2 | champion_name: Rowan | champion_type_id: null | found_in_snapshot: true
+run_id: 8 | slot: 3 | champion_name: Terrorbeast | champion_type_id: null | found_in_snapshot: true
+run_id: 8 | slot: 4 | champion_name: Hurler | champion_type_id: null | found_in_snapshot: true
+
+NOTA
+Nel dato corrente questa run recuperata ha 4 membri, non 5.
+Il database dovra' rispettare il dato reale disponibile, senza inventare il quinto slot.
+
+TABELLA 3 - run_damage
+Serve per l'analisi del contributo per campione.
+
+Campi previsti:
+- id
+- run_id
+- champion_name
+- slot
+- damage
+- raw_value
+- source_field
+- confidence
+- path
+
+ESEMPIO REALE
+run_damage
+run_id: 8 | slot: 1 | champion_name: Alice the Wanderer | damage: 54786.4 | raw_value: 235305796241224 | source_field: h | confidence: heuristic | path: $.s.f.h[0].h
+run_id: 8 | slot: 2 | champion_name: Rowan | damage: 12012.0 | raw_value: 51591147147540 | source_field: h | confidence: heuristic | path: $.s.f.h[1].h
+run_id: 8 | slot: 3 | champion_name: Terrorbeast | damage: 14133.0 | raw_value: 60700772780235 | source_field: h | confidence: heuristic | path: $.s.f.h[2].h
+run_id: 8 | slot: 4 | champion_name: Hurler | damage: 9074.4 | raw_value: 38974251225330 | source_field: h | confidence: heuristic | path: $.s.f.h[3].h
+
+NOTA IMPORTANTE
+confidence = heuristic significa che il parser sta facendo il miglior match disponibile, ma non e' ancora "verita' assoluta".
+
+TABELLA 4 - run_events
+Serve per storicizzare feed live, turn_log e altri messaggi utili per analisi future.
+
+Campi previsti:
+- id
+- run_id
+- event_index
+- event_time
+- source
+- message
+
+ESEMPIO POSSIBILE
+run_events
+run_id: 8 | event_index: 1 | event_time: null | source: live_feed | message: [client-log] Change battle state [Loading -> Started]
+run_id: 8 | event_index: 2 | event_time: null | source: live_feed | message: [sqlite raidV2.db#123] {"type":"battle_start"}
+run_id: 8 | event_index: 3 | event_time: null | source: turn_log | message: stun boss ok
+
+NOTA
+Se una run non ha eventi, questa tabella puo' restare vuota per quella run.
+
+TABELLA 5 - run_raw_assets
+Serve a collegare ogni run ai file raw veri, senza perdere il riferimento.
+
+Campi previsti:
+- id
+- run_id
+- battle_result_meta_path
+- battle_result_bin_path
+- battle_result_json_path
+- loadout_snapshot_path
+- loadout_latest_path
+- end_snapshot_path
+- end_latest_path
+
+ESEMPIO REALE
+run_raw_assets
+run_id: 8
+battle_result_meta_path: D:\Programmi python\CB Forge\input\battle_result_captures\2026-03-15T07-29-50+00-00_62350770-5c43-43bc-a058-266df2ee6099_38444714e8.meta.json
+battle_result_bin_path: D:\Programmi python\CB Forge\input\battle_result_captures\2026-03-15T07-29-50+00-00_62350770-5c43-43bc-a058-266df2ee6099_38444714e8.bin
+battle_result_json_path: D:\Programmi python\CB Forge\input\battle_result_captures\2026-03-15T07-29-50+00-00_62350770-5c43-43bc-a058-266df2ee6099_38444714e8.json
+loadout_snapshot_path: D:\Programmi python\CB Forge\input\loadout_snapshots\...
+loadout_latest_path: D:\Programmi python\CB Forge\input\latest_loadout_snapshot.json
+end_snapshot_path: D:\Programmi python\CB Forge\input\loadout_snapshots\...
+end_latest_path: D:\Programmi python\CB Forge\input\latest_loadout_snapshot.json
+
+COME SI LEGGE MENTALMENTE
+Se apri il database, la vista pratica sara' questa:
+
+1. runs
+Qui vedi una riga per run: quando, che team, quanto danno, che origine ha.
+
+2. run_champions
+Qui vedi chi componeva quella run.
+
+3. run_damage
+Qui vedi chi ha contribuito quanto.
+
+4. run_events
+Qui vedi la cronologia tecnica dell'incontro.
+
+5. run_raw_assets
+Qui ritrovi il ponte verso i file raw originali.
+
+QUERY CHE POI POTREMO FARE
+- ultime run salvate
+- danno medio per team_name
+- danno medio per champion_name
+- miglior e peggior contributor
+- run con confidence = heuristic
+- run senza battle_result_json_path
+- confronto stesso team su piu' giorni
+
+MESSAGGIO IMPORTANTE
+Il database verra' popolato LEGGENDO i file raw, non cancellandoli.
+Quindi il piano corretto e':
+- tenere i JSON come archivio sorgente
+- creare SQLite come livello analytics
+- poter rigenerare il DB in qualsiasi momento se serve

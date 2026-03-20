@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Local runtime data
+data/
+input/
+
+# Legacy archive runtime and build outputs
+old/**/bin/
+old/**/obj/
+old/**/input_runtime/
+old/**/vendor/
+old/**/*.dll
+old/**/*.exe
+old/**/*.pdb
+old/**/*.deps.json
+old/**/*.runtimeconfig.json
+old/**/*.cache
+old/**/*.bin
+old/**/*.png
+
+# Local environment
+.env
+.venv/
+venv/
+
+# OS / editors
+Thumbs.db
+.DS_Store

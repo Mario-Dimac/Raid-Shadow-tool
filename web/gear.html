@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CB Forge Equip</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="hero">
+        <div class="eyebrow">CB Forge</div>
+        <h1>Equip Database</h1>
+        <p class="subtext">Inventario completo dei tuoi pezzi, sia addosso ai campioni sia in magazzino.</p>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Campioni</a>
+          <a class="nav-link active" href="/gear">Equip</a>
+          <a class="nav-link" href="/build">Build</a>
+        </div>
+      </div>
+      <div class="toolbar">
+        <input id="gearSearch" type="search" placeholder="Cerca set, owner, stat, id...">
+        <select id="ownership">
+          <option value="all">Tutti i pezzi</option>
+          <option value="equipped">Solo equipaggiati</option>
+          <option value="inventory">Solo magazzino</option>
+        </select>
+        <select id="itemClassFilter">
+          <option value="">Tutti i tipi</option>
+          <option value="artifact">Artifact</option>
+          <option value="accessory">Accessori</option>
+        </select>
+        <select id="slotFilter">
+          <option value="">Tutti gli slot</option>
+        </select>
+        <select id="setFilter">
+          <option value="">Tutti i set</option>
+        </select>
+        <select id="adviceFilter">
+          <option value="">Tutti i verdict</option>
+          <option value="push_12">Da portare a +12</option>
+          <option value="push_16">Da portare a +16</option>
+          <option value="keep_after_12">Da tenere a +12</option>
+          <option value="review_pre12">Rivedere +8/+11</option>
+          <option value="sell_now">Vendere subito</option>
+          <option value="sell_after_12">Vendere dopo +12</option>
+          <option value="review_equipped">Rivedere equipaggiato</option>
+          <option value="keep_16">Tenere +16</option>
+          <option value="review_16">Rivedere +16</option>
+        </select>
+        <select id="gearSort">
+          <option value="rank">Ordina per rank/livello</option>
+          <option value="advice">Ordina per consiglio</option>
+          <option value="slot">Ordina per slot</option>
+          <option value="set">Ordina per set</option>
+          <option value="owner">Ordina per owner</option>
+        </select>
+      </div>
+      <div id="gearStatus" class="status"></div>
+      <div id="gearList" class="roster"></div>
+    </aside>
+
+    <main class="panel main">
+      <section id="gearSummary" class="summary"></section>
+      <section class="main-toolbar">
+        <button id="gearRefreshGameBtn" class="primary">Aggiorna Equip Dal Game</button>
+        <button id="gearReloadBtn" class="ghost">Ricarica inventario</button>
+      </section>
+      <section id="sellAssist" class="details"></section>
+      <section id="gearDetails" class="details">
+        <div class="empty">Seleziona un pezzo dalla lista per vedere owner, stat principale e substat.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/gear.js"></script>
+</body>
+</html>
