@@ -106,6 +106,10 @@ Priorita' attuali:
 - aggiungere una vista piu' operativa per gli upgrade gear realmente perseguibili
 - consolidare la sell queue e il flusso di refresh da sorgente live
 
+Roadmap dedicata:
+
+- vedi `HELLHADES_DECOUPLING_PLAN.md`
+
 Roadmap successiva:
 
 - registry campioni e skill completamente affidabile
