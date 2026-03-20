@@ -4,8 +4,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+from enrichment_sources import ChampionSkillMatch, register_skill_enrichment_provider
 from forge_db import bootstrap_database, refresh_account_stat_models
-from hellhades_enrich import HellHadesChampionMatch, enrich_registry_from_hellhades
+from hellhades_enrich import HellHadesChampionMatch, enrich_registry_from_hellhades, enrich_registry_from_source
 
 
 def test_bootstrap_database_builds_relational_tables(tmp_path: Path) -> None:
@@ -266,6 +267,102 @@ def test_hellhades_enrichment_updates_skills_and_effects(tmp_path: Path, monkeyp
     assert "hp_burn" in effect_types
     assert "weaken" in effect_types
     assert "block_debuffs" in effect_types
+
+
+def test_enrichment_can_run_through_generic_provider_layer(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 50000},
+                "equipped_item_ids": [],
+                "skills": [
+                    {"slot": "A1", "skill_id": "48801", "name": "48801", "effects": []},
+                    {"slot": "A2", "skill_id": "48802", "name": "48802", "effects": []},
+                ],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    class FakeProvider:
+        source_name = "fake-provider"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(
+                source_name=self.source_name,
+                source_ref="9001",
+                title=champion_name,
+                url="https://example.invalid/champions/geomancer",
+            )
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {
+                    "name": "Provider A1",
+                    "type": "Basic",
+                    "cooldown": 0,
+                    "description": "<p>Places a [Decrease DEF] debuff for 2 turns.</p>",
+                    "books": [],
+                },
+                {
+                    "name": "Provider A2",
+                    "type": "Active",
+                    "cooldown": 4,
+                    "description": "<p>Places a [HP Burn] debuff for 3 turns.</p>",
+                    "books": [],
+                },
+            ]
+
+    register_skill_enrichment_provider(FakeProvider())
+
+    summary = enrich_registry_from_source("fake-provider", db_path=db_path)
+
+    assert summary["provider"] == "fake-provider"
+    assert summary["updated"] == 1
+
+    with sqlite3.connect(db_path) as conn:
+        skill_rows = conn.execute(
+            """
+            SELECT skill_name, skill_type, source
+            FROM champion_skills
+            WHERE champion_name = 'Geomancer'
+            ORDER BY skill_order ASC
+            """
+        ).fetchall()
+        effect_types = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT effect_type
+                FROM champion_skill_effects
+                WHERE champion_name = 'Geomancer'
+                """
+            ).fetchall()
+        }
+
+    assert skill_rows == [
+        ("Provider A1", "Basic", "fake-provider"),
+        ("Provider A2", "Active", "fake-provider"),
+    ]
+    assert "decrease_def" in effect_types
+    assert "hp_burn" in effect_types
 
 
 def test_bootstrap_derives_total_stats_when_raw_dump_is_empty(tmp_path: Path) -> None:
