@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from enrichment_sources import ChampionSkillMatch, get_skill_enrichment_provider, register_skill_enrichment_provider
-from forge_db import bootstrap_database, refresh_account_stat_models
+from forge_db import bootstrap_database, record_run_history, refresh_account_stat_models
 from hellhades_enrich import HellHadesChampionMatch, enrich_registry_from_hellhades, enrich_registry_from_source
 from providers.local_registry_provider import export_local_skill_registry
 
@@ -245,6 +245,174 @@ def test_bootstrap_database_rebuilds_without_unlinking_database_file(tmp_path: P
     assert db_path.exists()
     assert summary["account_champions"] == 0
     assert summary["app_state"] >= 1
+
+
+def test_bootstrap_database_exposes_run_history_tables(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+
+    summary = bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    assert summary["run_history_runs"] == 0
+    assert summary["run_history_members"] == 0
+    assert summary["run_history_member_stats"] == 0
+    assert summary["run_history_member_metrics"] == 0
+    assert summary["run_history_assets"] == 0
+    assert summary["run_history_events"] == 0
+
+
+def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    payload = {
+        "saved_at": "2026-03-22T11:07:06+00:00",
+        "source": "client_probe",
+        "battle_id": "dc24ce97-2906-49c1-95cc-cc97e190df9f",
+        "probe_session_slug": "20260322T110139Z",
+        "encounter_key": "dragons_lair_hard_10",
+        "encounter_name": "Dragon Hard 10",
+        "encounter_family": "dragon",
+        "area_region": "dragons_lair",
+        "game_mode": "dungeon",
+        "difficulty": "hard",
+        "stage_id": "2062010",
+        "stage_label": "Dragon Hard 10",
+        "stage_tier": 10,
+        "boss_affinity": "spirit",
+        "affinity_context": "fixed_stage_affinity",
+        "result_code": "win",
+        "success": True,
+        "completed": True,
+        "auto_play": True,
+        "formation_index": 0,
+        "team_name": "Dragon Hard 10 Fast Farm",
+        "team_hash": "dragon_h10_fast_01",
+        "leader_slot": 2,
+        "elapsed_seconds": 244.6,
+        "turns": 157,
+        "boss_turn": 0,
+        "total_damage": 314451.3,
+        "account_power": 196500.0,
+        "model_target": "optimize_dragon_hard_speed",
+        "labels": {"speed_bucket": "fast", "farm_viable": True},
+        "context": {"client": "raid_pc", "capture": "battleResults"},
+        "assets": [
+            {
+                "asset_kind": "battle_results_bin",
+                "asset_path": "input/live_storage_probe/20260322T110139Z/snapshots/battle_results/20260322T110658Z_battleResults_13528.bin",
+                "sha256": "abc123",
+                "size_bytes": 13528,
+                "captured_at": "2026-03-22T11:06:58+00:00",
+                "metadata": {"probe": "live_storage_probe"},
+            }
+        ],
+        "events": [
+            {
+                "event_time": "2026-03-22T11:06:58+00:00",
+                "event_type": "battle_results_captured",
+                "source_name": "live_storage_probe",
+                "value_numeric": 13528,
+                "payload": {"size": 13528},
+            }
+        ],
+        "members": [
+            {
+                "champ_id": "champ-rakka",
+                "champion_name": "Rakka Viletide",
+                "champion_type_id": 3666,
+                "role_hint": "support_revive",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 2,
+                "empowerment_level": 0,
+                "booked": True,
+                "build_fingerprint": "rakka_v1",
+                "set_summary": ["Feral", "Protection"],
+                "tags": ["run_stable", "reviver"],
+                "stats": {"hp": 81234, "spd": 251, "res": 525},
+                "metrics": {"damage_done": 46384.5, "damage_taken": 15872.4, "alive_at_end": 1},
+            },
+            {
+                "champ_id": "champ-jintoro",
+                "champion_name": "Jintoro",
+                "champion_type_id": 5836,
+                "role_hint": "boss_damage",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 4,
+                "empowerment_level": 0,
+                "booked": True,
+                "build_fingerprint": "jintoro_v2",
+                "set_summary": ["Merciless", "Cruel"],
+                "tags": ["damage_core"],
+                "stats": {"atk": 6230, "spd": 228, "crit_dmg": 281},
+                "metrics": {"damage_done": 129318.6, "damage_taken": 9442.1, "alive_at_end": 1},
+            },
+        ],
+    }
+
+    summary = record_run_history(payload, db_path=db_path)
+
+    assert summary["encounter_key"] == "dragons_lair_hard_10"
+    assert summary["battle_id"] == "dc24ce97-2906-49c1-95cc-cc97e190df9f"
+    assert summary["success"] is True
+    assert summary["members"] == 2
+    assert summary["events"] == 1
+    assert summary["assets"] == 1
+    assert summary["total_damage"] == 314451.3
+
+    with sqlite3.connect(db_path) as conn:
+        run_row = conn.execute(
+            """
+            SELECT source, encounter_family, area_region, game_mode, boss_affinity, model_target, labels_json
+            FROM run_history_runs
+            WHERE run_id = ?
+            """,
+            (summary["run_id"],),
+        ).fetchone()
+        stat_rows = conn.execute(
+            """
+            SELECT member_order, stat_name, stat_value
+            FROM run_history_member_stats
+            WHERE run_id = ?
+            ORDER BY member_order, stat_name
+            """,
+            (summary["run_id"],),
+        ).fetchall()
+        metric_rows = conn.execute(
+            """
+            SELECT member_order, damage_done, alive_at_end
+            FROM run_history_member_metrics
+            WHERE run_id = ?
+            ORDER BY member_order
+            """,
+            (summary["run_id"],),
+        ).fetchall()
+
+    assert run_row is not None
+    assert run_row[0] == "client_probe"
+    assert run_row[1] == "dragon"
+    assert run_row[2] == "dragons_lair"
+    assert run_row[3] == "dungeon"
+    assert run_row[4] == "spirit"
+    assert run_row[5] == "optimize_dragon_hard_speed"
+    assert json.loads(run_row[6])["farm_viable"] is True
+    assert stat_rows == [
+        (1, "hp", 81234.0),
+        (1, "res", 525.0),
+        (1, "spd", 251.0),
+        (2, "atk", 6230.0),
+        (2, "crit_dmg", 281.0),
+        (2, "spd", 228.0),
+    ]
+    assert metric_rows == [
+        (1, 46384.5, 1),
+        (2, 129318.6, 1),
+    ]
 
 
 def test_hellhades_enrichment_updates_skills_and_effects(tmp_path: Path, monkeypatch) -> None:

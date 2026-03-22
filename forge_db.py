@@ -753,6 +753,132 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS run_history_runs (
+        run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        saved_at TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_run_uid TEXT,
+        battle_id TEXT,
+        probe_session_slug TEXT,
+        encounter_key TEXT NOT NULL,
+        encounter_name TEXT,
+        encounter_family TEXT,
+        area_region TEXT,
+        game_mode TEXT,
+        difficulty TEXT,
+        stage_id TEXT,
+        stage_label TEXT,
+        stage_tier INTEGER,
+        boss_affinity TEXT,
+        affinity_context TEXT,
+        result_code TEXT,
+        success INTEGER NOT NULL DEFAULT 0,
+        completed INTEGER NOT NULL DEFAULT 0,
+        auto_play INTEGER NOT NULL DEFAULT 1,
+        formation_index INTEGER,
+        team_name TEXT,
+        team_hash TEXT,
+        leader_slot INTEGER,
+        elapsed_seconds REAL,
+        turns INTEGER,
+        boss_turn INTEGER,
+        total_damage REAL,
+        account_power REAL,
+        model_target TEXT,
+        feature_schema_version TEXT NOT NULL DEFAULT 'run_history_v1',
+        notes TEXT,
+        labels_json TEXT NOT NULL DEFAULT '{}',
+        context_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_members (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        champ_id TEXT,
+        champion_name TEXT NOT NULL,
+        champion_type_id INTEGER,
+        role_hint TEXT,
+        level INTEGER,
+        rank INTEGER,
+        awakening_level INTEGER,
+        empowerment_level INTEGER,
+        booked INTEGER NOT NULL DEFAULT 0,
+        build_fingerprint TEXT,
+        set_summary_json TEXT NOT NULL DEFAULT '[]',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        PRIMARY KEY (run_id, member_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_member_stats (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        stat_name TEXT NOT NULL,
+        stat_value REAL NOT NULL,
+        stat_source TEXT,
+        PRIMARY KEY (run_id, member_order, stat_name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_member_metrics (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        damage_done REAL NOT NULL DEFAULT 0,
+        damage_taken REAL NOT NULL DEFAULT 0,
+        healing_done REAL NOT NULL DEFAULT 0,
+        shields_done REAL NOT NULL DEFAULT 0,
+        buffs_applied INTEGER NOT NULL DEFAULT 0,
+        debuffs_applied INTEGER NOT NULL DEFAULT 0,
+        deaths INTEGER NOT NULL DEFAULT 0,
+        revives INTEGER NOT NULL DEFAULT 0,
+        alive_at_end INTEGER,
+        metric_payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, member_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_assets (
+        run_id INTEGER NOT NULL,
+        asset_order INTEGER NOT NULL,
+        asset_kind TEXT NOT NULL,
+        asset_path TEXT NOT NULL,
+        sha256 TEXT,
+        size_bytes INTEGER,
+        captured_at TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, asset_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_events (
+        run_id INTEGER NOT NULL,
+        event_index INTEGER NOT NULL,
+        event_time TEXT,
+        event_type TEXT,
+        source_name TEXT,
+        actor_slot INTEGER,
+        target_slot INTEGER,
+        skill_id TEXT,
+        skill_name TEXT,
+        value_numeric REAL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, event_index)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_history_runs_encounter
+    ON run_history_runs (encounter_key, difficulty, success, elapsed_seconds)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_history_runs_battle
+    ON run_history_runs (battle_id, source)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_history_members_name
+    ON run_history_members (champion_name)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS app_state (
         state_key TEXT PRIMARY KEY,
         state_value TEXT
@@ -1201,6 +1327,12 @@ def database_status(path: Path = DB_PATH) -> Dict[str, Any]:
         "combat_runs",
         "combat_run_members",
         "combat_sessions",
+        "run_history_runs",
+        "run_history_members",
+        "run_history_member_stats",
+        "run_history_member_metrics",
+        "run_history_assets",
+        "run_history_events",
         "app_state",
     )
     with sqlite3.connect(path) as conn:
@@ -1239,10 +1371,235 @@ def clear_all_tables(conn: sqlite3.Connection) -> None:
         "combat_run_members",
         "combat_runs",
         "combat_sessions",
+        "run_history_events",
+        "run_history_assets",
+        "run_history_member_metrics",
+        "run_history_member_stats",
+        "run_history_members",
+        "run_history_runs",
         "app_state",
     ):
         conn.execute(f"DELETE FROM {table}")
     conn.execute("DELETE FROM sqlite_sequence")
+
+
+def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    payload = dict_value(run_payload)
+    saved_at = optional_string(payload.get("saved_at")) or now_utc_iso()
+    source = optional_string(payload.get("source")) or "manual"
+    labels = dict_value(payload.get("labels"))
+    context = dict_value(payload.get("context"))
+    members = list_value(payload.get("members"))
+    assets = list_value(payload.get("assets"))
+    events = list_value(payload.get("events"))
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO run_history_runs (
+                saved_at, source, source_run_uid, battle_id, probe_session_slug,
+                encounter_key, encounter_name, encounter_family, area_region, game_mode,
+                difficulty, stage_id, stage_label, stage_tier, boss_affinity,
+                affinity_context, result_code, success, completed, auto_play,
+                formation_index, team_name, team_hash, leader_slot, elapsed_seconds,
+                turns, boss_turn, total_damage, account_power, model_target,
+                feature_schema_version, notes, labels_json, context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                saved_at,
+                source,
+                optional_string(first_non_empty(payload.get("source_run_uid"), payload.get("battle_id"))),
+                optional_string(payload.get("battle_id")),
+                optional_string(payload.get("probe_session_slug")),
+                optional_string(first_non_empty(payload.get("encounter_key"), payload.get("stage_id"), "unknown_encounter")) or "unknown_encounter",
+                optional_string(payload.get("encounter_name")),
+                optional_string(payload.get("encounter_family")),
+                optional_string(payload.get("area_region")),
+                optional_string(payload.get("game_mode")),
+                optional_string(payload.get("difficulty")),
+                optional_string(payload.get("stage_id")),
+                optional_string(payload.get("stage_label")),
+                nullable_int(payload.get("stage_tier")),
+                optional_string(payload.get("boss_affinity")),
+                optional_string(payload.get("affinity_context")),
+                optional_string(payload.get("result_code")),
+                1 if bool(payload.get("success")) else 0,
+                1 if bool(payload.get("completed", True)) else 0,
+                1 if bool(payload.get("auto_play", True)) else 0,
+                nullable_int(payload.get("formation_index")),
+                optional_string(payload.get("team_name")),
+                optional_string(payload.get("team_hash")),
+                nullable_int(payload.get("leader_slot")),
+                nullable_float(payload.get("elapsed_seconds")),
+                nullable_int(payload.get("turns")),
+                nullable_int(payload.get("boss_turn")),
+                nullable_float(payload.get("total_damage")),
+                nullable_float(payload.get("account_power")),
+                optional_string(payload.get("model_target")),
+                optional_string(payload.get("feature_schema_version")) or "run_history_v1",
+                optional_string(payload.get("notes")),
+                json_text(labels, {}),
+                json_text(context, {}),
+            ),
+        )
+        run_id = int(cursor.lastrowid)
+
+        for member_order, member in enumerate(members, start=1):
+            member_map = dict_value(member)
+            conn.execute(
+                """
+                INSERT INTO run_history_members (
+                    run_id, member_order, champ_id, champion_name, champion_type_id, role_hint,
+                    level, rank, awakening_level, empowerment_level, booked, build_fingerprint,
+                    set_summary_json, tags_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    member_order,
+                    optional_string(member_map.get("champ_id")),
+                    optional_string(first_non_empty(member_map.get("champion_name"), member_map.get("name"), f"slot_{member_order}")) or f"slot_{member_order}",
+                    nullable_int(first_non_empty(member_map.get("champion_type_id"), member_map.get("type_id"))),
+                    optional_string(first_non_empty(member_map.get("role_hint"), member_map.get("role"))),
+                    nullable_int(member_map.get("level")),
+                    nullable_int(member_map.get("rank")),
+                    nullable_int(member_map.get("awakening_level")),
+                    nullable_int(member_map.get("empowerment_level")),
+                    1 if bool(member_map.get("booked")) else 0,
+                    optional_string(member_map.get("build_fingerprint")),
+                    json_text(list_value(member_map.get("set_summary")), []),
+                    json_text(list_value(member_map.get("tags")), []),
+                ),
+            )
+
+            for stat_name, stat_value in sorted(dict_value(member_map.get("stats")).items()):
+                conn.execute(
+                    """
+                    INSERT INTO run_history_member_stats (
+                        run_id, member_order, stat_name, stat_value, stat_source
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        member_order,
+                        string_value(stat_name),
+                        float_value(stat_value),
+                        optional_string(member_map.get("stat_source")),
+                    ),
+                )
+
+            metrics = dict_value(member_map.get("metrics"))
+            if metrics:
+                conn.execute(
+                    """
+                    INSERT INTO run_history_member_metrics (
+                        run_id, member_order, damage_done, damage_taken, healing_done, shields_done,
+                        buffs_applied, debuffs_applied, deaths, revives, alive_at_end, metric_payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        member_order,
+                        float_value(metrics.get("damage_done")),
+                        float_value(metrics.get("damage_taken")),
+                        float_value(metrics.get("healing_done")),
+                        float_value(metrics.get("shields_done")),
+                        int_value(metrics.get("buffs_applied")),
+                        int_value(metrics.get("debuffs_applied")),
+                        int_value(metrics.get("deaths")),
+                        int_value(metrics.get("revives")),
+                        nullable_int(metrics.get("alive_at_end")),
+                        json_text(metrics, {}),
+                    ),
+                )
+
+        for asset_order, asset in enumerate(assets, start=1):
+            asset_map = dict_value(asset)
+            conn.execute(
+                """
+                INSERT INTO run_history_assets (
+                    run_id, asset_order, asset_kind, asset_path, sha256, size_bytes, captured_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    asset_order,
+                    optional_string(first_non_empty(asset_map.get("asset_kind"), asset_map.get("kind"), "unknown")) or "unknown",
+                    optional_string(first_non_empty(asset_map.get("asset_path"), asset_map.get("path"), f"asset_{asset_order}")) or f"asset_{asset_order}",
+                    optional_string(asset_map.get("sha256")),
+                    nullable_int(first_non_empty(asset_map.get("size_bytes"), asset_map.get("size"))),
+                    optional_string(asset_map.get("captured_at")),
+                    json_text(dict_value(asset_map.get("metadata")), {}),
+                ),
+            )
+
+        for event_index, event in enumerate(events, start=1):
+            event_map = dict_value(event)
+            conn.execute(
+                """
+                INSERT INTO run_history_events (
+                    run_id, event_index, event_time, event_type, source_name,
+                    actor_slot, target_slot, skill_id, skill_name, value_numeric, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    event_index,
+                    optional_string(event_map.get("event_time")),
+                    optional_string(event_map.get("event_type")),
+                    optional_string(first_non_empty(event_map.get("source_name"), event_map.get("source"))),
+                    nullable_int(event_map.get("actor_slot")),
+                    nullable_int(event_map.get("target_slot")),
+                    optional_string(event_map.get("skill_id")),
+                    optional_string(event_map.get("skill_name")),
+                    nullable_float(first_non_empty(event_map.get("value_numeric"), event_map.get("value"))),
+                    json_text(event_map, {}),
+                ),
+            )
+        conn.commit()
+
+    return run_history_summary(run_id=run_id, db_path=db_path)
+
+
+def run_history_summary(run_id: int, db_path: Path = DB_PATH) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT run_id, encounter_key, stage_id, battle_id, success, elapsed_seconds, total_damage
+            FROM run_history_runs
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return {}
+        member_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_members WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        event_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_events WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        asset_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_assets WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    return {
+        "run_id": int(row[0]),
+        "encounter_key": string_value(row[1]),
+        "stage_id": string_value(row[2]),
+        "battle_id": string_value(row[3]),
+        "success": bool(row[4]),
+        "elapsed_seconds": float_value(row[5]),
+        "total_damage": float_value(row[6]),
+        "members": int(member_count[0] if member_count else 0),
+        "events": int(event_count[0] if event_count else 0),
+        "assets": int(asset_count[0] if asset_count else 0),
+    }
 
 
 def refresh_account_stat_models(db_path: Path = DB_PATH) -> Dict[str, Any]:
@@ -1698,6 +2055,11 @@ def nullable_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def json_text(value: Any, fallback: Any) -> str:
+    normalized = value if isinstance(value, (dict, list)) else fallback
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
 
 def now_utc_iso() -> str:
