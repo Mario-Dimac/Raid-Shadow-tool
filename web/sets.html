@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CB Forge Sets</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="hero">
+        <div class="eyebrow">CB Forge</div>
+        <h1>Set Registry</h1>
+        <p class="subtext">Registro leggibile di regole set, bonus per soglia e presenza reale nel tuo inventario.</p>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Campioni</a>
+          <a class="nav-link" href="/gear">Equip</a>
+          <a class="nav-link" href="/build">Build</a>
+          <a class="nav-link active" href="/sets">Sets</a>
+          <a class="nav-link" href="/set-curation">Curation</a>
+        </div>
+      </div>
+      <div class="toolbar">
+        <input id="setSearch" type="search" placeholder="Cerca set o alias...">
+        <select id="setKindFilter">
+          <option value="">Tutti i tipi</option>
+          <option value="fixed">Fixed set</option>
+          <option value="variable">Variable set</option>
+          <option value="accessory">Accessory set</option>
+          <option value="unknown">Non classificati</option>
+        </select>
+        <select id="setObservedFilter">
+          <option value="all">Tutti i set</option>
+          <option value="observed">Solo presenti in inventario</option>
+          <option value="missing">Solo non osservati</option>
+        </select>
+      </div>
+      <div id="setStatus" class="status"></div>
+      <div id="setList" class="roster"></div>
+    </aside>
+
+    <main class="panel main">
+      <section id="setSummary" class="summary"></section>
+      <section class="main-toolbar">
+        <button id="setReloadBtn" class="ghost">Ricarica registro</button>
+        <a class="nav-link" href="/set-curation">Apri Curation</a>
+      </section>
+      <section id="setDetails" class="details">
+        <div class="empty">Seleziona un set dalla lista per vedere regole, soglie e copertura inventario.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/sets.js"></script>
+</body>
+</html>

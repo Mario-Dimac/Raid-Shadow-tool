@@ -6,6 +6,8 @@ from pathlib import Path
 import cbforge_web
 from cbforge_web import (
     build_gear_summary,
+    build_set_curation_payload,
+    build_set_registry,
     build_sell_queue_summary,
     build_web_summary,
     champion_detail,
@@ -256,10 +258,329 @@ def test_web_detail_exposes_derived_stats_and_warnings(tmp_path: Path) -> None:
     detail = champion_detail("Yumeko", db_path)
 
     assert detail["stat_model"]["source"] == "derived"
-    assert detail["stat_model"]["completeness"] == "partial"
-    assert detail["stat_model"]["unsupported_sets"] == ["Stone Skin"]
+    assert detail["stat_model"]["completeness"] == "derived"
+    assert detail["stat_model"]["unsupported_sets"] == []
+    assert detail["stat_model"]["applied_sets"] == [
+        {
+            "set_name": "Stone Skin",
+            "set_kind": "variable",
+            "pieces_required": 1,
+            "pieces_equipped": 1,
+            "completed_sets": 1,
+            "max_pieces": 9,
+            "active_bonus_count": 1,
+        }
+    ]
     assert detail["base_totals"]["hp"] == 30960.0
+    assert detail["total_stats"]["hp"] == 33436.8
     assert detail["total_stats"]["spd"] == 160.0
+
+
+def test_set_registry_exposes_fixed_and_variable_rules_with_inventory_counts(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Yumeko",
+                "rarity": "legendary",
+                "affinity": "void",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {},
+                "total_stats": {},
+                "equipped_item_ids": ["gear-1", "gear-2", "gear-3"],
+                "skills": [],
+            }
+        ],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "artifact",
+                "slot": "boots",
+                "set_name": "Attack Speed",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "spd", "value": 45},
+                "substats": [],
+            },
+            {
+                "item_id": "gear-1b",
+                "item_class": "artifact",
+                "slot": "gloves",
+                "set_name": "Attack Speed",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "hp_pct", "value": 60},
+                "substats": [],
+            },
+            {
+                "item_id": "gear-2",
+                "item_class": "artifact",
+                "slot": "weapon",
+                "set_name": "Stone Skin",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "atk", "value": 265},
+                "substats": [],
+            },
+            {
+                "item_id": "gear-3",
+                "item_class": "accessory",
+                "slot": "ring",
+                "set_name": "Stone Skin",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "hp", "value": 2650},
+                "substats": [],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    registry = build_set_registry(db_path)
+
+    assert registry["summary"]["total_sets"] >= 2
+    assert registry["summary"]["observed_sets"] >= 2
+    speed = next(row for row in registry["sets"] if row["set_name"] == "Attack Speed")
+    stoneskin = next(row for row in registry["sets"] if row["set_name"] == "Stone Skin")
+
+    assert speed["display_name"] == "Speed"
+    assert speed["set_kind"] == "fixed"
+    assert speed["counts_accessories"] is False
+    assert speed["inventory"]["artifact_items"] == 2
+    assert speed["inventory"]["accessory_items"] == 0
+    assert speed["progress"]["relevant_total_items"] == 2
+    assert speed["progress"]["relevant_inventory_items"] == 1
+    assert speed["progress"]["complete_sets_total"] == 1
+    assert speed["progress"]["complete_sets_inventory"] == 0
+    assert speed["stats"] == [{"stat_type": "spd", "stat_value": 12.0}]
+
+    assert stoneskin["set_kind"] == "variable"
+    assert stoneskin["counts_accessories"] is True
+    assert stoneskin["inventory"]["artifact_items"] == 1
+    assert stoneskin["inventory"]["accessory_items"] == 1
+    assert stoneskin["progress"]["relevant_total_items"] == 2
+    assert stoneskin["progress"]["highest_bonus_threshold_total"] == 2
+    assert stoneskin["progress"]["next_threshold_total"] == 3
+    assert stoneskin["progress"]["missing_for_next_total"] == 1
+    assert any(row["pieces_required"] == 1 for row in stoneskin["piece_bonuses"])
+    assert any(row["pieces_required"] == 4 and row["effects"] for row in stoneskin["piece_bonuses"])
+
+
+def test_set_registry_classifies_counterattack_accessory_set(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [],
+        "gear": [
+            {
+                "item_id": "acc-1",
+                "item_class": "accessory",
+                "slot": "ring",
+                "set_name": "Counterattack Accessory",
+                "rarity": "epic",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "hp", "value": 2650},
+                "substats": [],
+            },
+            {
+                "item_id": "acc-2",
+                "item_class": "accessory",
+                "slot": "amulet",
+                "set_name": "Counterattack Accessory",
+                "rarity": "epic",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "atk", "value": 265},
+                "substats": [],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    registry = build_set_registry(db_path)
+    counter = next(row for row in registry["sets"] if row["set_name"] == "Counterattack Accessory")
+
+    assert counter["display_name"] == "Revenge Accessory"
+    assert counter["set_kind"] == "accessory"
+    assert counter["counts_accessories"] is True
+    assert counter["summary"].startswith("Accessory set 1/2/3")
+    assert counter["progress"]["relevant_total_items"] == 2
+    assert counter["progress"]["highest_bonus_threshold_total"] == 2
+    assert counter["progress"]["next_threshold_total"] == 3
+    assert counter["progress"]["missing_for_next_total"] == 1
+    assert counter["piece_bonuses"][0]["effects"] == ["5% chance to counterattack when hit"]
+
+
+def test_set_curation_payload_exposes_observed_pieces_and_owners(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Yumeko",
+                "rarity": "legendary",
+                "affinity": "void",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": [],
+                "base_stats": {},
+                "total_stats": {},
+                "equipped_item_ids": ["gear-1"],
+                "skills": [],
+            }
+        ],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "artifact",
+                "slot": "boots",
+                "set_name": "Block Heal Chance",
+                "rarity": "epic",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "spd", "value": 45},
+                "substats": [],
+            },
+            {
+                "item_id": "gear-2",
+                "item_class": "artifact",
+                "slot": "gloves",
+                "set_name": "Block Heal Chance",
+                "rarity": "epic",
+                "rank": 6,
+                "level": 12,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "crit_rate", "value": 50},
+                "substats": [],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    curation = build_set_curation_payload(db_path)
+    row = next(item for item in curation["items"] if item["set_name"] == "Block Heal Chance")
+
+    assert row["inventory"]["total_items"] == 2
+    assert row["observed_samples"]["slot_counts"] == [
+        {"slot": "gloves", "count": 1},
+        {"slot": "boots", "count": 1},
+    ]
+    assert row["observed_samples"]["owner_counts"] == [
+        {"owner_name": "Yumeko", "count": 1},
+    ]
+    assert row["observed_samples"]["sample_items"][0]["slot"] == "boots"
+    assert row["observed_samples"]["sample_items"][0]["owner_name"] == "Yumeko"
+    assert row["observed_samples"]["sample_items"][1]["slot"] == "gloves"
+    assert row["observed_samples"]["sample_items"][1]["equipped"] is False
+
+
+def test_set_registry_prefers_canonical_name_when_display_matches_raw(tmp_path: Path, monkeypatch) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "artifact",
+                "slot": "boots",
+                "set_name": "Heal",
+                "rarity": "epic",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "spd", "value": 45},
+                "substats": [],
+            }
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+    monkeypatch.setattr(
+        cbforge_web,
+        "load_local_set_entries",
+        lambda: [
+            {
+                "set_name": "Heal",
+                "canonical_name": "Regeneration",
+                "display_name": "Heal",
+            }
+        ],
+    )
+
+    registry = build_set_registry(db_path)
+    heal = next(row for row in registry["sets"] if row["set_name"] == "Heal")
+
+    assert heal["display_name"] == "Regeneration"
+    assert heal["canonical_name"] == "Regeneration"
 
 
 def test_gear_queries_cover_equipped_and_inventory_items(tmp_path: Path) -> None:

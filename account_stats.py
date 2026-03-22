@@ -5,6 +5,85 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 
 CORE_STATS = ("hp", "atk", "def", "spd", "acc", "res", "crit_rate", "crit_dmg")
+BASIC_ARTIFACT_SET_NAMES = {
+    "HP",
+    "Attack Power",
+    "Defense",
+    "Attack Speed",
+    "Critical Chance",
+    "Critical Heal Multiplier",
+    "Accuracy",
+    "Resistance",
+}
+STATIC_MASTERY_BONUSES = {
+    "500112": [("atk", 75.0)],
+    "500113": [("crit_rate", 5.0)],
+    "500122": [("crit_dmg", 10.0)],
+    "500164": [("crit_dmg", 20.0)],
+    "500212": [("def", 75.0)],
+    "500213": [("res", 10.0)],
+    "500261": [("def", 200.0)],
+    "500264": [("res", 50.0)],
+    "500312": [("hp", 810.0)],
+    "500313": [("acc", 10.0)],
+    "500361": [("hp", 3000.0)],
+    "500364": [("acc", 50.0)],
+}
+LORE_OF_STEEL_ID = "500343"
+AWAKENING_BONUSES_BY_RARITY = {
+    "rare": {
+        1: [("hp", 2250.0)],
+        2: [("atk", 450.0)],
+        3: [("def", 300.0)],
+        4: [("hp", 1000.0), ("crit_dmg", 23.0)],
+        5: [("acc", 40.0), ("res", 40.0)],
+        6: [("spd", 7.0)],
+    },
+    "epic": {
+        1: [("hp", 4500.0)],
+        2: [("atk", 600.0)],
+        3: [("def", 450.0)],
+        4: [("hp", 1000.0), ("crit_dmg", 30.0)],
+        5: [("acc", 60.0), ("res", 60.0)],
+        6: [("spd", 10.0)],
+    },
+    "legendary": {
+        1: [("hp", 7500.0)],
+        2: [("atk", 750.0)],
+        3: [("def", 600.0)],
+        4: [("hp", 1000.0), ("crit_dmg", 38.0)],
+        5: [("acc", 75.0), ("res", 75.0)],
+        6: [("spd", 15.0)],
+    },
+    "mythical": {
+        1: [("hp", 10500.0)],
+        2: [("atk", 900.0)],
+        3: [("def", 750.0)],
+        4: [("hp", 1000.0), ("crit_dmg", 45.0)],
+        5: [("acc", 90.0), ("res", 90.0)],
+        6: [("spd", 20.0)],
+    },
+}
+EMPOWERMENT_BONUSES_BY_RARITY = {
+    "epic": {
+        1: [("hp_pct", 10.0), ("atk_pct", 10.0), ("def_pct", 10.0), ("acc", 10.0), ("res", 10.0)],
+        2: [("hp_pct", 20.0), ("atk_pct", 20.0), ("def_pct", 20.0), ("acc", 20.0), ("res", 20.0), ("spd", 5.0), ("crit_dmg", 5.0)],
+        3: [("hp_pct", 30.0), ("atk_pct", 30.0), ("def_pct", 30.0), ("acc", 30.0), ("res", 30.0), ("spd", 5.0)],
+        4: [("hp_pct", 40.0), ("atk_pct", 40.0), ("def_pct", 40.0), ("acc", 40.0), ("res", 40.0), ("spd", 10.0), ("crit_dmg", 15.0), ("crit_rate", 5.0)],
+    },
+    "legendary": {
+        1: [("hp_pct", 10.0), ("atk_pct", 10.0), ("def_pct", 10.0), ("acc", 15.0), ("res", 15.0)],
+        2: [("hp_pct", 20.0), ("atk_pct", 20.0), ("def_pct", 20.0), ("acc", 25.0), ("res", 25.0), ("spd", 10.0)],
+        3: [("hp_pct", 30.0), ("atk_pct", 30.0), ("def_pct", 30.0), ("acc", 45.0), ("res", 45.0), ("spd", 10.0)],
+        4: [("hp_pct", 40.0), ("atk_pct", 40.0), ("def_pct", 40.0), ("acc", 55.0), ("res", 55.0), ("spd", 15.0), ("crit_dmg", 30.0), ("crit_rate", 10.0)],
+    },
+    "mythical": {
+        1: [("hp_pct", 10.0), ("atk_pct", 10.0), ("def_pct", 10.0), ("acc", 15.0), ("res", 15.0)],
+        2: [("hp_pct", 20.0), ("atk_pct", 20.0), ("def_pct", 20.0), ("acc", 25.0), ("res", 25.0), ("spd", 10.0)],
+        3: [("hp_pct", 30.0), ("atk_pct", 30.0), ("def_pct", 30.0), ("acc", 45.0), ("res", 45.0), ("spd", 10.0)],
+        4: [("hp_pct", 40.0), ("atk_pct", 40.0), ("def_pct", 40.0), ("acc", 55.0), ("res", 55.0), ("spd", 15.0), ("crit_dmg", 30.0), ("crit_rate", 10.0)],
+    },
+}
 
 
 @dataclass
@@ -23,10 +102,16 @@ def build_stat_computation(
     equipped_items: Iterable[Mapping[str, Any]],
     bonuses: Iterable[Mapping[str, Any]],
     set_rules: Mapping[str, Mapping[str, Any]],
+    masteries: Iterable[Mapping[str, Any]] | None = None,
     affinity: str = "",
+    rarity: str = "",
+    awakening_level: int = 0,
+    empowerment_level: int = 0,
+    area_region: str = "",
 ) -> StatComputationResult:
     equipped_items = list(equipped_items)
     bonuses = list(bonuses)
+    masteries = list(masteries or [])
     base_totals = materialize_base_totals(base_stats)
     applied_sets, unsupported_sets = summarize_sets(equipped_items, set_rules)
 
@@ -46,7 +131,12 @@ def build_stat_computation(
             equipped_items=equipped_items,
             bonuses=bonuses,
             set_rules=set_rules,
+            masteries=masteries,
             affinity=affinity,
+            rarity=rarity,
+            awakening_level=awakening_level,
+            empowerment_level=empowerment_level,
+            area_region=area_region,
         )
         completeness = "partial" if unsupported_sets else "derived"
         return StatComputationResult(
@@ -95,11 +185,25 @@ def derive_total_stats(
     equipped_items: Iterable[Mapping[str, Any]],
     bonuses: Iterable[Mapping[str, Any]],
     set_rules: Mapping[str, Mapping[str, Any]],
+    masteries: Iterable[Mapping[str, Any]] | None = None,
     affinity: str = "",
+    rarity: str = "",
+    awakening_level: int = 0,
+    empowerment_level: int = 0,
+    area_region: str = "",
 ) -> Dict[str, float]:
     base_totals = materialize_base_totals(base_stats)
     flat_totals = {stat_name: 0.0 for stat_name in CORE_STATS}
     percent_totals = {"hp": 0.0, "atk": 0.0, "def": 0.0, "spd": 0.0}
+    mastery_ids = active_mastery_ids(masteries or [])
+    lore_of_steel_active = LORE_OF_STEEL_ID in mastery_ids
+
+    for mastery_id in mastery_ids:
+        for stat_type, stat_value in STATIC_MASTERY_BONUSES.get(mastery_id, []):
+            apply_stat_value(flat_totals, percent_totals, stat_type, stat_value)
+
+    for stat_type, stat_value in awakening_bonus_stats(rarity, awakening_level):
+        apply_stat_value(flat_totals, percent_totals, stat_type, stat_value)
 
     for item in equipped_items:
         main_stat = mapping_value(item.get("main_stat"))
@@ -112,19 +216,39 @@ def derive_total_stats(
     applied_sets, _unsupported_sets = summarize_sets(equipped_items, set_rules)
     for applied_set in applied_sets:
         rule = mapping_value(set_rules.get(str(applied_set.get("set_name"))))
+        set_kind = string_value(first_non_empty(applied_set.get("set_kind"), rule.get("set_kind"))).strip().lower() or "fixed"
+        if set_kind in {"variable", "accessory"}:
+            pieces_equipped = int_value(applied_set.get("pieces_equipped"))
+            for piece_bonus in list_value(rule.get("piece_bonuses")):
+                if pieces_equipped < int_value(piece_bonus.get("pieces_required")):
+                    continue
+                for stat_type, stat_value in list_value(piece_bonus.get("stats")):
+                    apply_stat_value(flat_totals, percent_totals, stat_type, stat_value)
+            continue
+
         completed_sets = int_value(applied_set.get("completed_sets"))
         for stat_type, stat_value in list_value(rule.get("stats")):
             amount = float_value(stat_value) * completed_sets
+            if lore_of_steel_active and set_name_uses_basic_artifact_bonus(str(applied_set.get("set_name") or "")):
+                amount *= 1.15
             apply_stat_value(flat_totals, percent_totals, stat_type, amount)
 
     champion_affinity = string_value(affinity).strip().lower() or "void"
+    normalized_area_region = string_value(area_region).strip().lower()
     for bonus in bonuses:
         if not bool_value(bonus.get("active"), True):
             continue
+        scope = string_value(bonus.get("scope")).strip().lower() or "global"
         target = string_value(bonus.get("target")).strip().lower() or "all"
-        if target not in {"all", champion_affinity}:
+        if scope == "area":
+            if not normalized_area_region or target not in {"all", normalized_area_region}:
+                continue
+        elif target not in {"all", champion_affinity}:
             continue
         apply_stat_value(flat_totals, percent_totals, bonus.get("stat"), bonus.get("value"))
+
+    for stat_type, stat_value in empowerment_bonus_stats(rarity, empowerment_level):
+        apply_stat_value(flat_totals, percent_totals, stat_type, stat_value)
 
     totals = {
         "hp": base_totals["hp"] * (1.0 + percent_totals["hp"] / 100.0) + flat_totals["hp"],
@@ -146,12 +270,18 @@ def summarize_sets(
     equipped_items: Iterable[Mapping[str, Any]],
     set_rules: Mapping[str, Mapping[str, Any]],
 ) -> tuple[List[Dict[str, Any]], List[str]]:
-    counts: Dict[str, int] = {}
+    counts: Dict[str, Dict[str, int]] = {}
     for item in equipped_items:
         set_name = string_value(item.get("set_name")).strip()
         if not set_name:
             continue
-        counts[set_name] = counts.get(set_name, 0) + 1
+        bucket = counts.setdefault(set_name, {"all": 0, "artifact": 0, "accessory": 0})
+        bucket["all"] += 1
+        item_class = string_value(item.get("item_class")).strip().lower()
+        if item_class == "accessory":
+            bucket["accessory"] += 1
+        else:
+            bucket["artifact"] += 1
 
     applied_sets: List[Dict[str, Any]] = []
     unsupported_sets: List[str] = []
@@ -160,22 +290,56 @@ def summarize_sets(
         if not rule:
             unsupported_sets.append(set_name)
             continue
+        set_kind = string_value(rule.get("set_kind")).strip().lower() or "fixed"
+        counts_accessories = bool_value(rule.get("counts_accessories"))
+        pieces_equipped = counts[set_name]["all"] if counts_accessories else counts[set_name]["artifact"]
+        if pieces_equipped <= 0:
+            continue
+
+        if set_kind in {"variable", "accessory"}:
+            active_effects = [
+                string_value(piece_bonus.get("effect_text")).strip()
+                for piece_bonus in list_value(rule.get("piece_bonuses"))
+                if pieces_equipped >= int_value(piece_bonus.get("pieces_required"))
+                and string_value(piece_bonus.get("effect_text")).strip()
+            ]
+            if active_effects:
+                unsupported_sets.append(set_name)
+            applied_sets.append(
+                {
+                    "set_name": set_name,
+                    "set_kind": set_kind,
+                    "pieces_required": 1,
+                    "pieces_equipped": pieces_equipped,
+                    "completed_sets": 1,
+                    "max_pieces": int_value(first_non_empty(rule.get("max_pieces"), 9 if set_kind == "variable" else 3)),
+                    "active_bonus_count": sum(
+                        1
+                        for piece_bonus in list_value(rule.get("piece_bonuses"))
+                        if pieces_equipped >= int_value(piece_bonus.get("pieces_required"))
+                    ),
+                }
+            )
+            continue
+
         pieces_required = int_value(first_non_empty(rule.get("pieces_required"), rule.get("pieces")))
         if pieces_required <= 0:
             unsupported_sets.append(set_name)
             continue
-        completed_sets = counts[set_name] // pieces_required
+        completed_sets = pieces_equipped // pieces_required
         if completed_sets <= 0:
             continue
         applied_sets.append(
             {
                 "set_name": set_name,
+                "set_kind": "fixed",
                 "pieces_required": pieces_required,
-                "pieces_equipped": counts[set_name],
+                "pieces_equipped": pieces_equipped,
                 "completed_sets": completed_sets,
+                "max_pieces": int_value(first_non_empty(rule.get("max_pieces"), pieces_required)),
             }
         )
-    return applied_sets, unsupported_sets
+    return applied_sets, sorted(set(unsupported_sets))
 
 
 def apply_stat_value(
@@ -298,3 +462,30 @@ def bool_value(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def active_mastery_ids(masteries: Iterable[Mapping[str, Any]]) -> set[str]:
+    return {
+        string_value(mastery.get("mastery_id")).strip()
+        for mastery in masteries
+        if bool_value(mastery.get("active"), True) and string_value(mastery.get("mastery_id")).strip()
+    }
+
+
+def set_name_uses_basic_artifact_bonus(set_name: str) -> bool:
+    return string_value(set_name).strip() in BASIC_ARTIFACT_SET_NAMES
+
+
+def awakening_bonus_stats(rarity: Any, awakening_level: Any) -> List[tuple[str, float]]:
+    rarity_key = string_value(rarity).strip().lower()
+    grade = max(0, min(int_value(awakening_level), 6))
+    bonuses: List[tuple[str, float]] = []
+    for current_grade in range(1, grade + 1):
+        bonuses.extend(AWAKENING_BONUSES_BY_RARITY.get(rarity_key, {}).get(current_grade, []))
+    return bonuses
+
+
+def empowerment_bonus_stats(rarity: Any, empowerment_level: Any) -> List[tuple[str, float]]:
+    rarity_key = string_value(rarity).strip().lower()
+    level = max(0, min(int_value(empowerment_level), 4))
+    return list(EMPOWERMENT_BONUSES_BY_RARITY.get(rarity_key, {}).get(level, []))

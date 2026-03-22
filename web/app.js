@@ -20,6 +20,35 @@ const reloadBtn = document.getElementById("reloadBtn");
 const SET_LABELS = {
   "Attack Speed": "Speed",
   "Accuracy And Speed": "Perception",
+  "HP And Heal": "Immortal",
+  "HP And Defence": "Resilience",
+  "Shield And HP": "Divine Life",
+  "Shield And Speed": "Divine Speed",
+  "Shield And Attack Power": "Divine Offense",
+  "Shield And Critical Chance": "Divine Crit Rate",
+  "Attack Power And Ignore Defense": "Cruel",
+  "Life Drain": "Lifesteal",
+  "Counterattack On Crit": "Avenging",
+  "Dot Rate": "Toxic",
+  "Freeze Rate On Damage Received": "Frost",
+  "AoE Damage Decrease": "Stalwart",
+  "Ignore Defense": "Savage",
+  "Sleep Chance": "Daze",
+  "Decrease Max HP": "Destroy",
+  "Attack Power": "Offense",
+  "Cooldown Reduction Chance": "Reflex",
+  "Critical Heal Multiplier": "Critical Damage",
+  "Unkillable And SPD And CR Damage": "Swift Parry",
+  "Attack And Crit Rate": "Fatal",
+  "Block Debuff": "Immunity",
+  "Crit Rate And Ignore DEF Multiplier": "Lethal",
+  "Damage Increase On HP Decrease": "Fury",
+  "Get Extra Turn": "Relentless",
+  "HP": "Life",
+  "Stun Chance": "Stun",
+  "Crit Damage And Transform Week Into Crit Hit": "Affinitybreaker",
+  "Crit Rate And Life Drain": "Bloodthirst",
+  "Change Hit Type": "Reaction Accessory",
 };
 
 async function fetchJson(url, options) {
@@ -35,6 +64,16 @@ async function fetchJson(url, options) {
     throw new Error(payload.error || response.statusText || "Richiesta fallita");
   }
   return payload;
+}
+
+function formatAppliedSetLabel(setRow) {
+  const setName = displaySetName(setRow?.set_name || "");
+  if ((setRow?.set_kind || "").toLowerCase() === "variable") {
+    const piecesEquipped = Number(setRow?.pieces_equipped || 0);
+    const maxPieces = Number(setRow?.max_pieces || 0);
+    return maxPieces > 0 ? `${setName} ${piecesEquipped}/${maxPieces}` : setName;
+  }
+  return `${setName} x${String(setRow?.completed_sets || 0)}`;
 }
 
 function setSidebarStatus(message, isError = false) {
@@ -201,9 +240,7 @@ function renderDetails() {
   `).join("");
 
   const unsupportedSets = (detail.stat_model?.unsupported_sets || []).map((setName) => displaySetName(setName)).join(", ") || "nessuno";
-  const appliedSets = (detail.stat_model?.applied_sets || []).map((setRow) => (
-    `${displaySetName(setRow.set_name)} x${setRow.completed_sets}`
-  )).join(", ") || "nessuno";
+  const appliedSets = (detail.stat_model?.applied_sets || []).map((setRow) => formatAppliedSetLabel(setRow)).join(", ") || "nessuno";
   const enrichRows = [
     ["Fonte skill", detail.skill_data?.primary_source || detail.catalog.external_provider || "n/d"],
     ["Ref esterno", detail.catalog.external_ref_id ?? "n/d"],

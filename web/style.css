@@ -114,7 +114,7 @@ h1, h2, h3, p { margin: 0; }
   background: rgba(255, 255, 255, 0.015);
 }
 
-input, select, button {
+input, select, button, textarea {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   background: var(--panel-2);
@@ -122,9 +122,14 @@ input, select, button {
   font: inherit;
 }
 
-input, select {
+input, select, textarea {
   width: 100%;
   padding: 10px 12px;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 120px;
 }
 
 button {

@@ -115,10 +115,12 @@ def test_bootstrap_database_builds_relational_tables(tmp_path: Path) -> None:
     assert summary["account_champions"] == 2
     assert summary["account_champion_total_stats"] == 5
     assert summary["account_champion_imported_total_stats"] == 5
+    assert summary["account_champion_masteries"] == 0
     assert summary["gear_items"] == 1
     assert summary["gear_substats"] == 1
     assert summary["account_bonuses"] == 1
     assert summary["set_definitions"] >= 1
+    assert summary["set_definition_piece_bonuses"] >= 1
     assert summary["registry_targets"] == 1
     assert summary["app_state"] >= 3
     assert summary["account_champion_stat_models"] == 2
@@ -126,11 +128,123 @@ def test_bootstrap_database_builds_relational_tables(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         champion_catalog_columns = {row[1] for row in conn.execute("PRAGMA table_info(champion_catalog)").fetchall()}
         champion_skill_columns = {row[1] for row in conn.execute("PRAGMA table_info(champion_skills)").fetchall()}
+        set_definition_columns = {row[1] for row in conn.execute("PRAGMA table_info(set_definitions)").fetchall()}
 
     assert "hellhades_post_id" in champion_catalog_columns
     assert "skill_type" in champion_skill_columns
     assert "description_clean" in champion_skill_columns
     assert "source" in champion_skill_columns
+    assert "set_kind" in set_definition_columns
+    assert "counts_accessories" in set_definition_columns
+    assert "max_pieces" in set_definition_columns
+
+
+def test_bootstrap_database_tracks_relic_count_on_owned_champions(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Arbiter",
+                "rarity": "legendary",
+                "affinity": "void",
+                "faction": "High Elves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 2,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"spd": 110},
+                "total_stats": {"spd": 0},
+                "equipped_item_ids": [],
+                "relic_ids": ["203"],
+                "skills": [],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT relic_count FROM account_champions WHERE champ_id = 'champ-1'").fetchone()
+
+    assert row is not None
+    assert int(row[0]) == 1
+
+
+def test_bootstrap_database_persists_account_masteries(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Arbiter",
+                "rarity": "legendary",
+                "affinity": "void",
+                "faction": "High Elves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 2,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"spd": 110},
+                "total_stats": {"spd": 0},
+                "equipped_item_ids": [],
+                "masteries": [
+                    {"mastery_id": "500313", "name": "Pinpoint Accuracy", "tree": "support", "active": True},
+                    {"mastery_id": "500343", "name": "Lore of Steel", "tree": "support", "active": True},
+                ],
+                "skills": [],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    summary = bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    assert summary["account_champion_masteries"] == 2
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT mastery_id, mastery_name, tree, active FROM account_champion_masteries WHERE champ_id = 'champ-1' ORDER BY mastery_order"
+        ).fetchall()
+
+    assert rows == [
+        ("500313", "Pinpoint Accuracy", "support", 1),
+        ("500343", "Lore of Steel", "support", 1),
+    ]
+
+
+def test_bootstrap_database_rebuilds_without_unlinking_database_file(tmp_path: Path, monkeypatch) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    def fail_unlink(self, missing_ok: bool = False):
+        raise AssertionError("reset_database should not unlink the sqlite file during rebuild")
+
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    summary = bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    assert db_path.exists()
+    assert summary["account_champions"] == 0
+    assert summary["app_state"] >= 1
 
 
 def test_hellhades_enrichment_updates_skills_and_effects(tmp_path: Path, monkeypatch) -> None:
@@ -837,3 +951,240 @@ def test_bootstrap_derives_total_stats_when_raw_dump_is_empty(tmp_path: Path) ->
     assert refresh_summary["derived_champions"] == 1
     assert refreshed_stats == total_stats
     assert refreshed_model == ("derived", "derived")
+
+
+def test_refresh_account_stat_models_applies_awakening_and_empowerment(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Arbiter",
+                "rarity": "legendary",
+                "affinity": "void",
+                "faction": "High Elves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 2,
+                "empowerment_level": 2,
+                "booked": True,
+                "role_tags": [],
+                "base_stats": {"hp": 21000, "atk": 1200, "def": 1300, "spd": 110, "crit_rate": 15, "crit_dmg": 50, "acc": 0, "res": 30},
+                "total_stats": {"hp": 0, "atk": 0, "def": 0, "spd": 0, "crit_rate": 0, "crit_dmg": 0, "acc": 0, "res": 0},
+                "equipped_item_ids": [],
+                "skills": [],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+    refresh_summary = refresh_account_stat_models(db_path=db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        refreshed_stats = dict(
+            conn.execute(
+                """
+                SELECT stat_name, stat_value
+                FROM account_champion_total_stats
+                WHERE champ_id = 'champ-1'
+                """
+            ).fetchall()
+        )
+
+    assert refresh_summary["derived_champions"] == 1
+    assert refreshed_stats["hp"] == 32700.0
+    assert refreshed_stats["atk"] == 2190.0
+    assert refreshed_stats["def"] == 1560.0
+    assert refreshed_stats["spd"] == 120.0
+    assert refreshed_stats["acc"] == 25.0
+    assert refreshed_stats["res"] == 55.0
+
+
+def test_fixed_set_ignores_accessory_pieces_when_counting_completion(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "High Khatun",
+                "rarity": "epic",
+                "affinity": "spirit",
+                "faction": "Barbarians",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": [],
+                "base_stats": {"hp": 100, "atk": 100, "def": 100, "spd": 100, "crit_rate": 15, "crit_dmg": 50, "acc": 0, "res": 30},
+                "total_stats": {"hp": 0, "atk": 0, "def": 0, "spd": 0, "crit_rate": 0, "crit_dmg": 0, "acc": 0, "res": 0},
+                "equipped_item_ids": ["gear-1", "gear-2"],
+                "skills": [],
+            }
+        ],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "artifact",
+                "slot": "boots",
+                "set_name": "Attack Speed",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "spd", "value": 45},
+                "substats": [],
+            },
+            {
+                "item_id": "gear-2",
+                "item_class": "accessory",
+                "slot": "ring",
+                "set_name": "Attack Speed",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "hp", "value": 2650},
+                "substats": [],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    with sqlite3.connect(db_path) as conn:
+        total_stats = dict(
+            conn.execute(
+                """
+                SELECT stat_name, stat_value
+                FROM account_champion_total_stats
+                WHERE champ_id = 'champ-1'
+                """
+            ).fetchall()
+        )
+        model = conn.execute(
+            """
+            SELECT applied_sets_json
+            FROM account_champion_stat_models
+            WHERE champ_id = 'champ-1'
+            """
+        ).fetchone()
+
+    assert total_stats["spd"] == 145.0
+    applied_sets = json.loads(model[0])
+    assert applied_sets == []
+
+
+def test_variable_set_counts_accessories_and_applies_visible_piece_bonuses(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Yumeko",
+                "rarity": "legendary",
+                "affinity": "void",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 129, "atk": 79, "def": 117, "spd": 105, "crit_rate": 15, "crit_dmg": 50, "res": 30, "acc": 10},
+                "total_stats": {"hp": 0, "atk": 0, "def": 0, "spd": 0, "crit_rate": 0, "crit_dmg": 0, "res": 0, "acc": 0},
+                "equipped_item_ids": ["gear-1", "gear-2"],
+                "skills": [],
+            }
+        ],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "artifact",
+                "slot": "weapon",
+                "set_name": "Stone Skin",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "atk", "value": 265},
+                "substats": [{"type": "spd", "value": 10, "rolls": 0, "glyph_value": 0}],
+            },
+            {
+                "item_id": "gear-2",
+                "item_class": "accessory",
+                "slot": "ring",
+                "set_name": "Stone Skin",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "hp", "value": 2650},
+                "substats": [],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    with sqlite3.connect(db_path) as conn:
+        total_stats = dict(
+            conn.execute(
+                """
+                SELECT stat_name, stat_value
+                FROM account_champion_total_stats
+                WHERE champ_id = 'champ-1'
+                """
+            ).fetchall()
+        )
+        model = conn.execute(
+            """
+            SELECT source, completeness, unsupported_sets_json, applied_sets_json
+            FROM account_champion_stat_models
+            WHERE champ_id = 'champ-1'
+            """
+        ).fetchone()
+
+    assert total_stats["hp"] == 36086.8
+    assert total_stats["res"] == 70.0
+    assert model[0] == "derived"
+    assert model[1] == "derived"
+    assert json.loads(model[2]) == []
+    applied_sets = json.loads(model[3])
+    assert applied_sets == [
+        {
+            "set_name": "Stone Skin",
+            "set_kind": "variable",
+            "pieces_required": 1,
+            "pieces_equipped": 2,
+            "completed_sets": 1,
+            "max_pieces": 9,
+            "active_bonus_count": 2,
+        }
+    ]

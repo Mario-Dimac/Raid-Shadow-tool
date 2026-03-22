@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "updated_at": "2026-03-21T09:57:50+00:00",
+  "sets": [
+    {
+      "set_name": "Heal",
+      "canonical_name": "Regeneration",
+      "display_name": "Heal",
+      "set_kind": "fixed",
+      "pieces_required": 4,
+      "max_pieces": 6,
+      "counts_accessories": false,
+      "heal_each_turn_pct": 0.0,
+      "stats": [],
+      "piece_bonuses": [],
+      "base_bonus_text": "Heal by 15% every turn",
+      "thresholds_text": "",
+      "source": "local_curation",
+      "updated_at": "2026-03-21T09:57:50+00:00"
+    }
+  ]
+}

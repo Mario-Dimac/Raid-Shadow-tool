@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CB Forge Set Curation</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="hero">
+        <div class="eyebrow">CB Forge</div>
+        <h1>Set Curation</h1>
+        <p class="subtext">Copia il testo del set, scegli il tipo e salva una regola locale usabile dal motore.</p>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Campioni</a>
+          <a class="nav-link" href="/gear">Equip</a>
+          <a class="nav-link" href="/build">Build</a>
+          <a class="nav-link" href="/sets">Sets</a>
+          <a class="nav-link active" href="/set-curation">Curation</a>
+        </div>
+      </div>
+      <div class="toolbar">
+        <input id="curationSearch" type="search" placeholder="Cerca set...">
+        <select id="curationStatus">
+          <option value="all">Tutti</option>
+          <option value="missing">Solo non curati</option>
+          <option value="curated">Solo curati</option>
+        </select>
+      </div>
+      <div id="curationStatusText" class="status"></div>
+      <div id="curationList" class="roster"></div>
+    </aside>
+
+    <main class="panel main">
+      <section id="curationSummary" class="summary"></section>
+      <section class="main-toolbar">
+        <button id="curationReloadBtn" class="ghost">Ricarica</button>
+        <a class="nav-link" href="/sets">Torna a Sets</a>
+      </section>
+      <section id="curationDetails" class="details">
+        <div class="empty">Seleziona un set dalla lista per compilare la regola locale.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/set-curation.js?v=20260321b"></script>
+</body>
+</html>

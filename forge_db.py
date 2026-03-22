@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from account_stats import build_stat_computation
+from set_curation import load_local_set_rules
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -17,17 +18,518 @@ NORMALIZED_SOURCE_PATH = INPUT_DIR / "normalized_account.json"
 
 
 DEFAULT_SET_RULES: Dict[str, Dict[str, Any]] = {
-    "Attack Speed": {"pieces_required": 2, "stats": [("spd", 12.0)]},
-    "Accuracy": {"pieces_required": 2, "stats": [("acc", 40.0)]},
-    "Accuracy And Speed": {"pieces_required": 2, "stats": [("acc", 40.0), ("spd", 12.0)]},
-    "HP And Heal": {"pieces_required": 2, "stats": [("hp_pct", 15.0)], "heal_each_turn_pct": 3.0},
-    "HP And Defence": {"pieces_required": 2, "stats": [("hp_pct", 15.0), ("def_pct", 15.0)]},
-    "Attack Power And Ignore Defense": {"pieces_required": 2, "stats": [("atk_pct", 15.0)]},
-    "Shield And Speed": {"pieces_required": 2, "stats": [("spd", 12.0)]},
-    "Shield And HP": {"pieces_required": 2, "stats": [("hp_pct", 15.0)]},
-    "Shield And Attack Power": {"pieces_required": 2, "stats": [("atk_pct", 15.0)]},
-    "Shield And Critical Chance": {"pieces_required": 2, "stats": [("crit_rate", 12.0)]},
+    "Attack Speed": {"set_kind": "fixed", "pieces_required": 2, "max_pieces": 6, "counts_accessories": False, "stats": [("spd", 12.0)]},
+    "Accuracy": {"set_kind": "fixed", "pieces_required": 2, "max_pieces": 6, "counts_accessories": False, "stats": [("acc", 40.0)]},
+    "Accuracy And Speed": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("acc", 40.0), ("spd", 12.0)],
+    },
+    "HP And Heal": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("hp_pct", 15.0)],
+        "heal_each_turn_pct": 3.0,
+    },
+    "HP And Defence": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("hp_pct", 10.0), ("def_pct", 10.0)],
+    },
+    "Attack Power And Ignore Defense": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("atk_pct", 15.0)],
+    },
+    "Shield And Speed": {"set_kind": "fixed", "pieces_required": 2, "max_pieces": 6, "counts_accessories": False, "stats": [("spd", 12.0)]},
+    "Shield And HP": {"set_kind": "fixed", "pieces_required": 2, "max_pieces": 6, "counts_accessories": False, "stats": [("hp_pct", 15.0)]},
+    "Shield And Attack Power": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("atk_pct", 15.0)],
+    },
+    "Shield And Critical Chance": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("crit_rate", 12.0)],
+    },
+    "Stone Skin": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("hp_pct", 8.0)]},
+            {"pieces_required": 2, "stats": [("res", 40.0)]},
+            {"pieces_required": 3, "stats": [("def_pct", 15.0)]},
+            {"pieces_required": 4, "effect_text": "Stone Skin for 1 turn at battle start"},
+            {"pieces_required": 5, "stats": [("def_pct", 15.0)]},
+            {"pieces_required": 6, "effect_text": "Stone Skin for 2 turns at battle start"},
+            {"pieces_required": 7, "stats": [("hp_pct", 8.0)]},
+            {"pieces_required": 8, "stats": [("res", 40.0)]},
+            {"pieces_required": 9, "effect_text": "Stone Skin shield upgraded to 75% HP"},
+        ],
+    },
+    "Protection": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("hp_pct", 15.0)]},
+            {"pieces_required": 3, "stats": [("spd", 12.0)]},
+            {"pieces_required": 4, "effect_text": "25% chance to place Protected buffs"},
+            {"pieces_required": 5, "stats": [("spd", 12.0)]},
+            {"pieces_required": 6, "effect_text": "50% chance to place Protected buffs"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 8.0)]},
+            {"pieces_required": 9, "effect_text": "75% chance to place Protected buffs and allies deal 5% more damage per wearer buff"},
+        ],
+    },
+    "Supersonic": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("hp_pct", 15.0)]},
+            {"pieces_required": 3, "stats": [("spd", 10.0)]},
+            {"pieces_required": 4, "effect_text": "Turn Meter increases by 2% per enemy buff"},
+            {"pieces_required": 5, "stats": [("spd", 10.0)]},
+            {"pieces_required": 6, "effect_text": "Reduces Turn Meter reduction effects by 30%"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 12.0)]},
+            {"pieces_required": 9, "effect_text": "Increases Turn Meter boost effects by 30%"},
+        ],
+    },
+    "Pinpoint": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("acc", 20.0)]},
+            {"pieces_required": 2, "stats": [("spd", 10.0)]},
+            {"pieces_required": 3, "stats": [("acc", 20.0)]},
+            {"pieces_required": 4, "effect_text": "Block Debuffs for 2 turns at the start of each round"},
+            {"pieces_required": 5, "stats": [("spd", 10.0)]},
+            {"pieces_required": 6, "effect_text": "50% chance to block Sheep from Polymorph"},
+            {"pieces_required": 7, "stats": [("acc", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 10.0)]},
+            {"pieces_required": 9, "effect_text": "Allies deal 5% more damage per wearer debuff"},
+        ],
+    },
+    "Stonecleaver": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("atk_pct", 10.0)]},
+            {"pieces_required": 2, "stats": [("crit_dmg", 15.0)]},
+            {"pieces_required": 3, "stats": [("spd", 5.0)]},
+            {"pieces_required": 4, "effect_text": "+30% damage to Stone Skin shields"},
+            {"pieces_required": 5, "stats": [("atk_pct", 15.0)]},
+            {"pieces_required": 6, "effect_text": "Ignores 20% DEF"},
+            {"pieces_required": 7, "stats": [("spd", 5.0)]},
+            {"pieces_required": 8, "stats": [("crit_dmg", 15.0)]},
+            {"pieces_required": 9, "effect_text": "+70% damage to Stone Skin shields"},
+        ],
+    },
+    "Rebirth": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("spd", 10.0)]},
+            {"pieces_required": 3, "stats": [("res", 20.0)]},
+            {"pieces_required": 4, "effect_text": "Revived allies gain +10% HP and +10% Turn Meter"},
+            {"pieces_required": 5, "stats": [("spd", 10.0)]},
+            {"pieces_required": 6, "effect_text": "Places Block Damage when an ally is killed once per round"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 12.0)]},
+            {"pieces_required": 9, "effect_text": "Revived allies have skill cooldowns reduced by 1"},
+        ],
+    },
+    "Chronophage": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("spd", 10.0)]},
+            {"pieces_required": 3, "stats": [("res", 20.0)]},
+            {"pieces_required": 4, "effect_text": "Starts the round with 1 Immutable stack"},
+            {"pieces_required": 5, "stats": [("spd", 10.0)]},
+            {"pieces_required": 6, "effect_text": "Starts the round with 2 Immutable stacks"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 12.0)]},
+            {"pieces_required": 9, "effect_text": "Starts the round with 3 Immutable stacks"},
+        ],
+    },
+    "Mercurial": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("hp_pct", 15.0)]},
+            {"pieces_required": 3, "stats": [("spd", 8.0)]},
+            {"pieces_required": 4, "effect_text": "Grants 1 Total Guard stack at the start of the round"},
+            {"pieces_required": 5, "stats": [("spd", 12.0)]},
+            {"pieces_required": 6, "effect_text": "Grants 2 Total Guard stacks at the start of the round"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 12.0)]},
+            {"pieces_required": 9, "effect_text": "Grants 3 Total Guard stacks and refreshes 1 stack at turn start if none remain"},
+        ],
+    },
+    "Counterattack Accessory": {
+        "set_kind": "accessory",
+        "pieces_required": 1,
+        "max_pieces": 3,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "effect_text": "5% chance to counterattack when hit"},
+            {"pieces_required": 2, "effect_text": "10% chance to counterattack when hit"},
+            {"pieces_required": 3, "effect_text": "15% chance to counterattack when hit"},
+        ],
+    },
+    "Shield Accessory": {
+        "set_kind": "accessory",
+        "pieces_required": 1,
+        "max_pieces": 3,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "effect_text": "Shield worth 5% of damage dealt after attacking"},
+            {"pieces_required": 2, "effect_text": "Shield worth 10% of damage dealt after attacking"},
+            {"pieces_required": 3, "effect_text": "Shield worth 15% of damage dealt after attacking"},
+        ],
+    },
 }
+
+DEFAULT_SET_RULES["Pinpoint"] = {
+    "set_kind": "variable",
+    "pieces_required": 1,
+    "max_pieces": 9,
+    "counts_accessories": True,
+    "piece_bonuses": [
+        {"pieces_required": 1, "stats": [("acc", 20.0)]},
+        {"pieces_required": 2, "stats": [("spd", 10.0)]},
+        {"pieces_required": 3, "stats": [("acc", 20.0)]},
+        {"pieces_required": 4, "effect_text": "Grants 1 Intercept Stack at the start of each round"},
+        {"pieces_required": 5, "stats": [("spd", 10.0)]},
+        {"pieces_required": 6, "effect_text": "Grants 2 Intercept Stacks at the start of each round"},
+        {"pieces_required": 7, "stats": [("acc", 20.0)]},
+        {"pieces_required": 8, "stats": [("spd", 12.0)]},
+        {"pieces_required": 9, "effect_text": "Grants 4 Intercept Stacks at the start of each round"},
+    ],
+}
+
+DEFAULT_SET_RULES["Merciless"] = {
+    "set_kind": "variable",
+    "pieces_required": 1,
+    "max_pieces": 9,
+    "counts_accessories": True,
+    "piece_bonuses": [
+        {"pieces_required": 1, "stats": [("atk_pct", 10.0)]},
+        {"pieces_required": 2, "stats": [("crit_dmg", 15.0)]},
+        {"pieces_required": 3, "stats": [("spd", 5.0)]},
+        {"pieces_required": 4, "effect_text": "30% chance to reduce a random skill cooldown by 1"},
+        {"pieces_required": 5, "stats": [("atk_pct", 15.0)]},
+        {"pieces_required": 6, "effect_text": "Ignores 35% of enemy DEF"},
+        {"pieces_required": 7, "stats": [("spd", 5.0)]},
+        {"pieces_required": 8, "stats": [("crit_dmg", 15.0)]},
+        {"pieces_required": 9, "effect_text": "15% chance to gain an Extra Turn upon dealing damage"},
+    ],
+}
+
+DEFAULT_SET_RULES["Feral"] = {
+    "set_kind": "variable",
+    "pieces_required": 1,
+    "max_pieces": 9,
+    "counts_accessories": True,
+    "piece_bonuses": [
+        {"pieces_required": 1, "stats": [("acc", 40.0)]},
+        {"pieces_required": 2, "stats": [("spd", 5.0)]},
+        {"pieces_required": 3, "stats": [("acc", 40.0)]},
+        {"pieces_required": 4, "effect_text": "Places Block Debuffs on the wearer for 2 turns at the start of each round"},
+        {"pieces_required": 5, "stats": [("spd", 5.0)]},
+        {"pieces_required": 6, "effect_text": "50% chance to block the Sheep debuff from Polymorph"},
+        {"pieces_required": 7, "stats": [("acc", 40.0)]},
+        {"pieces_required": 8, "stats": [("spd", 5.0)]},
+        {"pieces_required": 9, "effect_text": "Allies deal 5% more damage per debuff inflicted by the wearer"},
+    ],
+}
+
+DEFAULT_SET_RULES["Righteous"] = {
+    "set_kind": "fixed",
+    "pieces_required": 2,
+    "max_pieces": 6,
+    "counts_accessories": False,
+    "stats": [("spd", 10.0), ("res", 40.0)],
+}
+
+DEFAULT_SET_RULES["Instinct"] = {
+    "set_kind": "fixed",
+    "pieces_required": 4,
+    "max_pieces": 6,
+    "counts_accessories": False,
+    "stats": [("spd", 12.0)],
+    "piece_bonuses": [
+        {"pieces_required": 4, "effect_text": "Ignores 20% of enemy DEF"},
+    ],
+}
+
+DEFAULT_SET_RULES["Killstroke"] = {
+    "set_kind": "fixed",
+    "pieces_required": 2,
+    "max_pieces": 6,
+    "counts_accessories": False,
+    "stats": [("crit_dmg", 20.0), ("spd", 5.0)],
+}
+
+DEFAULT_SET_RULES.update(
+    {
+        "Life Drain": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Heals by 30% of damage dealt"}],
+        },
+        "Counterattack On Crit": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "45% chance to counterattack when a debuff is placed on the wearer"}],
+        },
+        "Dot Rate": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "75% chance to place a 2.5% Poison debuff for 2 turns when attacking"}],
+        },
+        "Freeze Rate On Damage Received": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "20% chance to place Freeze for 1 turn when attacked by an enemy Champion"}],
+        },
+        "AoE Damage Decrease": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Decreases incoming AoE damage by 30%"}],
+        },
+        "Ignore Defense": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Ignores 25% of enemy DEF"}],
+        },
+        "Sleep Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "25% chance to place Sleep for 1 turn when attacking"}],
+        },
+        "Decrease Max HP": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Decreases target MAX HP by 40% of the damage dealt"}],
+        },
+        "Attack Power": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("atk_pct", 15.0)],
+        },
+        "Cooldown Reduction Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "40% chance to reduce a random skill cooldown by 1"}],
+        },
+        "Critical Heal Multiplier": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_dmg", 20.0)],
+        },
+        "Unkillable And SPD And CR Damage": {
+            "set_kind": "variable",
+            "pieces_required": 1,
+            "max_pieces": 9,
+            "counts_accessories": True,
+            "piece_bonuses": [
+                {"pieces_required": 1, "stats": [("crit_dmg", 15.0)]},
+                {"pieces_required": 2, "stats": [("spd", 8.0)]},
+                {"pieces_required": 3, "stats": [("crit_dmg", 15.0)]},
+                {"pieces_required": 4, "stats": [("spd", 10.0)], "effect_text": "50% chance to place Unkillable for 1 turn when receiving fatal damage"},
+                {"pieces_required": 5, "stats": [("hp_pct", 10.0)]},
+                {"pieces_required": 6, "effect_text": "Enemy single-target attacks deal 15% less damage to this Champion"},
+                {"pieces_required": 7, "stats": [("hp_pct", 15.0)]},
+                {"pieces_required": 8, "stats": [("spd", 10.0)]},
+                {"pieces_required": 9, "effect_text": "Ignores 50% of enemy DEF"},
+            ],
+        },
+        "Attack And Crit Rate": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("atk_pct", 15.0), ("crit_rate", 5.0)],
+        },
+        "Block Debuff": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Places Block Debuffs on the wearer for 2 turns at the start of each round"}],
+        },
+        "Crit Rate And Ignore DEF Multiplier": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_rate", 10.0)],
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Ignores 25% of enemy DEF"}],
+        },
+        "Damage Increase On HP Decrease": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Damage increases as HP decreases, up to +50% below 50% HP"}],
+        },
+        "Get Extra Turn": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "18% chance to gain an Extra Turn"}],
+        },
+        "HP": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("hp_pct", 15.0)],
+        },
+        "Stun Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "18% chance to place Stun for 1 turn when attacking"}],
+        },
+        "Crit Damage And Transform Week Into Crit Hit": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_dmg", 30.0)],
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "50% chance to change a weak hit into a critical hit"}],
+        },
+        "Crit Rate And Life Drain": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_rate", 12.0)],
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Heals by 30% of damage dealt"}],
+        },
+        "Resistance": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("res", 40.0)],
+        },
+        "Critical Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_rate", 12.0)],
+        },
+        "Defense": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("def_pct", 15.0)],
+        },
+        "Shield": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Places a Shield worth 30% of the wearer's HP on all allies for 3 turns at the start of each round"}],
+        },
+        "Counterattack": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "25% chance to counterattack when hit"}],
+        },
+        "Passive Share Damage And Heal": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Absorbs 10% of damage dealt to allies and heals the wearer by 10% each turn"}],
+        },
+        "Provoke Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "30% chance to place Provoke for 1 turn when attacking"}],
+        },
+        "Change Hit Type": {
+            "set_kind": "accessory",
+            "pieces_required": 1,
+            "max_pieces": 3,
+            "counts_accessories": True,
+            "piece_bonuses": [
+                {"pieces_required": 1, "effect_text": "25% chance to change a Critical Hit into a Normal Hit when attacked before the first turn"},
+                {"pieces_required": 2, "effect_text": "50% chance to change a Critical Hit into a Normal Hit when attacked before the first turn"},
+                {"pieces_required": 3, "effect_text": "75% chance to change a Critical Hit into a Normal Hit when attacked before the first turn"},
+            ],
+        },
+    }
+)
 
 
 SCHEMA_STATEMENTS: Tuple[str, ...] = (
@@ -106,7 +608,8 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         rank INTEGER NOT NULL,
         awakening_level INTEGER NOT NULL,
         empowerment_level INTEGER NOT NULL,
-        booked INTEGER NOT NULL
+        booked INTEGER NOT NULL,
+        relic_count INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -123,6 +626,17 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         stat_name TEXT NOT NULL,
         stat_value REAL NOT NULL,
         PRIMARY KEY (champ_id, stat_name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS account_champion_masteries (
+        champ_id TEXT NOT NULL,
+        mastery_order INTEGER NOT NULL,
+        mastery_id TEXT NOT NULL,
+        mastery_name TEXT,
+        tree TEXT,
+        active INTEGER NOT NULL,
+        PRIMARY KEY (champ_id, mastery_order)
     )
     """,
     """
@@ -180,6 +694,9 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         set_name TEXT PRIMARY KEY,
         pieces_required INTEGER NOT NULL,
         heal_each_turn_pct REAL NOT NULL,
+        set_kind TEXT NOT NULL DEFAULT 'fixed',
+        counts_accessories INTEGER NOT NULL DEFAULT 0,
+        max_pieces INTEGER NOT NULL DEFAULT 0,
         source TEXT NOT NULL
     )
     """,
@@ -190,6 +707,17 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         stat_type TEXT NOT NULL,
         stat_value REAL NOT NULL,
         PRIMARY KEY (set_name, stat_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS set_definition_piece_bonuses (
+        set_name TEXT NOT NULL,
+        bonus_order INTEGER NOT NULL,
+        pieces_required INTEGER NOT NULL,
+        stat_type TEXT,
+        stat_value REAL NOT NULL,
+        effect_text TEXT,
+        PRIMARY KEY (set_name, bonus_order)
     )
     """,
     """
@@ -279,6 +807,30 @@ def ensure_schema_columns(conn: sqlite3.Connection) -> None:
         column_name="source",
         column_sql="TEXT",
     )
+    ensure_column(
+        conn,
+        table_name="set_definitions",
+        column_name="set_kind",
+        column_sql="TEXT NOT NULL DEFAULT 'fixed'",
+    )
+    ensure_column(
+        conn,
+        table_name="set_definitions",
+        column_name="counts_accessories",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    ensure_column(
+        conn,
+        table_name="set_definitions",
+        column_name="max_pieces",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    ensure_column(
+        conn,
+        table_name="account_champions",
+        column_name="relic_count",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
 
 
 def ensure_column(
@@ -294,9 +846,10 @@ def ensure_column(
 
 
 def reset_database(path: Path = DB_PATH) -> None:
-    if path.exists():
-        path.unlink()
     ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        clear_all_tables(conn)
+        conn.commit()
 
 
 def load_source_account(source_path: Path = NORMALIZED_SOURCE_PATH) -> Dict[str, Any]:
@@ -321,6 +874,9 @@ def bootstrap_database(
     bonuses = list_value(account.get("account_bonuses"))
     templates = select_best_template_rows(champions)
     observed_sets = collect_observed_sets(gear)
+    curated_set_rules = load_local_set_rules()
+    bootstrap_set_rules = dict(DEFAULT_SET_RULES)
+    bootstrap_set_rules.update(curated_set_rules)
 
     with sqlite3.connect(db_path) as conn:
         if not rebuild:
@@ -439,8 +995,8 @@ def bootstrap_database(
                 """
                 INSERT INTO account_champions (
                     champ_id, champion_name, rarity, affinity, faction,
-                    level, rank, awakening_level, empowerment_level, booked
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    level, rank, awakening_level, empowerment_level, booked, relic_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     champ_id,
@@ -453,6 +1009,7 @@ def bootstrap_database(
                     int_value(champion.get("awakening_level")),
                     int_value(champion.get("empowerment_level")),
                     1 if bool(champion.get("booked")) else 0,
+                    len(list_value(champion.get("relic_ids"))),
                 ),
             )
             for stat_name, stat_value in sorted(dict_value(champion.get("total_stats")).items()):
@@ -462,6 +1019,23 @@ def bootstrap_database(
                     VALUES (?, ?, ?)
                     """,
                     (champ_id, string_value(stat_name), float_value(stat_value)),
+                )
+            for mastery_order, mastery in enumerate(list_value(champion.get("masteries")), start=1):
+                mastery_map = dict_value(mastery)
+                conn.execute(
+                    """
+                    INSERT INTO account_champion_masteries (
+                        champ_id, mastery_order, mastery_id, mastery_name, tree, active
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        champ_id,
+                        mastery_order,
+                        string_value(mastery_map.get("mastery_id")),
+                        string_value(mastery_map.get("name")),
+                        string_value(mastery_map.get("tree")),
+                        1 if bool(mastery_map.get("active", True)) else 0,
+                    ),
                 )
 
         for item in gear:
@@ -528,18 +1102,23 @@ def bootstrap_database(
                 ),
             )
 
-        for set_name in sorted(observed_sets | set(DEFAULT_SET_RULES)):
-            rule = dict_value(DEFAULT_SET_RULES.get(set_name))
+        for set_name in sorted(observed_sets | set(bootstrap_set_rules)):
+            rule = dict_value(bootstrap_set_rules.get(set_name))
             conn.execute(
                 """
-                INSERT INTO set_definitions (set_name, pieces_required, heal_each_turn_pct, source)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO set_definitions (
+                    set_name, pieces_required, heal_each_turn_pct, set_kind, counts_accessories, max_pieces, source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     set_name,
                     int_value(rule.get("pieces_required")),
                     float_value(rule.get("heal_each_turn_pct")),
-                    "bootstrap_rules" if rule else "observed_gear",
+                    string_value(first_non_empty(rule.get("set_kind"), "unknown")),
+                    1 if bool(rule.get("counts_accessories")) else 0,
+                    int_value(first_non_empty(rule.get("max_pieces"), rule.get("pieces_required"))),
+                    string_value(first_non_empty(rule.get("source"), "bootstrap_rules" if rule else "observed_gear")),
                 ),
             )
             for stat_order, stat_row in enumerate(list_value(rule.get("stats")), start=1):
@@ -551,6 +1130,31 @@ def bootstrap_database(
                     """,
                     (set_name, stat_order, stat_type, stat_value),
                 )
+            bonus_order = 0
+            for piece_bonus in list_value(rule.get("piece_bonuses")):
+                pieces_required = int_value(piece_bonus.get("pieces_required"))
+                for stat_row in list_value(piece_bonus.get("stats")):
+                    stat_type, stat_value = normalize_set_stat(stat_row)
+                    bonus_order += 1
+                    conn.execute(
+                        """
+                        INSERT INTO set_definition_piece_bonuses (
+                            set_name, bonus_order, pieces_required, stat_type, stat_value, effect_text
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (set_name, bonus_order, pieces_required, stat_type, stat_value, None),
+                    )
+                effect_text = optional_string(first_non_empty(piece_bonus.get("effect_text"), piece_bonus.get("effect")))
+                if effect_text:
+                    bonus_order += 1
+                    conn.execute(
+                        """
+                        INSERT INTO set_definition_piece_bonuses (
+                            set_name, bonus_order, pieces_required, stat_type, stat_value, effect_text
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (set_name, bonus_order, pieces_required, None, 0.0, effect_text),
+                    )
 
         stats_summary = refresh_account_stat_models_in_conn(conn)
         conn.commit()
@@ -586,12 +1190,14 @@ def database_status(path: Path = DB_PATH) -> Dict[str, Any]:
         "account_champions",
         "account_champion_total_stats",
         "account_champion_imported_total_stats",
+        "account_champion_masteries",
         "account_champion_stat_models",
         "gear_items",
         "gear_substats",
         "account_bonuses",
         "set_definitions",
         "set_definition_stats",
+        "set_definition_piece_bonuses",
         "combat_runs",
         "combat_run_members",
         "combat_sessions",
@@ -615,14 +1221,28 @@ def clear_runtime_tables(conn: sqlite3.Connection) -> None:
         "account_champions",
         "account_champion_total_stats",
         "account_champion_imported_total_stats",
+        "account_champion_masteries",
         "account_champion_stat_models",
         "gear_items",
         "gear_substats",
         "account_bonuses",
         "set_definitions",
         "set_definition_stats",
+        "set_definition_piece_bonuses",
     ):
         conn.execute(f"DELETE FROM {table}")
+
+
+def clear_all_tables(conn: sqlite3.Connection) -> None:
+    clear_runtime_tables(conn)
+    for table in (
+        "combat_run_members",
+        "combat_runs",
+        "combat_sessions",
+        "app_state",
+    ):
+        conn.execute(f"DELETE FROM {table}")
+    conn.execute("DELETE FROM sqlite_sequence")
 
 
 def refresh_account_stat_models(db_path: Path = DB_PATH) -> Dict[str, Any]:
@@ -666,10 +1286,11 @@ def refresh_account_stat_models_in_conn(conn: sqlite3.Connection) -> Dict[str, A
     gear_by_owner = load_equipped_gear_by_owner(conn)
     base_stats_by_name = load_base_stats_by_champion(conn)
     raw_totals_by_champ = load_imported_total_stats_by_champion(conn)
+    masteries_by_champ = load_masteries_by_champion(conn)
 
     champion_rows = conn.execute(
         """
-        SELECT champ_id, champion_name, affinity
+        SELECT champ_id, champion_name, affinity, rarity, awakening_level, empowerment_level
         FROM account_champions
         ORDER BY champion_name ASC, champ_id ASC
         """
@@ -682,14 +1303,18 @@ def refresh_account_stat_models_in_conn(conn: sqlite3.Connection) -> Dict[str, A
     partial_count = 0
     computed_at = now_utc_iso()
 
-    for champ_id, champion_name, affinity in champion_rows:
+    for champ_id, champion_name, affinity, rarity, awakening_level, empowerment_level in champion_rows:
         stat_result = build_stat_computation(
             base_stats=base_stats_by_name.get(string_value(champion_name), {}),
             raw_total_stats=raw_totals_by_champ.get(string_value(champ_id), {}),
             equipped_items=gear_by_owner.get(string_value(champ_id), []),
             bonuses=bonuses,
             set_rules=set_rules,
+            masteries=masteries_by_champ.get(string_value(champ_id), []),
             affinity=string_value(affinity),
+            rarity=string_value(rarity),
+            awakening_level=int_value(awakening_level),
+            empowerment_level=int_value(empowerment_level),
         )
 
         for stat_name, stat_value in sorted(stat_result.total_stats.items()):
@@ -732,27 +1357,51 @@ def refresh_account_stat_models_in_conn(conn: sqlite3.Connection) -> Dict[str, A
 
 
 def load_set_rules(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
-    rows = conn.execute(
+    definition_rows = conn.execute(
         """
-        SELECT sd.set_name, sd.pieces_required, sd.heal_each_turn_pct, sds.stat_type, sds.stat_value
-        FROM set_definitions sd
-        LEFT JOIN set_definition_stats sds
-            ON sds.set_name = sd.set_name
-        ORDER BY sd.set_name ASC, sds.stat_order ASC
+        SELECT set_name, pieces_required, heal_each_turn_pct, set_kind, counts_accessories, max_pieces, source
+        FROM set_definitions
+        ORDER BY set_name ASC
+        """
+    ).fetchall()
+    stat_rows = conn.execute(
+        """
+        SELECT set_name, stat_type, stat_value
+        FROM set_definition_stats
+        ORDER BY set_name ASC, stat_order ASC
+        """
+    ).fetchall()
+    bonus_rows = conn.execute(
+        """
+        SELECT set_name, pieces_required, stat_type, stat_value, effect_text
+        FROM set_definition_piece_bonuses
+        ORDER BY set_name ASC, bonus_order ASC
         """
     ).fetchall()
     rules: Dict[str, Dict[str, Any]] = {}
-    for set_name, pieces_required, heal_each_turn_pct, stat_type, stat_value in rows:
-        rule = rules.setdefault(
-            string_value(set_name),
-            {
-                "pieces_required": int_value(pieces_required),
-                "heal_each_turn_pct": float_value(heal_each_turn_pct),
-                "stats": [],
-            },
-        )
+    for set_name, pieces_required, heal_each_turn_pct, set_kind, counts_accessories, max_pieces, source in definition_rows:
+        rules[string_value(set_name)] = {
+            "pieces_required": int_value(pieces_required),
+            "heal_each_turn_pct": float_value(heal_each_turn_pct),
+            "set_kind": string_value(set_kind),
+            "counts_accessories": bool(counts_accessories),
+            "max_pieces": int_value(max_pieces),
+            "source": string_value(source),
+            "stats": [],
+            "piece_bonuses": [],
+        }
+    for set_name, stat_type, stat_value in stat_rows:
+        rule = rules.setdefault(string_value(set_name), {"stats": [], "piece_bonuses": []})
         if stat_type is not None:
             rule["stats"].append((string_value(stat_type), float_value(stat_value)))
+    for set_name, pieces_required, stat_type, stat_value, effect_text in bonus_rows:
+        rule = rules.setdefault(string_value(set_name), {"stats": [], "piece_bonuses": []})
+        piece_bonus: Dict[str, Any] = {"pieces_required": int_value(pieces_required), "stats": []}
+        if stat_type is not None:
+            piece_bonus["stats"].append((string_value(stat_type), float_value(stat_value)))
+        if effect_text is not None and string_value(effect_text).strip():
+            piece_bonus["effect_text"] = string_value(effect_text)
+        rule["piece_bonuses"].append(piece_bonus)
     return rules
 
 
@@ -799,17 +1448,18 @@ def load_equipped_gear_by_owner(conn: sqlite3.Connection) -> Dict[str, List[Dict
 
     item_rows = conn.execute(
         """
-        SELECT item_id, slot, set_name, equipped_by, main_stat_type, main_stat_value
+        SELECT item_id, item_class, slot, set_name, equipped_by, main_stat_type, main_stat_value
         FROM gear_items
         WHERE equipped_by IS NOT NULL AND equipped_by != ''
         ORDER BY equipped_by ASC, item_id ASC
         """
     ).fetchall()
     gear_by_owner: Dict[str, List[Dict[str, Any]]] = {}
-    for item_id, slot, set_name, equipped_by, main_stat_type, main_stat_value in item_rows:
+    for item_id, item_class, slot, set_name, equipped_by, main_stat_type, main_stat_value in item_rows:
         gear_by_owner.setdefault(string_value(equipped_by), []).append(
             {
                 "item_id": string_value(item_id),
+                "item_class": string_value(item_class),
                 "slot": string_value(slot),
                 "set_name": string_value(set_name),
                 "main_stat": {
@@ -861,6 +1511,27 @@ def load_imported_total_stats_by_champion(conn: sqlite3.Connection) -> Dict[str,
     payload: Dict[str, Dict[str, float]] = {}
     for champ_id, stat_name, stat_value in rows:
         payload.setdefault(string_value(champ_id), {})[string_value(stat_name)] = float_value(stat_value)
+    return payload
+
+
+def load_masteries_by_champion(conn: sqlite3.Connection) -> Dict[str, List[Dict[str, Any]]]:
+    rows = conn.execute(
+        """
+        SELECT champ_id, mastery_id, mastery_name, tree, active
+        FROM account_champion_masteries
+        ORDER BY champ_id ASC, mastery_order ASC
+        """
+    ).fetchall()
+    payload: Dict[str, List[Dict[str, Any]]] = {}
+    for champ_id, mastery_id, mastery_name, tree, active in rows:
+        payload.setdefault(string_value(champ_id), []).append(
+            {
+                "mastery_id": string_value(mastery_id),
+                "name": string_value(mastery_name),
+                "tree": string_value(tree),
+                "active": bool(active),
+            }
+        )
     return payload
 
 

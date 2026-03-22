@@ -5,6 +5,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from collections import Counter
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,12 +13,13 @@ from typing import Any, Dict, List
 from urllib.parse import parse_qs, unquote, urlparse
 
 from account_stats import materialize_base_totals
-from build_planner import build_champion_plan, list_build_profiles
+from build_planner import build_champion_plan, list_area_bonus_regions, list_build_profiles
 from forge_db import DB_PATH, NORMALIZED_SOURCE_PATH, bootstrap_database, ensure_schema, refresh_account_stats_from_source
 from gear_advisor import evaluate_gear_item, summarize_gear_verdicts
 import hellhades_live
 from hellhades_enrich import enrich_registry_from_source
 from registry_report import build_registry_report
+from set_curation import load_local_set_entries, save_local_set_entry
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -41,6 +43,58 @@ SELL_QUEUE_PAGES = {
 }
 SELL_QUEUE_VERDICTS = {"sell_now", "sell_after_12"}
 SELL_QUEUE_MAIN_TIER_ORDER = {"weak": 0, "medium": 1, "strong": 2}
+SET_DISPLAY_NAMES = {
+    "Attack Speed": "Speed",
+    "Accuracy And Speed": "Perception",
+    "HP And Heal": "Immortal",
+    "HP And Defence": "Resilience",
+    "Shield And HP": "Divine Life",
+    "Shield And Speed": "Divine Speed",
+    "Shield And Attack Power": "Divine Offense",
+    "Shield And Critical Chance": "Divine Crit Rate",
+    "Attack Power And Ignore Defense": "Cruel",
+    "Life Drain": "Lifesteal",
+    "Counterattack On Crit": "Avenging",
+    "Dot Rate": "Toxic",
+    "Freeze Rate On Damage Received": "Frost",
+    "AoE Damage Decrease": "Stalwart",
+    "Ignore Defense": "Savage",
+    "Sleep Chance": "Daze",
+    "Decrease Max HP": "Destroy",
+    "Attack Power": "Offense",
+    "Cooldown Reduction Chance": "Reflex",
+    "Critical Heal Multiplier": "Critical Damage",
+    "Unkillable And SPD And CR Damage": "Swift Parry",
+    "Attack And Crit Rate": "Fatal",
+    "Block Debuff": "Immunity",
+    "Crit Rate And Ignore DEF Multiplier": "Lethal",
+    "Damage Increase On HP Decrease": "Fury",
+    "Get Extra Turn": "Relentless",
+    "HP": "Life",
+    "Stun Chance": "Stun",
+    "Crit Damage And Transform Week Into Crit Hit": "Affinitybreaker",
+    "Crit Rate And Life Drain": "Bloodthirst",
+    "Resistance": "Resistance",
+    "Critical Chance": "Critical Rate",
+    "Defense": "Defense",
+    "Shield": "Shield",
+    "Counterattack": "Retaliation",
+    "Passive Share Damage And Heal": "Guardian",
+    "Provoke Chance": "Taunting",
+    "Change Hit Type": "Reaction Accessory",
+    "Counterattack Accessory": "Revenge Accessory",
+    "Shield Accessory": "Bloodshield Accessory",
+}
+
+
+def choose_set_display_name(set_name: str, curated_entry: Dict[str, Any] | None = None) -> str:
+    curated_entry = curated_entry or {}
+    raw_name = str(set_name or "").strip()
+    canonical_name = str(curated_entry.get("canonical_name") or "").strip()
+    display_name = str(curated_entry.get("display_name") or "").strip()
+    if canonical_name and (not display_name or display_name == raw_name):
+        return canonical_name
+    return display_name or canonical_name or SET_DISPLAY_NAMES.get(raw_name, raw_name)
 
 
 def open_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
@@ -198,6 +252,520 @@ def build_gear_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
         "top_sets": top_sets,
         "slots": slots,
     }
+
+
+def build_set_registry(db_path: Path = DB_PATH) -> Dict[str, Any]:
+    curated_entries = {
+        str(entry.get("set_name") or "").strip(): entry
+        for entry in load_local_set_entries()
+        if str(entry.get("set_name") or "").strip()
+    }
+    with open_db(db_path) as conn:
+        definition_rows = conn.execute(
+            """
+            SELECT set_name, pieces_required, heal_each_turn_pct, set_kind, counts_accessories, max_pieces, source
+            FROM set_definitions
+            ORDER BY set_name ASC
+            """
+        ).fetchall()
+        stat_rows = conn.execute(
+            """
+            SELECT set_name, stat_order, stat_type, stat_value
+            FROM set_definition_stats
+            ORDER BY set_name ASC, stat_order ASC
+            """
+        ).fetchall()
+        piece_bonus_rows = conn.execute(
+            """
+            SELECT set_name, bonus_order, pieces_required, stat_type, stat_value, effect_text
+            FROM set_definition_piece_bonuses
+            ORDER BY set_name ASC, bonus_order ASC
+            """
+        ).fetchall()
+        inventory_rows = conn.execute(
+            """
+            SELECT
+                set_name,
+                COUNT(*) AS total_items,
+                SUM(CASE WHEN item_class = 'artifact' THEN 1 ELSE 0 END) AS artifact_items,
+                SUM(CASE WHEN item_class = 'accessory' THEN 1 ELSE 0 END) AS accessory_items,
+                SUM(CASE WHEN equipped_by IS NOT NULL AND equipped_by != '' THEN 1 ELSE 0 END) AS equipped_items,
+                SUM(CASE WHEN item_class = 'artifact' AND (equipped_by IS NULL OR equipped_by = '') THEN 1 ELSE 0 END) AS inventory_artifact_items,
+                SUM(CASE WHEN item_class = 'accessory' AND (equipped_by IS NULL OR equipped_by = '') THEN 1 ELSE 0 END) AS inventory_accessory_items,
+                COUNT(DISTINCT CASE WHEN equipped_by IS NOT NULL AND equipped_by != '' THEN equipped_by END) AS equipped_owners
+            FROM gear_items
+            WHERE set_name IS NOT NULL AND set_name != ''
+            GROUP BY set_name
+            ORDER BY set_name ASC
+            """
+        ).fetchall()
+
+    sets_by_name: Dict[str, Dict[str, Any]] = {}
+    for row in definition_rows:
+        set_name = str(row["set_name"] or "")
+        curated_entry = curated_entries.get(set_name) or {}
+        sets_by_name[set_name] = {
+            "set_name": set_name,
+            "canonical_name": str(curated_entry.get("canonical_name") or "").strip(),
+            "display_name": choose_set_display_name(set_name, curated_entry),
+            "set_kind": str(row["set_kind"] or "unknown"),
+            "pieces_required": int(row["pieces_required"] or 0),
+            "max_pieces": int(row["max_pieces"] or 0),
+            "counts_accessories": bool(row["counts_accessories"]),
+            "heal_each_turn_pct": float(row["heal_each_turn_pct"] or 0.0),
+            "source": str(row["source"] or ""),
+            "stats": [],
+            "piece_bonuses": [],
+            "inventory": {
+                "total_items": 0,
+                "artifact_items": 0,
+                "accessory_items": 0,
+                "equipped_items": 0,
+                "inventory_items": 0,
+                "inventory_artifact_items": 0,
+                "inventory_accessory_items": 0,
+                "equipped_owners": 0,
+            },
+            "progress": {},
+        }
+
+    for row in stat_rows:
+        set_name = str(row["set_name"] or "")
+        set_row = sets_by_name.setdefault(
+            set_name,
+            {
+                "set_name": set_name,
+                "canonical_name": "",
+                "display_name": choose_set_display_name(set_name),
+                "set_kind": "unknown",
+                "pieces_required": 0,
+                "max_pieces": 0,
+                "counts_accessories": False,
+                "heal_each_turn_pct": 0.0,
+                "source": "unknown",
+                "stats": [],
+                "piece_bonuses": [],
+                "inventory": {
+                    "total_items": 0,
+                    "artifact_items": 0,
+                    "accessory_items": 0,
+                    "equipped_items": 0,
+                    "inventory_items": 0,
+                    "inventory_artifact_items": 0,
+                    "inventory_accessory_items": 0,
+                    "equipped_owners": 0,
+                },
+                "progress": {},
+            },
+        )
+        set_row["stats"].append(
+            {
+                "stat_type": str(row["stat_type"] or ""),
+                "stat_value": float(row["stat_value"] or 0.0),
+            }
+        )
+
+    piece_bonus_map: Dict[tuple[str, int], Dict[str, Any]] = {}
+    for row in piece_bonus_rows:
+        set_name = str(row["set_name"] or "")
+        pieces_required = int(row["pieces_required"] or 0)
+        bonus_key = (set_name, pieces_required)
+        piece_bonus = piece_bonus_map.get(bonus_key)
+        if piece_bonus is None:
+            piece_bonus = {
+                "pieces_required": pieces_required,
+                "stats": [],
+                "effects": [],
+            }
+            piece_bonus_map[bonus_key] = piece_bonus
+            sets_by_name.setdefault(
+                set_name,
+                {
+                    "set_name": set_name,
+                    "canonical_name": "",
+                    "display_name": choose_set_display_name(set_name),
+                    "set_kind": "unknown",
+                    "pieces_required": 0,
+                    "max_pieces": 0,
+                    "counts_accessories": False,
+                    "heal_each_turn_pct": 0.0,
+                    "source": "unknown",
+                    "stats": [],
+                    "piece_bonuses": [],
+                    "inventory": {
+                        "total_items": 0,
+                        "artifact_items": 0,
+                        "accessory_items": 0,
+                        "equipped_items": 0,
+                        "inventory_items": 0,
+                        "inventory_artifact_items": 0,
+                        "inventory_accessory_items": 0,
+                        "equipped_owners": 0,
+                    },
+                    "progress": {},
+                },
+            )["piece_bonuses"].append(piece_bonus)
+        if row["stat_type"] is not None:
+            piece_bonus["stats"].append(
+                {
+                    "stat_type": str(row["stat_type"] or ""),
+                    "stat_value": float(row["stat_value"] or 0.0),
+                }
+            )
+        effect_text = str(row["effect_text"] or "").strip()
+        if effect_text:
+            piece_bonus["effects"].append(effect_text)
+
+    for row in inventory_rows:
+        set_name = str(row["set_name"] or "")
+        set_row = sets_by_name.setdefault(
+            set_name,
+            {
+                "set_name": set_name,
+                "canonical_name": "",
+                "display_name": choose_set_display_name(set_name),
+                "set_kind": "unknown",
+                "pieces_required": 0,
+                "max_pieces": 0,
+                "counts_accessories": False,
+                "heal_each_turn_pct": 0.0,
+                "source": "observed_gear",
+                "stats": [],
+                "piece_bonuses": [],
+                    "inventory": {
+                        "total_items": 0,
+                        "artifact_items": 0,
+                        "accessory_items": 0,
+                        "equipped_items": 0,
+                        "inventory_items": 0,
+                        "inventory_artifact_items": 0,
+                        "inventory_accessory_items": 0,
+                        "equipped_owners": 0,
+                    },
+                    "progress": {},
+                },
+            )
+        total_items = int(row["total_items"] or 0)
+        equipped_items = int(row["equipped_items"] or 0)
+        set_row["inventory"] = {
+            "total_items": total_items,
+            "artifact_items": int(row["artifact_items"] or 0),
+            "accessory_items": int(row["accessory_items"] or 0),
+            "equipped_items": equipped_items,
+            "inventory_items": total_items - equipped_items,
+            "inventory_artifact_items": int(row["inventory_artifact_items"] or 0),
+            "inventory_accessory_items": int(row["inventory_accessory_items"] or 0),
+            "equipped_owners": int(row["equipped_owners"] or 0),
+        }
+        infer_accessory_only_set(set_row)
+
+    items = sorted(
+        sets_by_name.values(),
+        key=lambda row: (
+            0 if row["inventory"]["total_items"] > 0 else 1,
+            row["display_name"].lower(),
+            row["set_name"].lower(),
+        ),
+    )
+    for item in items:
+        item["piece_bonuses"].sort(key=lambda row: int(row["pieces_required"] or 0))
+        item["progress"] = build_set_progress(item)
+        item["summary"] = summarize_set_rule(item)
+
+    total_sets = len(items)
+    observed_sets = sum(1 for item in items if int(item["inventory"]["total_items"]) > 0)
+    variable_sets = sum(1 for item in items if str(item["set_kind"]).lower() == "variable")
+    fixed_sets = sum(1 for item in items if str(item["set_kind"]).lower() == "fixed")
+    accessory_sets = sum(1 for item in items if bool(item["counts_accessories"]))
+    completable_fixed_sets = sum(1 for item in items if int(item["progress"].get("complete_sets_total") or 0) > 0)
+    inventory_ready_fixed_sets = sum(1 for item in items if int(item["progress"].get("complete_sets_inventory") or 0) > 0)
+    return {
+        "summary": {
+            "total_sets": total_sets,
+            "observed_sets": observed_sets,
+            "fixed_sets": fixed_sets,
+            "variable_sets": variable_sets,
+            "accessory_sets": accessory_sets,
+            "completable_fixed_sets": completable_fixed_sets,
+            "inventory_ready_fixed_sets": inventory_ready_fixed_sets,
+        },
+        "sets": items,
+    }
+
+
+def build_set_curation_payload(db_path: Path = DB_PATH) -> Dict[str, Any]:
+    registry = build_set_registry(db_path)
+    curated_entries = {str(entry.get("set_name") or "").strip(): entry for entry in load_local_set_entries() if str(entry.get("set_name") or "").strip()}
+    samples_by_set = load_set_curation_samples(db_path)
+    items: List[Dict[str, Any]] = []
+    for set_row in registry["sets"]:
+        set_name = str(set_row.get("set_name") or "").strip()
+        curated = curated_entries.get(set_name)
+        item = {
+            "set_name": set_name,
+            "display_name": str(set_row.get("display_name") or ""),
+            "summary": str(set_row.get("summary") or ""),
+            "set_kind": str(set_row.get("set_kind") or ""),
+            "counts_accessories": bool(set_row.get("counts_accessories")),
+            "pieces_required": int(set_row.get("pieces_required") or 0),
+            "max_pieces": int(set_row.get("max_pieces") or 0),
+            "inventory": dict(set_row.get("inventory") or {}),
+            "progress": dict(set_row.get("progress") or {}),
+            "source": str(set_row.get("source") or ""),
+            "observed_samples": dict(samples_by_set.get(set_name) or default_set_curation_samples()),
+            "curated": bool(curated),
+            "curation": curated or {
+                "set_name": set_name,
+                "canonical_name": "",
+                "display_name": str(set_row.get("display_name") or ""),
+                "set_kind": infer_curation_kind(set_row),
+                "counts_accessories": bool(set_row.get("counts_accessories")),
+                "pieces_required": default_curation_pieces_required(set_row),
+                "max_pieces": default_curation_max_pieces(set_row),
+                "base_bonus_text": "",
+                "thresholds_text": "",
+            },
+        }
+        items.append(item)
+    items.sort(
+        key=lambda row: (
+            0 if int(dict(row.get("inventory") or {}).get("total_items") or 0) > 0 else 1,
+            0 if not bool(row.get("curated")) else 1,
+            row["display_name"].lower(),
+            row["set_name"].lower(),
+        )
+    )
+    return {
+        "summary": registry["summary"],
+        "items": items,
+    }
+
+
+def default_set_curation_samples() -> Dict[str, Any]:
+    return {
+        "slot_counts": [],
+        "owner_counts": [],
+        "sample_items": [],
+    }
+
+
+def load_set_curation_samples(db_path: Path = DB_PATH, limit_per_set: int = 12) -> Dict[str, Dict[str, Any]]:
+    with open_db(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                gi.set_name,
+                gi.item_id,
+                gi.item_class,
+                gi.slot,
+                gi.rarity,
+                gi.rank,
+                gi.level,
+                gi.main_stat_type,
+                gi.main_stat_value,
+                gi.equipped_by,
+                ac.champion_name AS owner_name
+            FROM gear_items gi
+            LEFT JOIN account_champions ac
+                ON ac.champ_id = gi.equipped_by
+            WHERE gi.set_name IS NOT NULL AND gi.set_name != ''
+            ORDER BY
+                gi.set_name ASC,
+                CASE WHEN gi.equipped_by IS NOT NULL AND gi.equipped_by != '' THEN 0 ELSE 1 END ASC,
+                gi.rank DESC,
+                gi.level DESC,
+                gi.slot ASC,
+                gi.item_id ASC
+            """
+        ).fetchall()
+
+    slot_counters: Dict[str, Counter[str]] = {}
+    owner_counters: Dict[str, Counter[str]] = {}
+    samples_by_set: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        set_name = str(row["set_name"] or "").strip()
+        if not set_name:
+            continue
+        slot = str(row["slot"] or "").strip()
+        owner_name = str(row["owner_name"] or "").strip()
+        slot_counters.setdefault(set_name, Counter())
+        owner_counters.setdefault(set_name, Counter())
+        if slot:
+            slot_counters[set_name][slot] += 1
+        if owner_name:
+            owner_counters[set_name][owner_name] += 1
+        bucket = samples_by_set.setdefault(set_name, default_set_curation_samples())
+        if len(bucket["sample_items"]) >= limit_per_set:
+            continue
+        bucket["sample_items"].append(
+            {
+                "item_id": str(row["item_id"] or ""),
+                "item_class": str(row["item_class"] or ""),
+                "slot": slot,
+                "rarity": str(row["rarity"] or ""),
+                "rank": int(row["rank"] or 0),
+                "level": int(row["level"] or 0),
+                "main_stat_type": str(row["main_stat_type"] or ""),
+                "main_stat_value": row["main_stat_value"],
+                "equipped": bool(row["equipped_by"]),
+                "owner_name": owner_name,
+            }
+        )
+
+    for set_name, payload in samples_by_set.items():
+        payload["slot_counts"] = [
+            {"slot": slot, "count": count}
+            for slot, count in sorted(slot_counters.get(set_name, Counter()).items(), key=lambda item: (gear_slot_sort_key(item[0]), item[0].lower()))
+        ]
+        payload["owner_counts"] = [
+            {"owner_name": owner_name, "count": count}
+            for owner_name, count in owner_counters.get(set_name, Counter()).most_common(8)
+        ]
+    return samples_by_set
+
+
+def infer_curation_kind(set_row: Dict[str, Any]) -> str:
+    current = str(set_row.get("set_kind") or "").strip().lower()
+    if current in {"fixed", "variable", "accessory"}:
+        return current
+    inventory = dict(set_row.get("inventory") or {})
+    if int(inventory.get("artifact_items") or 0) == 0 and int(inventory.get("accessory_items") or 0) > 0:
+        return "accessory"
+    return "fixed"
+
+
+def default_curation_pieces_required(set_row: Dict[str, Any]) -> int:
+    set_kind = infer_curation_kind(set_row)
+    if set_kind in {"variable", "accessory"}:
+        return 1
+    return max(int(set_row.get("pieces_required") or 0), 2)
+
+
+def default_curation_max_pieces(set_row: Dict[str, Any]) -> int:
+    set_kind = infer_curation_kind(set_row)
+    current = int(set_row.get("max_pieces") or 0)
+    if current > 0:
+        return current
+    if set_kind == "variable":
+        return 9
+    if set_kind == "accessory":
+        return 3
+    return 6
+
+
+def build_set_progress(set_row: Dict[str, Any]) -> Dict[str, Any]:
+    inventory = dict(set_row.get("inventory") or {})
+    counts_accessories = bool(set_row.get("counts_accessories"))
+    set_kind = str(set_row.get("set_kind") or "unknown").strip().lower()
+    relevant_total_items = int(inventory.get("total_items") or 0) if counts_accessories else int(inventory.get("artifact_items") or 0)
+    relevant_inventory_items = (
+        int(inventory.get("inventory_items") or 0)
+        if counts_accessories
+        else int(inventory.get("inventory_artifact_items") or 0)
+    )
+    relevant_equipped_items = max(relevant_total_items - relevant_inventory_items, 0)
+
+    progress = {
+        "relevant_total_items": relevant_total_items,
+        "relevant_inventory_items": relevant_inventory_items,
+        "relevant_equipped_items": relevant_equipped_items,
+        "complete_sets_total": 0,
+        "complete_sets_inventory": 0,
+        "highest_bonus_threshold_total": 0,
+        "highest_bonus_threshold_inventory": 0,
+        "next_threshold_total": 0,
+        "next_threshold_inventory": 0,
+        "missing_for_next_total": 0,
+        "missing_for_next_inventory": 0,
+    }
+
+    if set_kind in {"variable", "accessory"}:
+        thresholds = sorted(
+            {
+                int(row.get("pieces_required") or 0)
+                for row in list(set_row.get("piece_bonuses") or [])
+                if int(row.get("pieces_required") or 0) > 0
+            }
+        )
+        progress["highest_bonus_threshold_total"] = highest_reached_threshold(relevant_total_items, thresholds)
+        progress["highest_bonus_threshold_inventory"] = highest_reached_threshold(relevant_inventory_items, thresholds)
+        progress["next_threshold_total"] = next_threshold_after(progress["highest_bonus_threshold_total"], thresholds)
+        progress["next_threshold_inventory"] = next_threshold_after(progress["highest_bonus_threshold_inventory"], thresholds)
+        if progress["next_threshold_total"] > 0:
+            progress["missing_for_next_total"] = max(progress["next_threshold_total"] - relevant_total_items, 0)
+        if progress["next_threshold_inventory"] > 0:
+            progress["missing_for_next_inventory"] = max(progress["next_threshold_inventory"] - relevant_inventory_items, 0)
+        return progress
+
+    pieces_required = int(set_row.get("pieces_required") or 0)
+    if pieces_required > 0:
+        progress["complete_sets_total"] = relevant_total_items // pieces_required
+        progress["complete_sets_inventory"] = relevant_inventory_items // pieces_required
+        progress["next_threshold_total"] = pieces_required if relevant_total_items % pieces_required else 0
+        progress["next_threshold_inventory"] = pieces_required if relevant_inventory_items % pieces_required else 0
+        if progress["next_threshold_total"] > 0:
+            progress["missing_for_next_total"] = pieces_required - (relevant_total_items % pieces_required)
+        if progress["next_threshold_inventory"] > 0:
+            progress["missing_for_next_inventory"] = pieces_required - (relevant_inventory_items % pieces_required)
+    return progress
+
+
+def highest_reached_threshold(pieces: int, thresholds: List[int]) -> int:
+    reached = 0
+    for threshold in thresholds:
+        if pieces < threshold:
+            break
+        reached = threshold
+    return reached
+
+
+def next_threshold_after(current: int, thresholds: List[int]) -> int:
+    for threshold in thresholds:
+        if threshold > current:
+            return threshold
+    return 0
+
+
+def summarize_set_rule(set_row: Dict[str, Any]) -> str:
+    set_kind = str(set_row.get("set_kind") or "unknown").strip().lower()
+    counts_accessories = bool(set_row.get("counts_accessories"))
+    if set_kind == "accessory":
+        max_pieces = int(set_row.get("max_pieces") or 0)
+        highest = int(dict(set_row.get("progress") or {}).get("highest_bonus_threshold_total") or 0)
+        return f"Accessory set 1/2/3 ({'solo accessori' if counts_accessories else 'misto'}) · soglia attiva {highest}/{max_pieces}"
+    if set_kind == "variable":
+        max_pieces = int(set_row.get("max_pieces") or 0)
+        scope = "artifact + accessori" if counts_accessories else "solo artifact"
+        highest = int(dict(set_row.get("progress") or {}).get("highest_bonus_threshold_total") or 0)
+        return (
+            f"Variabile fino a {max_pieces} pezzi ({scope}) · soglia attiva {highest}/{max_pieces}"
+            if max_pieces
+            else f"Variable set ({scope})"
+        )
+    pieces_required = int(set_row.get("pieces_required") or 0)
+    if pieces_required > 0:
+        scope = "solo artifact" if not counts_accessories else "artifact + accessori"
+        complete_sets_total = int(dict(set_row.get("progress") or {}).get("complete_sets_total") or 0)
+        return f"{pieces_required} pezzi ({scope}) · chiudibili {complete_sets_total}"
+    return "Regola non classificata"
+
+
+def infer_accessory_only_set(set_row: Dict[str, Any]) -> None:
+    inventory = dict(set_row.get("inventory") or {})
+    if str(set_row.get("set_kind") or "").strip().lower() != "unknown":
+        return
+    if int(inventory.get("artifact_items") or 0) != 0:
+        return
+    if int(inventory.get("accessory_items") or 0) <= 0:
+        return
+    if not str(set_row.get("set_name") or "").strip().lower().endswith("accessory"):
+        return
+    set_row["set_kind"] = "accessory"
+    set_row["pieces_required"] = 1
+    set_row["max_pieces"] = 3
+    set_row["counts_accessories"] = True
+    if not str(set_row.get("source") or "").strip():
+        set_row["source"] = "inferred_accessory_set"
 
 
 def list_owned_champions(
@@ -416,6 +984,7 @@ def list_gear_items(
                 item["item_id"],
                 item["slot"],
                 item["set_name"],
+                SET_DISPLAY_NAMES.get(item["set_name"], ""),
                 item["owner_name"],
                 item["main_stat_type"],
                 item["rarity"],
@@ -911,6 +1480,12 @@ class CBForgeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/build":
             self._send_file(WEB_DIR / "build.html", "text/html; charset=utf-8")
             return
+        if parsed.path == "/sets":
+            self._send_file(WEB_DIR / "sets.html", "text/html; charset=utf-8")
+            return
+        if parsed.path == "/set-curation":
+            self._send_file(WEB_DIR / "set-curation.html", "text/html; charset=utf-8")
+            return
         if parsed.path == "/app.js":
             self._send_file(WEB_DIR / "app.js", "application/javascript; charset=utf-8")
             return
@@ -920,6 +1495,12 @@ class CBForgeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/build.js":
             self._send_file(WEB_DIR / "build.js", "application/javascript; charset=utf-8")
             return
+        if parsed.path == "/sets.js":
+            self._send_file(WEB_DIR / "sets.js", "application/javascript; charset=utf-8")
+            return
+        if parsed.path == "/set-curation.js":
+            self._send_file(WEB_DIR / "set-curation.js", "application/javascript; charset=utf-8")
+            return
         if parsed.path == "/style.css":
             self._send_file(WEB_DIR / "style.css", "text/css; charset=utf-8")
             return
@@ -928,6 +1509,12 @@ class CBForgeHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/gear-summary":
             self._send_json(build_gear_summary(self.app.db_path))
+            return
+        if parsed.path == "/api/set-registry":
+            self._send_json(build_set_registry(self.app.db_path))
+            return
+        if parsed.path == "/api/set-curation":
+            self._send_json(build_set_curation_payload(self.app.db_path))
             return
         if parsed.path == "/api/champions":
             query = parse_qs(parsed.query)
@@ -941,17 +1528,18 @@ class CBForgeHandler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/api/build-profiles":
-            self._send_json({"profiles": list_build_profiles()})
+            self._send_json({"profiles": list_build_profiles(), "area_regions": list_area_bonus_regions()})
             return
         if parsed.path == "/api/build-plan":
             query = parse_qs(parsed.query)
             name = first_query_value(query, "name")
             profile = first_query_value(query, "profile") or "arena_speed_lead"
+            area_region = first_query_value(query, "region")
             if not name:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "Parametro 'name' mancante.")
                 return
             try:
-                payload = build_champion_plan(unquote(name), profile_key=profile, db_path=self.app.db_path)
+                payload = build_champion_plan(unquote(name), profile_key=profile, area_region=area_region, db_path=self.app.db_path)
             except KeyError as exc:
                 self._send_error_json(HTTPStatus.NOT_FOUND, str(exc))
                 return
@@ -1055,6 +1643,15 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json({"ok": True, "result": result})
                 return
+            if parsed.path == "/api/set-curation-save":
+                entry = save_local_set_entry(payload)
+                summary = bootstrap_database(
+                    source_path=self.app.source_path,
+                    db_path=self.app.db_path,
+                    rebuild=True,
+                )
+                self._send_json({"ok": True, "entry": entry, "summary": summary})
+                return
         except Exception as exc:
             self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
             return
@@ -1070,6 +1667,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
         encoded = path.read_bytes()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
