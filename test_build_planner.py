@@ -14,6 +14,7 @@ def test_build_profiles_are_exposed() -> None:
 
     assert any(profile["key"] == "arena_speed_lead" for profile in profiles)
     assert any(profile["key"] == "arena_nuker" for profile in profiles)
+    assert any(profile["key"] == "clan_boss_dps" for profile in profiles)
 
 
 def test_effective_beam_width_expands_for_guardrailed_profiles() -> None:
@@ -363,6 +364,61 @@ def test_build_notes_warn_when_snapshot_has_missing_slots(tmp_path: Path) -> Non
 
     assert plan["current_build"]["missing_slots"] == ["banner"]
     assert plan["current_build"]["notes"][0].startswith("Snapshot incompleto:")
+
+
+def test_build_plan_excludes_suspicious_accessory_from_current_and_proposals(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-arbiter",
+                "name": "Arbiter",
+                "rarity": "legendary",
+                "affinity": "void",
+                "faction": "High Elves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 21000, "atk": 1200, "def": 1300, "spd": 110, "crit_rate": 15, "crit_dmg": 50, "acc": 0, "res": 30},
+                "total_stats": {"hp": 0, "atk": 0, "def": 0, "spd": 0, "crit_rate": 0, "crit_dmg": 0, "acc": 0, "res": 0},
+                "equipped_item_ids": ["bad-banner"],
+                "skills": [],
+            }
+        ],
+        "gear": [
+            {
+                "item_id": "bad-banner",
+                "item_class": "accessory",
+                "slot": "banner",
+                "set_name": "",
+                "rarity": "epic",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-arbiter",
+                "locked": False,
+                "main_stat": {"type": "crit_dmg", "value": 96},
+                "substats": [{"type": "spd", "value": 16, "rolls": 2, "glyph_value": 0}],
+            }
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    plan = build_champion_plan("Arbiter", profile_key="arena_speed_lead", db_path=db_path)
+
+    assert plan["current_build"]["items"] == []
+    assert plan["current_build"]["excluded_items"][0]["item_id"] == "bad-banner"
+    assert "banner" in plan["current_build"]["missing_slots"]
+    assert any("decode gear sospetto" in note for note in plan["current_build"]["notes"])
+    assert all(item["item_id"] != "bad-banner" for proposal in plan["proposals"] for item in proposal["items"])
 
 
 def test_current_build_warns_when_relics_are_present_but_stats_are_derived(tmp_path: Path) -> None:

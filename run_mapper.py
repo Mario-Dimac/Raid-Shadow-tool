@@ -135,22 +135,38 @@ def derive_run_mapping(
     if stage_id in DEMON_LORD_STAGE_MAP:
         return build_demon_lord_metadata(battle_context, sqlite_row=sqlite_row, hero_types_path=hero_types_path)
 
+    enemy_rows = list_value(dict_value(battle_context).get("enemy_rows"))
+    enemy_type_id = int_value(dict_value(enemy_rows[0]).get("type_id")) if enemy_rows else 0
+    enemy_level = int_value(dict_value(enemy_rows[0]).get("level")) if enemy_rows else 0
+    enemy_type_map = load_enemy_type_map(hero_types_path)
+    enemy_info = dict_value(enemy_type_map.get(enemy_type_id))
+    enemy_name = string_value(enemy_info.get("name")) or (string_value(dict_value(enemy_rows[0]).get("name")) if enemy_rows else "")
+    affinity = AFFINITY_BY_ELEMENT.get(int_value(enemy_info.get("element")))
+    is_demon_lord = enemy_name.strip().lower() == "demon lord"
+
     return {
-        "encounter_key": stage_id or "unknown_encounter",
-        "encounter_name": "",
-        "encounter_family": "",
-        "area_region": "",
-        "game_mode": "",
+        "encounter_key": stage_id or (enemy_name.lower().replace(" ", "_") if enemy_name else "unknown_encounter"),
+        "encounter_name": enemy_name,
+        "encounter_family": "demon_lord" if is_demon_lord else "",
+        "area_region": "clan_boss" if is_demon_lord else "",
+        "game_mode": "clan_boss" if is_demon_lord else "",
         "difficulty": "",
         "difficulty_source": "",
         "stage_id": stage_id,
         "stage_label": "",
         "stage_tier": None,
-        "boss_affinity": "",
-        "affinity_context": "",
-        "enemy_type_id": None,
-        "enemy_name": "",
-        "enemy_level": None,
-        "mapping_confidence": "low",
-        "mapping_sources": [],
+        "boss_affinity": affinity or "",
+        "affinity_context": "enemy_type_element" if affinity else "",
+        "enemy_type_id": enemy_type_id or None,
+        "enemy_name": enemy_name,
+        "enemy_level": enemy_level or None,
+        "mapping_confidence": "medium" if enemy_name or affinity else "low",
+        "mapping_sources": [
+            item
+            for item in [
+                "enemy_type_name" if enemy_name else "",
+                "enemy_type_element" if affinity else "",
+            ]
+            if item
+        ],
     }

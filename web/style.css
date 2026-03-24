@@ -442,6 +442,72 @@ button.ghost {
   color: #ffd79c;
 }
 
+.action-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.scroll-card {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.stack {
+  display: grid;
+  gap: 12px;
+}
+
+.debug-details {
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 10px 12px;
+}
+
+.debug-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.debug-details[open] summary {
+  color: var(--gold-strong);
+  margin-bottom: 10px;
+}
+
+.mono-block {
+  margin: 0;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.list-block {
+  display: grid;
+  gap: 8px;
+}
+
+.list-row {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.list-row strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
 .empty {
   padding: 22px;
   border-radius: 20px;

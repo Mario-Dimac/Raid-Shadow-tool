@@ -15,6 +15,7 @@ INPUT_DIR = BASE_DIR / "input"
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "cbforge.sqlite3"
 NORMALIZED_SOURCE_PATH = INPUT_DIR / "normalized_account.json"
+RAW_SOURCE_PATH = INPUT_DIR / "raw_account.json"
 
 
 DEFAULT_SET_RULES: Dict[str, Dict[str, Any]] = {
@@ -259,6 +260,42 @@ DEFAULT_SET_RULES["Merciless"] = {
         {"pieces_required": 8, "stats": [("crit_dmg", 15.0)]},
         {"pieces_required": 9, "effect_text": "15% chance to gain an Extra Turn upon dealing damage"},
     ],
+}
+
+GEAR_ALLOWED_MAIN_STATS: Dict[str, Dict[str, set[str]]] = {
+    "artifact": {
+        "weapon": {"atk"},
+        "helmet": {"hp"},
+        "shield": {"def"},
+        "gloves": {"hp_pct", "atk_pct", "def_pct", "crit_rate", "crit_dmg", "hp", "atk", "def"},
+        "chest": {"hp_pct", "atk_pct", "def_pct", "acc", "res", "hp", "atk", "def"},
+        "boots": {"spd", "hp_pct", "atk_pct", "def_pct", "hp", "atk", "def"},
+    },
+    "accessory": {
+        "ring": {"hp", "atk", "def"},
+        "amulet": {"hp", "atk", "def", "crit_dmg", "res"},
+        "banner": {"hp", "atk", "def", "acc", "res"},
+    },
+}
+
+GEAR_ALLOWED_SUBSTATS: Dict[str, Dict[str, set[str]]] = {
+    "accessory": {
+        "ring": {"hp", "atk", "def", "hp_pct", "atk_pct", "def_pct"},
+        "amulet": {"hp", "atk", "def", "acc", "res", "crit_dmg"},
+        "banner": {"hp", "atk", "def", "hp_pct", "atk_pct", "def_pct", "spd"},
+    },
+}
+
+LEGACY_KIND_SLOT_MAP: Dict[int, Tuple[str, str]] = {
+    1: ("artifact", "helmet"),
+    2: ("artifact", "gloves"),
+    3: ("artifact", "chest"),
+    4: ("artifact", "boots"),
+    5: ("artifact", "weapon"),
+    6: ("artifact", "shield"),
+    7: ("accessory", "ring"),
+    8: ("accessory", "amulet"),
+    9: ("accessory", "banner"),
 }
 
 DEFAULT_SET_RULES["Feral"] = {
@@ -838,6 +875,18 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS run_history_member_skill_usage (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        skill_order INTEGER NOT NULL,
+        skill_slot TEXT,
+        skill_code TEXT,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        usage_payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, member_order, skill_order)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS run_history_assets (
         run_id INTEGER NOT NULL,
         asset_order INTEGER NOT NULL,
@@ -980,8 +1029,11 @@ def reset_database(path: Path = DB_PATH) -> None:
 
 def load_source_account(source_path: Path = NORMALIZED_SOURCE_PATH) -> Dict[str, Any]:
     account = json.loads(source_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(account, dict):
+        return {}
     reconcile_loaded_account_ownership(account)
-    return account if isinstance(account, dict) else {}
+    repair_loaded_account_gear(account, source_path)
+    return account
 
 
 def bootstrap_database(
@@ -1331,6 +1383,7 @@ def database_status(path: Path = DB_PATH) -> Dict[str, Any]:
         "run_history_members",
         "run_history_member_stats",
         "run_history_member_metrics",
+        "run_history_member_skill_usage",
         "run_history_assets",
         "run_history_events",
         "app_state",
@@ -1374,6 +1427,7 @@ def clear_all_tables(conn: sqlite3.Connection) -> None:
         "run_history_events",
         "run_history_assets",
         "run_history_member_metrics",
+        "run_history_member_skill_usage",
         "run_history_member_stats",
         "run_history_members",
         "run_history_runs",
@@ -1515,6 +1569,25 @@ def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> 
                     ),
                 )
 
+            for skill_usage in list_value(member_map.get("skill_usage")):
+                skill_usage_map = dict_value(skill_usage)
+                conn.execute(
+                    """
+                    INSERT INTO run_history_member_skill_usage (
+                        run_id, member_order, skill_order, skill_slot, skill_code, usage_count, usage_payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        member_order,
+                        nullable_int(skill_usage_map.get("skill_order")),
+                        optional_string(skill_usage_map.get("skill_slot")),
+                        optional_string(skill_usage_map.get("skill_code")),
+                        int_value(skill_usage_map.get("usage_count")),
+                        json_text(skill_usage_map, {}),
+                    ),
+                )
+
         for asset_order, asset in enumerate(assets, start=1):
             asset_map = dict_value(asset)
             conn.execute(
@@ -1588,6 +1661,10 @@ def run_history_summary(run_id: int, db_path: Path = DB_PATH) -> Dict[str, Any]:
             "SELECT COUNT(*) FROM run_history_assets WHERE run_id = ?",
             (run_id,),
         ).fetchone()
+        skill_usage_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_member_skill_usage WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
     return {
         "run_id": int(row[0]),
         "encounter_key": string_value(row[1]),
@@ -1599,6 +1676,7 @@ def run_history_summary(run_id: int, db_path: Path = DB_PATH) -> Dict[str, Any]:
         "members": int(member_count[0] if member_count else 0),
         "events": int(event_count[0] if event_count else 0),
         "assets": int(asset_count[0] if asset_count else 0),
+        "skill_usages": int(skill_usage_count[0] if skill_usage_count else 0),
     }
 
 
@@ -1970,6 +2048,131 @@ def reconcile_loaded_account_ownership(account: Dict[str, Any]) -> None:
         owner_id = owner_by_item_id.get(item_id)
         if owner_id:
             item["equipped_by"] = owner_id
+
+
+def repair_loaded_account_gear(account: Dict[str, Any], source_path: Path) -> None:
+    gear = list_value(account.get("gear"))
+    if not gear:
+        return
+    kind_by_item_id = load_raw_item_kind_map(source_path.parent / RAW_SOURCE_PATH.name)
+    for item in gear:
+        repair_single_gear_item(item, kind_by_item_id.get(string_value(item.get("item_id"))))
+
+
+def load_raw_item_kind_map(raw_source_path: Path) -> Dict[str, int]:
+    if not raw_source_path.exists():
+        return {}
+    try:
+        raw_payload = json.loads(raw_source_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    containers = []
+    if isinstance(raw_payload, dict):
+        containers.extend(list_value(raw_payload.get("inventory")))
+        containers.extend(list_value(raw_payload.get("gear")))
+    mapping: Dict[str, int] = {}
+    for item in containers:
+        item_map = dict_value(item)
+        item_id = string_value(first_non_empty(item_map.get("item_id"), item_map.get("id")))
+        if not item_id:
+            continue
+        kind = int_value(item_map.get("kind"))
+        if kind > 0:
+            mapping[item_id] = kind
+    return mapping
+
+
+def repair_single_gear_item(item: Dict[str, Any], raw_kind: Optional[int] = None) -> None:
+    item_class = string_value(item.get("item_class")).strip().lower()
+    slot = string_value(item.get("slot")).strip().lower()
+    main_stat = dict_value(item.get("main_stat"))
+    main_stat_type = string_value(main_stat.get("type")).strip().lower()
+    substat_types = collect_item_substat_types(item)
+
+    if raw_kind is not None and raw_kind in LEGACY_KIND_SLOT_MAP:
+        expected_class, expected_slot = LEGACY_KIND_SLOT_MAP[raw_kind]
+        if is_valid_gear_item_for_slot(expected_class, expected_slot, main_stat_type, substat_types):
+            item["item_class"] = expected_class
+            item["slot"] = expected_slot
+            item_class = expected_class
+            slot = expected_slot
+
+    if is_valid_gear_item_for_slot(item_class, slot, main_stat_type, substat_types):
+        return
+
+    candidate_slots = [
+        candidate_slot
+        for candidate_slot in infer_candidate_slots(item_class, main_stat_type)
+        if is_valid_substats_for_slot(item_class, candidate_slot, substat_types)
+    ]
+    if len(candidate_slots) == 1:
+        item["slot"] = candidate_slots[0]
+
+
+def is_valid_main_stat_for_slot(item_class: str, slot: str, stat_type: str) -> bool:
+    if not item_class or not slot or not stat_type:
+        return True
+    allowed_by_slot = GEAR_ALLOWED_MAIN_STATS.get(item_class, {})
+    allowed_stats = allowed_by_slot.get(slot)
+    if not allowed_stats:
+        return True
+    return stat_type in allowed_stats
+
+
+def is_valid_substats_for_slot(item_class: str, slot: str, stat_types: Iterable[str]) -> bool:
+    if not item_class or not slot:
+        return True
+    allowed_by_slot = GEAR_ALLOWED_SUBSTATS.get(item_class, {})
+    allowed_stats = allowed_by_slot.get(slot)
+    if not allowed_stats:
+        return True
+    normalized_types = [string_value(stat_type).strip().lower() for stat_type in stat_types if string_value(stat_type).strip()]
+    return all(stat_type in allowed_stats for stat_type in normalized_types)
+
+
+def is_valid_gear_item_for_slot(item_class: str, slot: str, main_stat_type: str, substat_types: Iterable[str]) -> bool:
+    return is_valid_main_stat_for_slot(item_class, slot, main_stat_type) and is_valid_substats_for_slot(
+        item_class,
+        slot,
+        substat_types,
+    )
+
+
+def collect_item_substat_types(item: Dict[str, Any]) -> List[str]:
+    return [
+        string_value(dict_value(substat).get("type")).strip().lower()
+        for substat in list_value(item.get("substats"))
+        if string_value(dict_value(substat).get("type")).strip()
+    ]
+
+
+def collect_gear_validation_issues(item: Dict[str, Any]) -> List[str]:
+    item_class = string_value(item.get("item_class")).strip().lower()
+    slot = string_value(item.get("slot")).strip().lower()
+    main_stat = dict_value(item.get("main_stat"))
+    main_stat_type = string_value(main_stat.get("type")).strip().lower()
+    substat_types = collect_item_substat_types(item)
+    issues: List[str] = []
+    if not is_valid_main_stat_for_slot(item_class, slot, main_stat_type):
+        issues.append(f"main_stat:{main_stat_type or 'missing'}@{slot or 'unknown'}")
+    if not is_valid_substats_for_slot(item_class, slot, substat_types):
+        allowed_by_slot = GEAR_ALLOWED_SUBSTATS.get(item_class, {})
+        allowed_stats = allowed_by_slot.get(slot, set())
+        invalid_substats = [stat_type for stat_type in substat_types if stat_type not in allowed_stats]
+        for stat_type in invalid_substats:
+            issues.append(f"substat:{stat_type}@{slot or 'unknown'}")
+    return issues
+
+
+def is_valid_gear_item(item: Dict[str, Any]) -> bool:
+    return not collect_gear_validation_issues(item)
+
+
+def infer_candidate_slots(item_class: str, stat_type: str) -> List[str]:
+    if not item_class or not stat_type:
+        return []
+    allowed_by_slot = GEAR_ALLOWED_MAIN_STATS.get(item_class, {})
+    return [slot for slot, allowed_stats in allowed_by_slot.items() if stat_type in allowed_stats]
 
 
 def champion_sort_tuple(champion: Dict[str, Any]) -> Tuple[int, int, int, int]:

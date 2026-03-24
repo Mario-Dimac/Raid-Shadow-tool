@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from enrichment_sources import ChampionSkillMatch, get_skill_enrichment_provider, register_skill_enrichment_provider
-from forge_db import bootstrap_database, record_run_history, refresh_account_stat_models
+from forge_db import bootstrap_database, collect_gear_validation_issues, load_source_account, record_run_history, refresh_account_stat_models
 from hellhades_enrich import HellHadesChampionMatch, enrich_registry_from_hellhades, enrich_registry_from_source
 from providers.local_registry_provider import export_local_skill_registry
 
@@ -139,6 +139,167 @@ def test_bootstrap_database_builds_relational_tables(tmp_path: Path) -> None:
     assert "max_pieces" in set_definition_columns
 
 
+def test_load_source_account_repairs_gear_slots_from_raw_kind_map(tmp_path: Path) -> None:
+    normalized_path = tmp_path / "normalized_account.json"
+    raw_path = tmp_path / "raw_account.json"
+    normalized_payload = {
+        "champions": [],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "accessory",
+                "slot": "banner",
+                "set_name": "",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "atk", "value": 398},
+                "substats": [],
+            }
+        ],
+        "account_bonuses": [],
+    }
+    raw_payload = {
+        "inventory": [
+            {
+                "item_id": "gear-1",
+                "kind": 9,
+                "item_class": "accessory",
+                "slot": "banner",
+                "main_stat": {"type": "atk", "value": 398},
+            }
+        ]
+    }
+    normalized_path.write_text(json.dumps(normalized_payload), encoding="utf-8")
+    raw_path.write_text(json.dumps(raw_payload), encoding="utf-8")
+
+    account = load_source_account(normalized_path)
+
+    assert account["gear"][0]["slot"] == "banner"
+    assert account["gear"][0]["item_class"] == "accessory"
+
+
+def test_load_source_account_keeps_raw_slot_when_kind_repair_would_create_invalid_accessory(tmp_path: Path) -> None:
+    normalized_path = tmp_path / "normalized_account.json"
+    raw_path = tmp_path / "raw_account.json"
+    normalized_payload = {
+        "champions": [],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "accessory",
+                "slot": "banner",
+                "set_name": "",
+                "rarity": "epic",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "crit_dmg", "value": 96},
+                "substats": [{"type": "spd", "value": 16, "rolls": 2, "glyph_value": 0}],
+            }
+        ],
+        "account_bonuses": [],
+    }
+    raw_payload = {
+        "inventory": [
+            {
+                "item_id": "gear-1",
+                "kind": 9,
+                "item_class": "accessory",
+                "slot": "banner",
+                "main_stat": {"type": "crit_dmg", "value": 96},
+                "substats": [{"type": "spd", "value": 16}],
+            }
+        ]
+    }
+    normalized_path.write_text(json.dumps(normalized_payload), encoding="utf-8")
+    raw_path.write_text(json.dumps(raw_payload), encoding="utf-8")
+
+    account = load_source_account(normalized_path)
+    item = account["gear"][0]
+
+    assert item["slot"] == "banner"
+    assert collect_gear_validation_issues(item) == ["main_stat:crit_dmg@banner"]
+
+
+def test_bootstrap_database_repairs_illegal_slot_main_stat_combinations(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Ninja",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": False,
+                "role_tags": [],
+                "base_stats": {"hp": 100, "atk": 100, "def": 100, "spd": 100, "crit_rate": 15, "crit_dmg": 50, "acc": 0, "res": 30},
+                "total_stats": {"hp": 0, "atk": 0, "def": 0, "spd": 0, "crit_rate": 0, "crit_dmg": 0, "acc": 0, "res": 0},
+                "equipped_item_ids": ["gear-1", "gear-2"],
+                "skills": [],
+            }
+        ],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "accessory",
+                "slot": "amulet",
+                "set_name": "",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "acc", "value": 0.4},
+                "substats": [],
+            },
+            {
+                "item_id": "gear-2",
+                "item_class": "artifact",
+                "slot": "gloves",
+                "set_name": "",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "res", "value": 0.6},
+                "substats": [],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT item_id, slot FROM gear_items ORDER BY item_id").fetchall()
+
+    assert rows == [("gear-1", "banner"), ("gear-2", "chest")]
+
+
 def test_bootstrap_database_tracks_relic_count_on_owned_champions(tmp_path: Path) -> None:
     source_path = tmp_path / "normalized_account.json"
     db_path = tmp_path / "cbforge.sqlite3"
@@ -258,6 +419,7 @@ def test_bootstrap_database_exposes_run_history_tables(tmp_path: Path) -> None:
     assert summary["run_history_members"] == 0
     assert summary["run_history_member_stats"] == 0
     assert summary["run_history_member_metrics"] == 0
+    assert summary["run_history_member_skill_usage"] == 0
     assert summary["run_history_assets"] == 0
     assert summary["run_history_events"] == 0
 
@@ -335,6 +497,10 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
                 "tags": ["run_stable", "reviver"],
                 "stats": {"hp": 81234, "spd": 251, "res": 525},
                 "metrics": {"damage_done": 46384.5, "damage_taken": 15872.4, "alive_at_end": 1},
+                "skill_usage": [
+                    {"skill_order": 1, "skill_slot": "A1", "skill_code": "36601", "usage_count": 10},
+                    {"skill_order": 2, "skill_slot": "A2", "skill_code": "36602", "usage_count": 12},
+                ],
             },
             {
                 "champ_id": "champ-jintoro",
@@ -351,6 +517,9 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
                 "tags": ["damage_core"],
                 "stats": {"atk": 6230, "spd": 228, "crit_dmg": 281},
                 "metrics": {"damage_done": 129318.6, "damage_taken": 9442.1, "alive_at_end": 1},
+                "skill_usage": [
+                    {"skill_order": 1, "skill_slot": "A1", "skill_code": "58301", "usage_count": 11},
+                ],
             },
         ],
     }
@@ -363,6 +532,7 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
     assert summary["members"] == 2
     assert summary["events"] == 1
     assert summary["assets"] == 1
+    assert summary["skill_usages"] == 3
     assert summary["total_damage"] == 314451.3
 
     with sqlite3.connect(db_path) as conn:
@@ -392,6 +562,15 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
             """,
             (summary["run_id"],),
         ).fetchall()
+        skill_usage_rows = conn.execute(
+            """
+            SELECT member_order, skill_order, skill_slot, skill_code, usage_count
+            FROM run_history_member_skill_usage
+            WHERE run_id = ?
+            ORDER BY member_order, skill_order
+            """,
+            (summary["run_id"],),
+        ).fetchall()
 
     assert run_row is not None
     assert run_row[0] == "client_probe"
@@ -412,6 +591,11 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
     assert metric_rows == [
         (1, 46384.5, 1),
         (2, 129318.6, 1),
+    ]
+    assert skill_usage_rows == [
+        (1, 1, "A1", "36601", 10),
+        (1, 2, "A2", "36602", 12),
+        (2, 1, "A1", "58301", 11),
     ]
 
 

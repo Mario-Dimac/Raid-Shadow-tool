@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -40,6 +41,10 @@ INTERESTING_LOG_TOKENS = (
     "First Team:",
     "Second Team:",
     "Round:",
+)
+BATTLE_ID_HINT_RE = re.compile(
+    r"(?:CreateBattle with setup:Id:\s*|Created setup for battle Id -\s*|BattleSetup cached:\s*\[\s*Id\s*=\s*|Created battle processor for battleId -\s*)(?P<id>[0-9a-fA-F-]{8,})",
+    re.IGNORECASE,
 )
 
 
@@ -135,9 +140,19 @@ def is_interesting_log_line(line: str) -> bool:
     return any(token.lower() in stripped.lower() for token in INTERESTING_LOG_TOKENS)
 
 
+def hinted_battle_id(text: str) -> str:
+    match = BATTLE_ID_HINT_RE.search(str(text or "").strip())
+    return string_value(match.group("id") if match else "").strip()
+
+
 def should_capture_battle_context(line: str) -> bool:
     lowered = line.lower()
-    return "createbattle with setup:" in lowered
+    return (
+        "createbattle with setup:" in lowered
+        or "created setup for battle id -" in lowered
+        or "battlesetup cached:" in lowered
+        or "created battle processor for battleid -" in lowered
+    )
 
 
 def should_force_file_snapshot(source_name: str, line: str) -> bool:
@@ -145,8 +160,27 @@ def should_force_file_snapshot(source_name: str, line: str) -> bool:
     if source_name == "battle_results":
         return "battleresult added:" in lowered or "processbattlefinish" in lowered or "finishing battle -" in lowered
     if source_name == "workers_serialization":
-        return "createbattle with setup:" in lowered or "change battle state [loading -> started]" in lowered
+        return (
+            "createbattle with setup:" in lowered
+            or "change battle state [loading -> started]" in lowered
+            or "change battle state [startcmdsucceed -> started]" in lowered
+        )
     return False
+
+
+def hinted_battle_context(
+    line: str,
+    log_path: Path,
+    raw_account_path: Path,
+    normalized_account_path: Path,
+) -> Dict[str, Any]:
+    battle = latest_battle_context(log_path, raw_account_path, normalized_account_path)
+    battle_id = hinted_battle_id(line)
+    if not battle_id:
+        return battle
+    patched = dict(battle) if battle else {}
+    patched["battle_id"] = battle_id
+    return patched
 
 
 def poll_sqlite_events(path: Path, last_id: int) -> Tuple[List[Dict[str, Any]], int]:
@@ -222,8 +256,8 @@ def latest_battle_context(log_path: Path, raw_account_path: Path, normalized_acc
     return parse_latest_battle_block(lines, name_map)
 
 
-def create_session_dir() -> Path:
-    session_dir = ensure_dir(OUTPUT_ROOT / utc_slug())
+def create_session_dir(session_slug: str = "") -> Path:
+    session_dir = ensure_dir(OUTPUT_ROOT / (session_slug.strip() or utc_slug()))
     ensure_dir(session_dir / "snapshots")
     return session_dir
 
@@ -242,8 +276,8 @@ def write_session_metadata(session_dir: Path) -> None:
     )
 
 
-def run_watch(interval_seconds: float, duration_seconds: float) -> Path:
-    session_dir = create_session_dir()
+def run_watch(interval_seconds: float, duration_seconds: float, session_slug: str = "") -> Path:
+    session_dir = create_session_dir(session_slug=session_slug)
     write_session_metadata(session_dir)
     events_path = session_dir / "events.jsonl"
     log_capture_path = session_dir / "interesting_log_lines.txt"
@@ -278,24 +312,34 @@ def run_watch(interval_seconds: float, duration_seconds: float) -> Path:
                     },
                 )
             if any(should_capture_battle_context(line) for line in interesting_lines):
-                battle = latest_battle_context(
-                    DEFAULT_LOG_PATH,
-                    DEFAULT_RAW_ACCOUNT_PATH,
-                    DEFAULT_NORMALIZED_ACCOUNT_PATH,
-                )
-                write_jsonl(
-                    events_path,
-                    {
-                        "captured_at": now,
-                        "event_type": "battle_context",
-                        "battle": battle,
-                    },
-                )
-                if battle:
-                    members = ", ".join(str(name) for name in battle.get("player_members") or [])
-                    safe_print(
-                        f"[battle] id={battle.get('battle_id')} stage={battle.get('stage_id')} team={members}"
+                seen_battle_keys = set()
+                for line in interesting_lines:
+                    if not should_capture_battle_context(line):
+                        continue
+                    battle = hinted_battle_context(
+                        line,
+                        DEFAULT_LOG_PATH,
+                        DEFAULT_RAW_ACCOUNT_PATH,
+                        DEFAULT_NORMALIZED_ACCOUNT_PATH,
                     )
+                    dedupe_key = string_value(battle.get("battle_id") or "").strip() or line
+                    if dedupe_key in seen_battle_keys:
+                        continue
+                    seen_battle_keys.add(dedupe_key)
+                    write_jsonl(
+                        events_path,
+                        {
+                            "captured_at": now,
+                            "event_type": "battle_context",
+                            "battle": battle,
+                            "source_line": line,
+                        },
+                    )
+                    if battle:
+                        members = ", ".join(str(name) for name in battle.get("player_members") or [])
+                        safe_print(
+                            f"[battle] id={battle.get('battle_id')} stage={battle.get('stage_id')} team={members}"
+                        )
             for source_name, source_path in (
                 ("battle_results", DEFAULT_BATTLE_RESULTS_PATH),
                 ("workers_serialization", DEFAULT_WORKERS_SERIALIZATION_PATH),
@@ -303,12 +347,13 @@ def run_watch(interval_seconds: float, duration_seconds: float) -> Path:
                 matching_lines = [line for line in interesting_lines if should_force_file_snapshot(source_name, line)]
                 if not matching_lines:
                     continue
-                battle = latest_battle_context(
+                reason = matching_lines[-1]
+                battle = hinted_battle_context(
+                    reason,
                     DEFAULT_LOG_PATH,
                     DEFAULT_RAW_ACCOUNT_PATH,
                     DEFAULT_NORMALIZED_ACCOUNT_PATH,
                 )
-                reason = matching_lines[-1]
                 saved = save_binary_snapshot(
                     source_name,
                     source_path,
@@ -398,12 +443,21 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Durata massima in secondi. 0 = infinito.",
     )
+    parser.add_argument(
+        "--session-slug",
+        default="",
+        help="Slug sessione opzionale per pilotare il recorder da strumenti esterni.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    session_dir = run_watch(interval_seconds=max(args.interval, 0.1), duration_seconds=max(args.duration, 0.0))
+    session_dir = run_watch(
+        interval_seconds=max(args.interval, 0.1),
+        duration_seconds=max(args.duration, 0.0),
+        session_slug=str(args.session_slug or "").strip(),
+    )
     safe_print(f"Sessione salvata in: {session_dir}")
 
 

@@ -11,7 +11,7 @@ from account_stats import (
     normalize_stat_amount,
     normalize_stat_key,
 )
-from forge_db import DB_PATH, DEFAULT_SET_RULES, ensure_schema, load_account_bonuses, load_set_rules
+from forge_db import DB_PATH, DEFAULT_SET_RULES, collect_gear_validation_issues, ensure_schema, load_account_bonuses, load_set_rules
 
 
 BUILD_SLOT_ORDER = (
@@ -68,6 +68,83 @@ BUILD_PROFILES: Dict[str, Dict[str, Any]] = {
         "weights": {"atk": 5.6, "crit_rate": 7.0, "crit_dmg": 6.6, "spd": 2.4, "hp": 0.2, "def": 0.15},
         "set_bias": {"Attack Power And Ignore Defense": 10.0, "Shield And Critical Chance": 9.0, "Attack Speed": 4.0},
         "highlights": ["atk", "crit_rate", "crit_dmg", "spd"],
+    },
+    "speed_tuned_support": {
+        "label": "Speed Tuned Support",
+        "description": "Priorita a speed, tenuta e ordine turni per shell Clan Boss o support chiave.",
+        "weights": {"spd": 9.0, "hp": 1.6, "def": 1.5, "res": 0.25, "acc": 0.45},
+        "set_bias": {"Attack Speed": 15.0, "Accuracy And Speed": 12.0, "HP And Heal": 10.0, "HP And Defence": 10.0, "Shield And Speed": 8.0},
+        "minimum_ratio_vs_current": {"hp": 0.9, "def": 0.9},
+        "orphan_piece_penalty": 22.0,
+        "prefer_fewer_fixed_orphans": True,
+        "highlights": ["spd", "hp", "def", "res"],
+    },
+    "cooldown_support": {
+        "label": "Cooldown Support",
+        "description": "Support rapido e robusto che vuole ruotare la skill chiave con continuita.",
+        "weights": {"spd": 8.6, "hp": 1.5, "def": 1.35, "res": 0.22, "acc": 0.2},
+        "set_bias": {"Attack Speed": 14.0, "Cooldown Reduction Chance": 12.0, "Accuracy And Speed": 10.0, "HP And Heal": 9.0},
+        "minimum_ratio_vs_current": {"hp": 0.9, "def": 0.9},
+        "orphan_piece_penalty": 22.0,
+        "prefer_fewer_fixed_orphans": True,
+        "highlights": ["spd", "hp", "def", "res"],
+    },
+    "cleanser": {
+        "label": "Cleanser",
+        "description": "Cleanser o Block Debuffs con focus su speed, tenuta e un minimo di RES.",
+        "weights": {"spd": 8.0, "hp": 1.55, "def": 1.45, "res": 0.42, "acc": 0.15},
+        "set_bias": {"Attack Speed": 13.0, "HP And Defence": 12.0, "HP And Heal": 10.0, "Shield And Speed": 8.0},
+        "minimum_ratio_vs_current": {"hp": 0.92, "def": 0.92},
+        "orphan_piece_penalty": 22.0,
+        "prefer_fewer_fixed_orphans": True,
+        "highlights": ["spd", "hp", "def", "res"],
+    },
+    "ally_protector": {
+        "label": "Ally Protector",
+        "description": "Build tanky per protector, shielder o counterattack core da Clan Boss.",
+        "weights": {"hp": 2.2, "def": 1.9, "spd": 5.6, "res": 0.18, "acc": 0.18},
+        "set_bias": {"HP And Defence": 16.0, "HP And Heal": 13.0, "Shield And HP": 11.0, "Shield And Speed": 8.0},
+        "minimum_ratio_vs_current": {"hp": 0.95, "def": 0.95},
+        "orphan_piece_penalty": 26.0,
+        "prefer_fewer_fixed_orphans": True,
+        "highlights": ["hp", "def", "spd", "res"],
+    },
+    "decrease_attack_support": {
+        "label": "Decrease ATK Support",
+        "description": "Debuffer da Clan Boss: vuole accuracy e speed senza collassare di tenuta.",
+        "weights": {"spd": 7.8, "acc": 7.0, "hp": 1.3, "def": 1.25, "res": 0.14},
+        "set_bias": {"Accuracy And Speed": 15.0, "Accuracy": 12.0, "Attack Speed": 10.0, "HP And Defence": 7.0},
+        "minimum_ratio_vs_current": {"hp": 0.9, "def": 0.9},
+        "orphan_piece_penalty": 22.0,
+        "prefer_fewer_fixed_orphans": True,
+        "highlights": ["acc", "spd", "hp", "def"],
+    },
+    "poisoner": {
+        "label": "Poisoner",
+        "description": "Accuracy, speed e abbastanza tenuta per tenere alto l'uptime dei veleni.",
+        "weights": {"spd": 6.6, "acc": 6.6, "hp": 1.0, "def": 1.0, "crit_rate": 1.0, "crit_dmg": 0.9, "atk": 0.4},
+        "set_bias": {"Accuracy And Speed": 15.0, "Accuracy": 11.0, "Attack Speed": 10.0, "Dot Rate": 9.0},
+        "minimum_ratio_vs_current": {"hp": 0.88, "def": 0.88},
+        "orphan_piece_penalty": 20.0,
+        "highlights": ["acc", "spd", "hp", "def"],
+    },
+    "hp_burner": {
+        "label": "HP Burner",
+        "description": "Profilo per HP Burn da Clan Boss: speed, accuracy e tenuta prima del resto.",
+        "weights": {"spd": 6.4, "acc": 6.2, "hp": 1.1, "def": 1.0, "crit_rate": 0.9, "crit_dmg": 0.8, "atk": 0.45},
+        "set_bias": {"Accuracy And Speed": 15.0, "Accuracy": 10.0, "Attack Speed": 10.0, "Cooldown Reduction Chance": 6.0},
+        "minimum_ratio_vs_current": {"hp": 0.88, "def": 0.88},
+        "orphan_piece_penalty": 20.0,
+        "highlights": ["acc", "spd", "hp", "def"],
+    },
+    "clan_boss_dps": {
+        "label": "Clan Boss DPS",
+        "description": "Danno single-target con abbastanza speed e accuracy dove servono.",
+        "weights": {"crit_rate": 4.8, "crit_dmg": 4.5, "atk": 2.8, "def": 1.6, "hp": 0.9, "spd": 4.1, "acc": 2.8},
+        "set_bias": {"Attack Power And Ignore Defense": 10.0, "Attack Speed": 7.0, "Accuracy And Speed": 7.0, "Cooldown Reduction Chance": 5.0},
+        "minimum_ratio_vs_current": {"hp": 0.82, "def": 0.82},
+        "orphan_piece_penalty": 18.0,
+        "highlights": ["crit_rate", "crit_dmg", "spd", "acc"],
     },
 }
 
@@ -154,6 +231,10 @@ def build_champion_plan(
         for item in all_items
         if item.get("slot") in BUILD_SLOT_ORDER and item_matches_faction(item, champion["faction"])
     ]
+    for item in eligible_items:
+        item["validation_issues"] = collect_gear_validation_issues(item)
+    invalid_items = [item for item in eligible_items if item.get("validation_issues")]
+    eligible_items = [item for item in eligible_items if not item.get("validation_issues")]
     current_items = [item for item in eligible_items if item.get("equipped_by") == champion["champ_id"]]
     current_by_slot = {str(item["slot"]): item for item in current_items}
     base_totals = materialize_base_totals(base_stats)
@@ -206,6 +287,8 @@ def build_champion_plan(
         unsupported_override=current_model.unsupported_sets,
         applied_sets_override=current_model.applied_sets,
         area_region=normalized_area_region,
+        invalid_item_count=len(invalid_items),
+        excluded_items=invalid_items,
     )
 
     proposals: List[Dict[str, Any]] = []
@@ -252,6 +335,7 @@ def build_champion_plan(
             current_champion_name=champion["champion_name"],
             current_champ_id=champion["champ_id"],
             area_region=normalized_area_region,
+            invalid_item_count=len(invalid_items),
         )
         if build_breaks_profile_guardrails(proposal["stats"], current_compare_stats, profile):
             proposal = summarize_build(
@@ -269,6 +353,7 @@ def build_champion_plan(
                 current_champion_name=champion["champion_name"],
                 current_champ_id=champion["champ_id"],
                 area_region=normalized_area_region,
+                invalid_item_count=len(invalid_items),
             )
             proposal["notes"] = [
                 "Guardrail tank: evitata una build troppo fragile rispetto all'attuale.",
@@ -633,6 +718,8 @@ def summarize_build(
     unsupported_override: List[str] | None = None,
     applied_sets_override: List[Dict[str, Any]] | None = None,
     area_region: str = "",
+    invalid_item_count: int = 0,
+    excluded_items: Iterable[Mapping[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     item_list = sorted(list(items), key=lambda item: BUILD_SLOT_ORDER.index(str(item.get("slot") or "")))
     use_raw_totals = source_override is not None and scope_key == "current" and not area_region
@@ -703,6 +790,50 @@ def summarize_build(
                 "source_label": source_label,
                 "source_kind": source_kind,
                 "locked": bool(item.get("locked")),
+                "validation_issues": list(item.get("validation_issues") or []),
+            }
+        )
+
+    normalized_excluded_items: List[Dict[str, Any]] = []
+    for item in list(excluded_items or []):
+        equipped_by = str(item.get("equipped_by") or "")
+        owner_name = str(item.get("owner_name") or "")
+        if not equipped_by:
+            source_label = "Magazzino"
+            source_kind = "inventory"
+        elif equipped_by == current_champ_id:
+            source_label = f"Gia su {current_champion_name}"
+            source_kind = "current"
+        else:
+            source_label = f"Da {owner_name or equipped_by}"
+            source_kind = "borrowed"
+        normalized_excluded_items.append(
+            {
+                "item_id": str(item.get("item_id") or ""),
+                "item_class": str(item.get("item_class") or ""),
+                "slot": str(item.get("slot") or ""),
+                "set_name": str(item.get("set_name") or ""),
+                "rarity": str(item.get("rarity") or ""),
+                "rank": int(item.get("rank") or 0),
+                "level": int(item.get("level") or 0),
+                "ascension_level": int(item.get("ascension_level") or 0),
+                "main_stat_type": str(mapping_value(item.get("main_stat")).get("type") or ""),
+                "main_stat_value": float(mapping_value(item.get("main_stat")).get("value") or 0.0),
+                "substats": [
+                    {
+                        "stat_type": str(substat.get("type") or ""),
+                        "stat_value": round(float_value(substat.get("value")) + float_value(substat.get("glyph_value")), 2),
+                        "rolls": int(substat.get("rolls") or 0),
+                        "glyph_value": float_value(substat.get("glyph_value")),
+                    }
+                    for substat in list_value(item.get("substats"))
+                ],
+                "owner_name": owner_name,
+                "equipped_by": equipped_by,
+                "source_label": source_label,
+                "source_kind": source_kind,
+                "locked": bool(item.get("locked")),
+                "validation_issues": list(item.get("validation_issues") or []),
             }
         )
 
@@ -717,6 +848,7 @@ def summarize_build(
         missing_slots=missing_slots,
         unmodeled_relics=bool(int(champion.get("relic_count") or 0) > 0 and (source_override or stat_result.source) != "raw"),
         area_region=area_region,
+        invalid_item_count=invalid_item_count,
     )
     return {
         "key": scope_key,
@@ -726,6 +858,7 @@ def summarize_build(
         "stats": normalize_total_map(totals),
         "deltas": deltas,
         "items": normalized_items,
+        "excluded_items": normalized_excluded_items,
         "inventory_items": inventory_count,
         "borrowed_items": borrowed_count,
         "same_owner_items": same_owner_count,
@@ -748,6 +881,7 @@ def build_notes(
     missing_slots: Iterable[str] | None = None,
     unmodeled_relics: bool = False,
     area_region: str = "",
+    invalid_item_count: int = 0,
 ) -> List[str]:
     notes: List[str] = []
     if area_region:
@@ -757,6 +891,8 @@ def build_notes(
         notes.append(f"Snapshot incompleto: {len(BUILD_SLOT_ORDER) - len(missing_slot_list)}/{len(BUILD_SLOT_ORDER)} pezzi rilevati")
     if unmodeled_relics:
         notes.append("Relic presenti: bonus non ancora leggibili dal catalogo, stats finali parziali")
+    if invalid_item_count:
+        notes.append(f"{invalid_item_count} pezzi esclusi: decode gear sospetto")
     for stat_name in ("spd", "acc", "hp", "def", "res", "crit_rate", "crit_dmg", "atk"):
         delta = float(deltas.get(stat_name) or 0.0)
         if abs(delta) < 0.01:

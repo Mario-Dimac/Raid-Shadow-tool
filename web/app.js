@@ -253,15 +253,23 @@ function renderDetails() {
     ["Ruoli", detail.roles.length ? detail.roles.join(", ") : "n/d"],
     ["Stats source", statsLabel(detail.stat_model)],
     ["Stats refresh", detail.stat_model?.computed_at || "n/d"],
+    ["Stats importate", detail.stat_model?.imported_total_stats_present ? "si" : "no"],
+    ["Bonus account", (detail.stat_model?.bonus_sources || []).join(", ") || "n/d"],
     ["Set applicati", appliedSets],
     ["Set non quantificati", unsupportedSets],
   ].map(([label, value]) => `
     <div class="kv-row"><span>${escapeHtml(String(label))}</span><strong>${escapeHtml(String(value))}</strong></div>
   `).join("");
 
-  const statsNote = detail.stat_model?.completeness === "partial"
-    ? "Valori derivati da base, gear, glyph e bonus account. Alcuni set speciali equipaggiati non sono ancora quantificati."
-    : "Valori account affidabili: import raw se disponibile, altrimenti derivati da base, gear, glyph, set e bonus account.";
+  const statsWarnings = (detail.stat_model?.warnings || []).map((warning) => `
+    <div class="kv-row"><span>Attenzione</span><strong>${escapeHtml(warning)}</strong></div>
+  `).join("");
+  const missingSourcesLabel = (detail.stat_model?.missing_sources || []).join(", ") || "nessuna nota";
+  const statsNote = detail.stat_model?.imported_total_stats_present
+    ? "Valori account affidabili: le total stats importate sono disponibili."
+    : detail.stat_model?.completeness === "partial"
+      ? "Valori derivati da base, gear, glyph e bonus account parziali. Usali come stima, non come verita finale."
+      : "Valori derivati da base, gear, glyph, set e bonus account disponibili. Alcune sorgenti in-game possono comunque mancare.";
 
   const skills = (detail.skills || []).map((skill) => `
     <article class="skill">
@@ -310,6 +318,7 @@ function renderDetails() {
     <section class="card">
       <h3>Totale Account</h3>
       <div class="subtext">${escapeHtml(statsNote)}</div>
+      ${statsWarnings ? `<div class="kv" style="margin: 12px 0 10px;">${statsWarnings}<div class="kv-row"><span>Sorgenti mancanti</span><strong>${escapeHtml(missingSourcesLabel)}</strong></div></div>` : ""}
       ${renderStatsGrid(detail.total_stats)}
     </section>
 

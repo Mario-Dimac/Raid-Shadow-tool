@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CB Forge Runs</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="hero">
+        <div class="eyebrow">CB Forge</div>
+        <h1>Run Recorder</h1>
+        <p class="subtext">Controlla il recorder live e sfoglia le sessioni catturate dal probe locale mentre giochi.</p>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Campioni</a>
+          <a class="nav-link" href="/gear">Equip</a>
+          <a class="nav-link" href="/build">Build</a>
+          <a class="nav-link" href="/optimizer">Optimizer</a>
+          <a class="nav-link active" href="/runs">Runs</a>
+          <a class="nav-link" href="/sets">Sets</a>
+        </div>
+      </div>
+      <div class="toolbar">
+        <select id="runDuration">
+          <option value="0">Fino a stop manuale</option>
+          <option value="900">15 minuti</option>
+          <option value="1800">30 minuti</option>
+          <option value="3600">60 minuti</option>
+        </select>
+        <select id="runInterval">
+          <option value="0.35">Polling standard 350 ms</option>
+          <option value="0.2">Polling rapido 200 ms</option>
+          <option value="0.5">Polling leggero 500 ms</option>
+        </select>
+      </div>
+      <div id="runStatus" class="status"></div>
+      <div id="runSessionList" class="roster"></div>
+    </aside>
+
+    <main class="panel main">
+      <section id="runSummary" class="summary"></section>
+      <section class="main-toolbar">
+        <button id="runStartBtn" class="primary">Avvia Recorder</button>
+        <button id="runStopBtn" class="warn">Ferma Recorder</button>
+        <button id="runImportBtn" class="primary">Importa Nel DB</button>
+        <button id="runImportAllBtn" class="ghost">Importa Tutte</button>
+        <button id="runDeleteBtn" class="ghost">Elimina Selezionata</button>
+        <button id="runReloadBtn" class="ghost">Ricarica Stato</button>
+      </section>
+      <section id="runDetails" class="details">
+        <div class="empty">Seleziona una sessione o avvia il recorder per vedere stato, eventi e snapshot.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/runs.js"></script>
+</body>
+</html>
