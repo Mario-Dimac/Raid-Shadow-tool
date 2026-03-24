@@ -20,6 +20,35 @@ const reloadBtn = document.getElementById("reloadBtn");
 const SET_LABELS = {
   "Attack Speed": "Speed",
   "Accuracy And Speed": "Perception",
+  "HP And Heal": "Immortal",
+  "HP And Defence": "Resilience",
+  "Shield And HP": "Divine Life",
+  "Shield And Speed": "Divine Speed",
+  "Shield And Attack Power": "Divine Offense",
+  "Shield And Critical Chance": "Divine Crit Rate",
+  "Attack Power And Ignore Defense": "Cruel",
+  "Life Drain": "Lifesteal",
+  "Counterattack On Crit": "Avenging",
+  "Dot Rate": "Toxic",
+  "Freeze Rate On Damage Received": "Frost",
+  "AoE Damage Decrease": "Stalwart",
+  "Ignore Defense": "Savage",
+  "Sleep Chance": "Daze",
+  "Decrease Max HP": "Destroy",
+  "Attack Power": "Offense",
+  "Cooldown Reduction Chance": "Reflex",
+  "Critical Heal Multiplier": "Critical Damage",
+  "Unkillable And SPD And CR Damage": "Swift Parry",
+  "Attack And Crit Rate": "Fatal",
+  "Block Debuff": "Immunity",
+  "Crit Rate And Ignore DEF Multiplier": "Lethal",
+  "Damage Increase On HP Decrease": "Fury",
+  "Get Extra Turn": "Relentless",
+  "HP": "Life",
+  "Stun Chance": "Stun",
+  "Crit Damage And Transform Week Into Crit Hit": "Affinitybreaker",
+  "Crit Rate And Life Drain": "Bloodthirst",
+  "Change Hit Type": "Reaction Accessory",
 };
 
 async function fetchJson(url, options) {
@@ -35,6 +64,16 @@ async function fetchJson(url, options) {
     throw new Error(payload.error || response.statusText || "Richiesta fallita");
   }
   return payload;
+}
+
+function formatAppliedSetLabel(setRow) {
+  const setName = displaySetName(setRow?.set_name || "");
+  if ((setRow?.set_kind || "").toLowerCase() === "variable") {
+    const piecesEquipped = Number(setRow?.pieces_equipped || 0);
+    const maxPieces = Number(setRow?.max_pieces || 0);
+    return maxPieces > 0 ? `${setName} ${piecesEquipped}/${maxPieces}` : setName;
+  }
+  return `${setName} x${String(setRow?.completed_sets || 0)}`;
 }
 
 function setSidebarStatus(message, isError = false) {
@@ -111,9 +150,18 @@ function renderSummary() {
   summaryEl.innerHTML = [
     metricCard("Posseduti", summary.owned_champions || 0, "Campioni presenti nel tuo account"),
     metricCard("Target L60", summary.registry_targets || 0, "Roster gestito per Clan Boss"),
-    metricCard("Enriched", summary.registry_targets_fully_enriched || 0, "Target con skill complete"),
-    metricCard("Effect Rows", summary.skill_effect_rows || 0, summary.hellhades_last_enrich_utc || "Mai aggiornato"),
+    metricCard("Target Pronti", summary.registry_targets_ready || 0, "Target con skill complete e utilizzabili"),
+    metricCard("Con Effetti", summary.registry_targets_with_effect_data || 0, `${summary.skill_effect_rows || 0} effetti strutturati`),
+    metricCard("Registry Locale", summary.registry_targets_ready_from_local_registry || 0, `${summary.skill_rows_from_local_registry || 0} skill locali`),
+    metricCard("Fallback HH", summary.registry_targets_ready_from_hellhades || 0, formatProviderHits(summary.skill_registry_last_sync_provider_hits)),
   ].join("");
+}
+
+function formatProviderHits(providerHits) {
+  const payload = providerHits || {};
+  const entries = Object.entries(payload).filter(([, value]) => Number(value) > 0);
+  if (!entries.length) return "Nessun sync recente";
+  return entries.map(([key, value]) => `${key}:${value}`).join(" | ");
 }
 
 function championPills(champion) {
@@ -122,7 +170,9 @@ function championPills(champion) {
   pills.push(`<span class="pill">R${champion.rank}</span>`);
   pills.push(`<span class="pill">${escapeHtml(champion.rarity || "n/d")}</span>`);
   if (champion.is_registry_target) pills.push('<span class="pill gold">Target</span>');
-  pills.push(champion.enriched ? '<span class="pill ok">Enriched</span>' : '<span class="pill warn">Da arricchire</span>');
+  if (champion.data_status === "complete") pills.push('<span class="pill ok">Dati completi</span>');
+  else if (champion.data_status === "partial") pills.push('<span class="pill warn">Dati parziali</span>');
+  else pills.push('<span class="pill warn">Dati mancanti</span>');
   return pills.join("");
 }
 
@@ -135,7 +185,7 @@ function renderRoster() {
     <button class="champ-row ${state.selectedChampion === champion.champion_name ? "active" : ""}" data-name="${escapeHtml(champion.champion_name)}">
       <div class="champ-topline">
         <div class="champ-name">${escapeHtml(champion.champion_name)}</div>
-        <div class="pill">${champion.skill_rows_with_type}/${champion.skill_rows}</div>
+        <div class="pill">${champion.skill_rows_with_data}/${champion.skill_rows}</div>
       </div>
       <div class="pillbar">${championPills(champion)}</div>
     </button>
@@ -168,7 +218,11 @@ function renderDetails() {
     `<span class="pill">${escapeHtml(detail.account.affinity || "n/d")}</span>`,
     `<span class="pill">${escapeHtml(detail.account.faction || "n/d")}</span>`,
     detail.account.booked ? '<span class="pill ok">Bookato</span>' : '<span class="pill">Non bookato</span>',
-    detail.catalog.hellhades_post_id ? `<span class="pill ok">HH ${detail.catalog.hellhades_post_id}</span>` : '<span class="pill warn">HH mancante</span>',
+    detail.skill_data?.data_status === "complete"
+      ? '<span class="pill ok">Skill complete</span>'
+      : detail.skill_data?.data_status === "partial"
+        ? '<span class="pill warn">Skill parziali</span>'
+        : '<span class="pill warn">Skill da completare</span>',
   ].join("");
 
   const profileRows = [
@@ -186,26 +240,36 @@ function renderDetails() {
   `).join("");
 
   const unsupportedSets = (detail.stat_model?.unsupported_sets || []).map((setName) => displaySetName(setName)).join(", ") || "nessuno";
-  const appliedSets = (detail.stat_model?.applied_sets || []).map((setRow) => (
-    `${displaySetName(setRow.set_name)} x${setRow.completed_sets}`
-  )).join(", ") || "nessuno";
+  const appliedSets = (detail.stat_model?.applied_sets || []).map((setRow) => formatAppliedSetLabel(setRow)).join(", ") || "nessuno";
   const enrichRows = [
-    ["HellHades ID", detail.catalog.hellhades_post_id ?? "n/d"],
-    ["Ultimo enrich", detail.catalog.last_enriched_at || "n/d"],
+    ["Fonte skill", detail.skill_data?.primary_source || detail.catalog.external_provider || "n/d"],
+    ["Ref esterno", detail.catalog.external_ref_id ?? "n/d"],
+    ["Ultimo sync esterno", detail.catalog.external_synced_at || "n/d"],
     ["Skill", `${detail.skills.length}`],
+    ["Skill con dati", `${detail.skill_data?.skill_rows_with_data ?? 0}/${detail.skill_data?.skill_rows ?? 0}`],
+    ["Skill con effetti", `${detail.skill_data?.skill_rows_with_effects ?? 0}`],
+    ["Stato skill", detail.skill_data?.data_status || "n/d"],
     ["Effect rows", `${detail.skills.reduce((count, skill) => count + (skill.effects || []).length, 0)}`],
     ["Ruoli", detail.roles.length ? detail.roles.join(", ") : "n/d"],
     ["Stats source", statsLabel(detail.stat_model)],
     ["Stats refresh", detail.stat_model?.computed_at || "n/d"],
+    ["Stats importate", detail.stat_model?.imported_total_stats_present ? "si" : "no"],
+    ["Bonus account", (detail.stat_model?.bonus_sources || []).join(", ") || "n/d"],
     ["Set applicati", appliedSets],
     ["Set non quantificati", unsupportedSets],
   ].map(([label, value]) => `
     <div class="kv-row"><span>${escapeHtml(String(label))}</span><strong>${escapeHtml(String(value))}</strong></div>
   `).join("");
 
-  const statsNote = detail.stat_model?.completeness === "partial"
-    ? "Valori derivati da base, gear, glyph e bonus account. Alcuni set speciali equipaggiati non sono ancora quantificati."
-    : "Valori account affidabili: import raw se disponibile, altrimenti derivati da base, gear, glyph, set e bonus account.";
+  const statsWarnings = (detail.stat_model?.warnings || []).map((warning) => `
+    <div class="kv-row"><span>Attenzione</span><strong>${escapeHtml(warning)}</strong></div>
+  `).join("");
+  const missingSourcesLabel = (detail.stat_model?.missing_sources || []).join(", ") || "nessuna nota";
+  const statsNote = detail.stat_model?.imported_total_stats_present
+    ? "Valori account affidabili: le total stats importate sono disponibili."
+    : detail.stat_model?.completeness === "partial"
+      ? "Valori derivati da base, gear, glyph e bonus account parziali. Usali come stima, non come verita finale."
+      : "Valori derivati da base, gear, glyph, set e bonus account disponibili. Alcune sorgenti in-game possono comunque mancare.";
 
   const skills = (detail.skills || []).map((skill) => `
     <article class="skill">
@@ -254,6 +318,7 @@ function renderDetails() {
     <section class="card">
       <h3>Totale Account</h3>
       <div class="subtext">${escapeHtml(statsNote)}</div>
+      ${statsWarnings ? `<div class="kv" style="margin: 12px 0 10px;">${statsWarnings}<div class="kv-row"><span>Sorgenti mancanti</span><strong>${escapeHtml(missingSourcesLabel)}</strong></div></div>` : ""}
       ${renderStatsGrid(detail.total_stats)}
     </section>
 
@@ -337,7 +402,7 @@ async function recomputeStats() {
 }
 
 async function refreshAll() {
-  setSidebarStatus("Refresh HellHades di tutti i target in corso...");
+  setSidebarStatus("Aggiornamento dati esterni di tutti i target in corso...");
   const payload = await postAction("/api/update-targets");
   setSidebarStatus(`Aggiornati ${payload.summary.updated}/${payload.summary.requested} target.`);
   await loadSummary();
@@ -347,7 +412,7 @@ async function refreshAll() {
 
 async function refreshSelected() {
   if (!state.selectedChampion) return;
-  setSidebarStatus(`Aggiornamento ${state.selectedChampion} in corso...`);
+  setSidebarStatus(`Aggiornamento dati esterni per ${state.selectedChampion} in corso...`);
   const payload = await postAction("/api/update-champion", { champion_name: state.selectedChampion });
   setSidebarStatus(`Aggiornato ${payload.summary.updated}/${payload.summary.requested}: ${state.selectedChampion}.`);
   await loadSummary();

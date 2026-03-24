@@ -3,6 +3,7 @@ const state = {
   selectedChampion: null,
   profiles: [],
   selectedProfile: "arena_speed_lead",
+  selectedRegion: "",
   plan: null,
 };
 
@@ -13,6 +14,7 @@ const buildStatusEl = document.getElementById("buildStatus");
 const buildSearchEl = document.getElementById("buildSearch");
 const buildSortEl = document.getElementById("buildSort");
 const profileSelectEl = document.getElementById("profileSelect");
+const regionSelectEl = document.getElementById("regionSelect");
 const buildCalcBtn = document.getElementById("buildCalcBtn");
 const buildReloadBtn = document.getElementById("buildReloadBtn");
 
@@ -29,6 +31,35 @@ const STAT_LABELS = {
 const SET_LABELS = {
   "Attack Speed": "Speed",
   "Accuracy And Speed": "Perception",
+  "HP And Heal": "Immortal",
+  "HP And Defence": "Resilience",
+  "Shield And HP": "Divine Life",
+  "Shield And Speed": "Divine Speed",
+  "Shield And Attack Power": "Divine Offense",
+  "Shield And Critical Chance": "Divine Crit Rate",
+  "Attack Power And Ignore Defense": "Cruel",
+  "Life Drain": "Lifesteal",
+  "Counterattack On Crit": "Avenging",
+  "Dot Rate": "Toxic",
+  "Freeze Rate On Damage Received": "Frost",
+  "AoE Damage Decrease": "Stalwart",
+  "Ignore Defense": "Savage",
+  "Sleep Chance": "Daze",
+  "Decrease Max HP": "Destroy",
+  "Attack Power": "Offense",
+  "Cooldown Reduction Chance": "Reflex",
+  "Critical Heal Multiplier": "Critical Damage",
+  "Unkillable And SPD And CR Damage": "Swift Parry",
+  "Attack And Crit Rate": "Fatal",
+  "Block Debuff": "Immunity",
+  "Crit Rate And Ignore DEF Multiplier": "Lethal",
+  "Damage Increase On HP Decrease": "Fury",
+  "Get Extra Turn": "Relentless",
+  "HP": "Life",
+  "Stun Chance": "Stun",
+  "Crit Damage And Transform Week Into Crit Hit": "Affinitybreaker",
+  "Crit Rate And Life Drain": "Bloodthirst",
+  "Change Hit Type": "Reaction Accessory",
 };
 
 async function fetchJson(url, options) {
@@ -44,6 +75,16 @@ async function fetchJson(url, options) {
     throw new Error(payload.error || response.statusText || "Richiesta fallita");
   }
   return payload;
+}
+
+function formatAppliedSetLabel(setRow) {
+  const setName = displaySetName(setRow?.set_name || "");
+  if ((setRow?.set_kind || "").toLowerCase() === "variable") {
+    const piecesEquipped = Number(setRow?.pieces_equipped || 0);
+    const maxPieces = Number(setRow?.max_pieces || 0);
+    return maxPieces > 0 ? `${setName} ${piecesEquipped}/${maxPieces}` : setName;
+  }
+  return `${setName} x${String(setRow?.completed_sets || 0)}`;
 }
 
 function setStatus(message, isError = false) {
@@ -89,6 +130,14 @@ function displaySetName(setName) {
   return SET_LABELS[setName] || setName || "No Set";
 }
 
+function coherencePillClass(build) {
+  const label = String(build?.set_coherence?.label || "").toLowerCase();
+  if (label === "alta" || label === "buona") return "ok";
+  if (label === "mista") return "gold";
+  if (label === "bassa") return "warn";
+  return "";
+}
+
 function championPills(champion) {
   const pills = [];
   pills.push(`<span class="pill gold">Lv ${champion.level}</span>`);
@@ -132,6 +181,22 @@ function renderProfileSelect() {
   state.selectedProfile = profileSelectEl.value;
 }
 
+function renderRegionSelect() {
+  const regions = state.regions || [];
+  if (!regions.length) {
+    regionSelectEl.innerHTML = '<option value="">Nessuna area</option>';
+    regionSelectEl.value = "";
+    state.selectedRegion = "";
+    return;
+  }
+  const current = state.selectedRegion || "";
+  regionSelectEl.innerHTML = regions.map((region) => (
+    `<option value="${escapeHtml(region.key)}">${escapeHtml(region.label)}</option>`
+  )).join("");
+  regionSelectEl.value = regions.some((region) => region.key === current) ? current : regions[0].key;
+  state.selectedRegion = regionSelectEl.value;
+}
+
 function renderSummary() {
   if (!state.plan) {
     buildSummaryEl.innerHTML = [
@@ -152,6 +217,7 @@ function renderSummary() {
     metricCard("Profilo", state.plan.profile?.label || "-", state.plan.profile?.description || ""),
     metricCard(`Attuale ${STAT_LABELS[topStat] || topStat}`, formatStatValue(current.stats?.[topStat]), current.label || "Build attuale"),
     metricCard(`Best ${STAT_LABELS[topStat] || topStat}`, formatStatValue(best.stats?.[topStat]), `${formatDelta(delta)} vs attuale`),
+    metricCard("Set Coherence", best.set_coherence?.label || "-", best.set_coherence?.summary || ""),
     metricCard("Swap", best.swap_count || 0, `${best.borrowed_items || 0} da altri, ${best.inventory_items || 0} da magazzino`),
   ].join("");
 }
@@ -162,6 +228,7 @@ function renderBuildMetrics(build, highlights) {
     formatStatValue(build.stats?.[statName]),
     build.key === "current" ? "attuale" : `${formatDelta(build.deltas?.[statName] || 0)} vs attuale`,
   ));
+  stats.push(metricCard("Coherence", build.set_coherence?.label || "-", build.set_coherence?.summary || ""));
   stats.push(metricCard("Score", formatStatValue(build.score), build.key === "current" ? "base confronto" : "ranking profilo"));
   return `<div class="summary compact-summary">${stats.join("")}</div>`;
 }
@@ -169,7 +236,7 @@ function renderBuildMetrics(build, highlights) {
 function renderSetPills(build) {
   const bits = [];
   (build.applied_sets || []).forEach((row) => {
-    bits.push(`<span class="pill ok">${escapeHtml(displaySetName(row.set_name))} x${escapeHtml(String(row.completed_sets || 0))}</span>`);
+    bits.push(`<span class="pill ok">${escapeHtml(formatAppliedSetLabel(row))}</span>`);
   });
   (build.unsupported_sets || []).forEach((setName) => {
     bits.push(`<span class="pill warn">${escapeHtml(displaySetName(setName))}</span>`);
@@ -242,6 +309,7 @@ function renderBuildCard(build, highlights) {
         </div>
         <div class="pillbar">
           <span class="pill gold">Swap ${escapeHtml(String(build.swap_count || 0))}</span>
+          <span class="pill ${coherencePillClass(build)}">Coherence ${escapeHtml(build.set_coherence?.label || "-")}</span>
           <span class="pill">${escapeHtml(build.source || "derived")}</span>
           <span class="pill">${escapeHtml(build.completeness || "n/d")}</span>
         </div>
@@ -280,6 +348,7 @@ function renderDetails() {
         <h2>${escapeHtml(champion.champion_name || "-")}</h2>
         <div class="detail-meta">
           <span class="pill gold">Profilo ${escapeHtml(plan.profile?.label || "-")}</span>
+          <span class="pill">${escapeHtml((state.regions || []).find((region) => region.key === (plan.selected_area_region || ""))?.label || "Nessuna area")}</span>
           <span class="pill">${escapeHtml(champion.faction || "n/d")}</span>
           <span class="pill">${escapeHtml(champion.affinity || "n/d")}</span>
           <span class="pill">${escapeHtml(champion.rarity || "n/d")}</span>
@@ -303,7 +372,9 @@ function renderDetails() {
 async function loadProfiles() {
   const payload = await fetchJson("/api/build-profiles");
   state.profiles = payload.profiles || [];
+  state.regions = payload.area_regions || [];
   renderProfileSelect();
+  renderRegionSelect();
 }
 
 async function loadChampions() {
@@ -336,10 +407,14 @@ async function loadPlan() {
   const query = new URLSearchParams({
     name: state.selectedChampion,
     profile: state.selectedProfile,
+    region: state.selectedRegion || "",
   });
   state.plan = await fetchJson(`/api/build-plan?${query.toString()}`);
   state.profiles = state.plan.profiles || state.profiles;
+  state.regions = state.plan.area_regions || state.regions || [];
+  state.selectedRegion = state.plan.selected_area_region || state.selectedRegion || "";
   renderProfileSelect();
+  renderRegionSelect();
   renderSummary();
   renderDetails();
   setStatus(`Build pronta per ${state.selectedChampion}.`);
@@ -377,6 +452,10 @@ buildSortEl.addEventListener("change", async () => {
 
 profileSelectEl.addEventListener("change", () => {
   state.selectedProfile = profileSelectEl.value || "arena_speed_lead";
+});
+
+regionSelectEl.addEventListener("change", () => {
+  state.selectedRegion = regionSelectEl.value || "";
 });
 
 buildCalcBtn.addEventListener("click", async () => {

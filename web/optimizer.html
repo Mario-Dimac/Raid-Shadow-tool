@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CB Forge Optimizer</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="hero">
+        <div class="eyebrow">CB Forge</div>
+        <h1>Team Optimizer</h1>
+        <p class="subtext">Prima versione pratica del selettore team: proposta, copertura ruoli, rischi e panchina utile.</p>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Campioni</a>
+          <a class="nav-link" href="/gear">Equip</a>
+          <a class="nav-link" href="/build">Build</a>
+          <a class="nav-link active" href="/optimizer">Optimizer</a>
+          <a class="nav-link" href="/runs">Runs</a>
+          <a class="nav-link" href="/sets">Sets</a>
+        </div>
+      </div>
+      <div class="toolbar">
+        <select id="optimizerBoss"></select>
+        <select id="optimizerAffinity"></select>
+        <select id="optimizerLevel"></select>
+      </div>
+      <div id="optimizerStatus" class="status"></div>
+      <div id="optimizerRoster" class="roster"></div>
+    </aside>
+
+    <main class="panel main">
+      <section id="optimizerSummary" class="summary"></section>
+      <section class="main-toolbar">
+        <button id="optimizerReloadBtn" class="primary">Ricalcola proposta</button>
+      </section>
+      <section id="optimizerDetails" class="details">
+        <div class="empty">Caricamento optimizer in corso.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/optimizer.js"></script>
+</body>
+</html>

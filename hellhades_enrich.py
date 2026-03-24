@@ -5,103 +5,20 @@ import html
 import json
 import re
 import sqlite3
-import urllib.request
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.parse import urlencode, urlparse
 
+from enrichment_sources import SkillEnrichmentProvider, get_skill_enrichment_provider
 from forge_db import DB_PATH, ensure_schema, now_utc_iso, save_app_state
-
-
-HH_SEARCH_URL = "https://hellhades.com/wp-json/wp/v2/search"
-HH_SKILLS_URL_TEMPLATE = "https://hellhades.com/wp-json/hh-api/v3/raid/skills/{post_id}"
-REQUEST_HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json, text/plain, */*",
-    "Referer": "https://hellhades.com/",
-    "Origin": "https://hellhades.com",
-}
+from providers.hellhades_provider import HellHadesChampionMatch
+import providers.ayumilove_provider  # noqa: F401
+import providers.local_registry_provider  # noqa: F401
 
 LEVEL_LINE_RE = re.compile(r"^Level\s+\d+\s*:", re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
 BRACKET_EFFECT_RE = re.compile(r"\[([^\]]+)\]")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-
-
-@dataclass(frozen=True)
-class HellHadesChampionMatch:
-    post_id: int
-    title: str
-    url: str
-
-
-def fetch_json(url: str) -> Any:
-    request = urllib.request.Request(url, headers=REQUEST_HEADERS)
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8-sig"))
-
-
-def normalize_lookup_text(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.lower())
-
-
-def slug_from_url(value: str) -> str:
-    path = urlparse(value).path.strip("/")
-    if not path:
-        return ""
-    return path.split("/")[-1]
-
-
-def resolve_champion_match(champion_name: str) -> Optional[HellHadesChampionMatch]:
-    query = urlencode({"search": champion_name, "subtype": "champions", "per_page": "20"})
-    payload = fetch_json(f"{HH_SEARCH_URL}?{query}")
-    if not isinstance(payload, list):
-        return None
-
-    normalized_name = normalize_lookup_text(champion_name)
-    best_candidate: Optional[Tuple[int, int, HellHadesChampionMatch]] = None
-
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        post_id = int(item.get("id") or 0)
-        title = str(item.get("title") or "").strip()
-        url = str(item.get("url") or "").strip()
-        if not post_id or not title or not url:
-            continue
-
-        title_norm = normalize_lookup_text(title)
-        slug_norm = normalize_lookup_text(slug_from_url(url))
-        score = 0
-        if title_norm == normalized_name:
-            score += 1000
-        if slug_norm == normalized_name:
-            score += 900
-        if normalized_name and normalized_name in title_norm:
-            score += 300
-        if normalized_name and normalized_name in slug_norm:
-            score += 250
-
-        token_overlap = len(set(re.findall(r"[a-z0-9]+", champion_name.lower())) & set(re.findall(r"[a-z0-9]+", title.lower())))
-        score += token_overlap * 10
-        length_delta = abs(len(title_norm) - len(normalized_name))
-
-        match = HellHadesChampionMatch(post_id=post_id, title=title, url=url)
-        candidate = (score, -length_delta, match)
-        if best_candidate is None or candidate > best_candidate:
-            best_candidate = candidate
-
-    if best_candidate is None or best_candidate[0] <= 0:
-        return None
-    return best_candidate[2]
-
-
-def fetch_champion_skills(post_id: int) -> List[Dict[str, Any]]:
-    payload = fetch_json(HH_SKILLS_URL_TEMPLATE.format(post_id=post_id))
-    if isinstance(payload, list) and payload and isinstance(payload[0], list):
-        return [item for item in payload[0] if isinstance(item, dict)]
-    return []
+DEFAULT_PROVIDER_ORDER = ("local_registry", "ayumilove", "hellhades")
 
 
 def html_to_text(value: Any) -> str:
@@ -311,6 +228,29 @@ def extract_effect_rows(description_clean: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def normalize_explicit_effect_rows(effects: Any) -> List[Dict[str, Any]]:
+    if not isinstance(effects, list):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for effect in effects:
+        if not isinstance(effect, dict):
+            continue
+        effect_type = normalize_space(str(effect.get("effect_type") or effect.get("type") or ""))
+        if not effect_type:
+            continue
+        rows.append(
+            {
+                "effect_type": effect_type,
+                "target": normalize_space(str(effect.get("target") or "")) or None,
+                "effect_value": nullable_float(first_non_empty(effect.get("effect_value"), effect.get("value"), effect.get("amount"))),
+                "duration": nullable_int(effect.get("duration")),
+                "chance": nullable_float(effect.get("chance")),
+                "condition_text": normalize_space(str(effect.get("condition_text") or effect.get("condition") or "")),
+            }
+        )
+    return rows
+
+
 def load_target_champions(
     conn: sqlite3.Connection,
     champion_names: Optional[Sequence[str]] = None,
@@ -387,7 +327,8 @@ def reconcile_skill_rows(
     return existing_rows
 
 
-def enrich_registry_from_hellhades(
+def enrich_registry_from_provider(
+    provider: SkillEnrichmentProvider,
     db_path: Path = DB_PATH,
     champion_names: Optional[Sequence[str]] = None,
     limit: Optional[int] = None,
@@ -398,6 +339,7 @@ def enrich_registry_from_hellhades(
     summary: Dict[str, Any] = {
         "database": str(db_path),
         "started_at": started_at,
+        "provider": str(provider.source_name),
         "requested": 0,
         "matched": 0,
         "updated": 0,
@@ -417,7 +359,7 @@ def enrich_registry_from_hellhades(
                 continue
 
             try:
-                match = resolve_champion_match(champion_name)
+                match = provider.resolve_champion_match(champion_name)
             except Exception as exc:  # pragma: no cover - network failure path
                 summary["not_found"].append(f"{champion_name}:search_error:{exc}")
                 continue
@@ -429,7 +371,7 @@ def enrich_registry_from_hellhades(
             summary["matched"] += 1
 
             try:
-                remote_skills = fetch_champion_skills(match.post_id)
+                remote_skills = provider.fetch_champion_skills(match)
             except Exception as exc:  # pragma: no cover - network failure path
                 summary["not_found"].append(f"{champion_name}:skills_error:{exc}")
                 continue
@@ -458,10 +400,17 @@ def enrich_registry_from_hellhades(
             for (slot, skill_order), remote_skill in aligned_rows:
                 skill_name = normalize_space(str(remote_skill.get("name") or "")) or None
                 skill_type = normalize_space(str(remote_skill.get("type") or "")) or None
-                description_full, description_clean, book_lines = split_description(html_to_text(remote_skill.get("description")))
+                description_source = first_non_empty(
+                    remote_skill.get("description"),
+                    remote_skill.get("description_clean"),
+                    "",
+                )
+                description_full, description_clean, book_lines = split_description(html_to_text(description_source))
 
                 base_cooldown = nullable_int(remote_skill.get("cooldown"))
-                booked_cooldown = infer_booked_cooldown(base_cooldown, book_lines, remote_skill.get("books"))
+                booked_cooldown = nullable_int(first_non_empty(remote_skill.get("booked_cooldown"), remote_skill.get("cooldown_booked")))
+                if booked_cooldown is None:
+                    booked_cooldown = infer_booked_cooldown(base_cooldown, book_lines, remote_skill.get("books"))
 
                 conn.execute(
                     """
@@ -483,14 +432,15 @@ def enrich_registry_from_hellhades(
                         description_full or None,
                         skill_type,
                         description_clean or None,
-                        "hellhades",
+                        str(provider.source_name),
                         champion_name,
                         slot,
                         skill_order,
                     ),
                 )
 
-                for effect_row in extract_effect_rows(description_clean):
+                explicit_effects = normalize_explicit_effect_rows(remote_skill.get("effects"))
+                for effect_row in (explicit_effects or extract_effect_rows(description_clean)):
                     conn.execute(
                         """
                         INSERT INTO champion_skill_effects (
@@ -513,13 +463,15 @@ def enrich_registry_from_hellhades(
                     effect_order += 1
                     summary["effect_rows_written"] += 1
 
+            external_ref = str(match.source_ref or "").strip()
+            external_ref_id = nullable_int(external_ref)
             conn.execute(
                 """
                 UPDATE champion_catalog
                 SET hellhades_post_id = ?, hellhades_url = ?, last_enriched_at = ?
                 WHERE champion_name = ?
                 """,
-                (match.post_id, match.url, started_at, champion_name),
+                (external_ref_id, match.url, started_at, champion_name),
             )
             summary["updated"] += 1
 
@@ -537,6 +489,259 @@ def enrich_registry_from_hellhades(
     return summary
 
 
+def enrich_registry_from_provider_chain(
+    provider_names: Sequence[str],
+    db_path: Path = DB_PATH,
+    champion_names: Optional[Sequence[str]] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    started_at = now_utc_iso()
+    normalized_provider_names = [normalize_provider_name(name) for name in provider_names if normalize_provider_name(name)]
+
+    summary: Dict[str, Any] = {
+        "database": str(db_path),
+        "started_at": started_at,
+        "provider": "auto",
+        "provider_order": normalized_provider_names,
+        "provider_hits": {provider_name: 0 for provider_name in normalized_provider_names},
+        "requested": 0,
+        "matched": 0,
+        "updated": 0,
+        "effect_rows_written": 0,
+        "not_found": [],
+        "skill_count_mismatches": [],
+    }
+
+    with sqlite3.connect(db_path) as conn:
+        targets = load_target_champions(conn, champion_names=champion_names, limit=limit)
+        summary["requested"] = len(targets)
+
+        for champion_name in targets:
+            existing_rows = load_existing_skill_rows(conn, champion_name)
+            if not existing_rows:
+                summary["not_found"].append(f"{champion_name}:missing_local_skills")
+                continue
+
+            selected_provider: Optional[SkillEnrichmentProvider] = None
+            selected_match: Any = None
+            remote_skills: List[Dict[str, Any]] = []
+            provider_errors: List[str] = []
+
+            for provider_name in normalized_provider_names:
+                provider = get_skill_enrichment_provider(provider_name)
+                try:
+                    match = provider.resolve_champion_match(champion_name)
+                except Exception as exc:  # pragma: no cover - network failure path
+                    provider_errors.append(f"{provider_name}:search_error:{exc}")
+                    continue
+                if match is None:
+                    provider_errors.append(f"{provider_name}:no_match")
+                    continue
+
+                try:
+                    candidate_skills = provider.fetch_champion_skills(match)
+                except Exception as exc:  # pragma: no cover - network failure path
+                    provider_errors.append(f"{provider_name}:skills_error:{exc}")
+                    continue
+                if not candidate_skills:
+                    provider_errors.append(f"{provider_name}:empty_remote_skills")
+                    continue
+
+                selected_provider = provider
+                selected_match = match
+                remote_skills = candidate_skills
+                summary["matched"] += 1
+                summary["provider_hits"][provider_name] = int(summary["provider_hits"].get(provider_name, 0)) + 1
+                break
+
+            if selected_provider is None or selected_match is None or not remote_skills:
+                summary["not_found"].append(f"{champion_name}:{'|'.join(provider_errors) if provider_errors else 'no_provider_data'}")
+                continue
+
+            if len(existing_rows) != len(remote_skills):
+                summary["skill_count_mismatches"].append(
+                    {
+                        "champion_name": champion_name,
+                        "local_skill_rows": len(existing_rows),
+                        "remote_skill_rows": len(remote_skills),
+                        "provider": str(selected_provider.source_name),
+                    }
+                )
+
+            existing_rows = reconcile_skill_rows(conn, champion_name, existing_rows, len(remote_skills))
+            aligned_rows = list(zip(existing_rows, remote_skills))
+            if not aligned_rows:
+                continue
+
+            conn.execute("DELETE FROM champion_skill_effects WHERE champion_name = ?", (champion_name,))
+            effect_order = 1
+
+            for (slot, skill_order), remote_skill in aligned_rows:
+                skill_name = normalize_space(str(remote_skill.get("name") or "")) or None
+                skill_type = normalize_space(str(remote_skill.get("type") or "")) or None
+                description_source = first_non_empty(
+                    remote_skill.get("description"),
+                    remote_skill.get("description_clean"),
+                    "",
+                )
+                description_full, description_clean, book_lines = split_description(html_to_text(description_source))
+
+                base_cooldown = nullable_int(remote_skill.get("cooldown"))
+                booked_cooldown = nullable_int(first_non_empty(remote_skill.get("booked_cooldown"), remote_skill.get("cooldown_booked")))
+                if booked_cooldown is None:
+                    booked_cooldown = infer_booked_cooldown(base_cooldown, book_lines, remote_skill.get("books"))
+
+                conn.execute(
+                    """
+                    UPDATE champion_skills
+                    SET
+                        skill_name = ?,
+                        cooldown = ?,
+                        booked_cooldown = ?,
+                        description = ?,
+                        skill_type = ?,
+                        description_clean = ?,
+                        source = ?
+                    WHERE champion_name = ? AND slot = ? AND skill_order = ?
+                    """,
+                    (
+                        skill_name,
+                        base_cooldown,
+                        booked_cooldown,
+                        description_full or None,
+                        skill_type,
+                        description_clean or None,
+                        str(selected_provider.source_name),
+                        champion_name,
+                        slot,
+                        skill_order,
+                    ),
+                )
+
+                explicit_effects = normalize_explicit_effect_rows(remote_skill.get("effects"))
+                for effect_row in (explicit_effects or extract_effect_rows(description_clean)):
+                    conn.execute(
+                        """
+                        INSERT INTO champion_skill_effects (
+                            champion_name, slot, effect_order, effect_type, target,
+                            effect_value, duration, chance, condition_text
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            champion_name,
+                            slot,
+                            effect_order,
+                            effect_row["effect_type"],
+                            effect_row["target"],
+                            effect_row["effect_value"],
+                            effect_row["duration"],
+                            effect_row["chance"],
+                            effect_row["condition_text"],
+                        ),
+                    )
+                    effect_order += 1
+                    summary["effect_rows_written"] += 1
+
+            external_ref = str(selected_match.source_ref or "").strip()
+            external_ref_id = nullable_int(external_ref)
+            conn.execute(
+                """
+                UPDATE champion_catalog
+                SET hellhades_post_id = ?, hellhades_url = ?, last_enriched_at = ?
+                WHERE champion_name = ?
+                """,
+                (external_ref_id, selected_match.url, started_at, champion_name),
+            )
+            summary["updated"] += 1
+
+        conn.commit()
+
+    save_app_state(
+        {
+            "hellhades_last_enrich_utc": started_at,
+            "hellhades_last_enrich_requested": summary["requested"],
+            "hellhades_last_enrich_updated": summary["updated"],
+            "hellhades_last_enrich_missing": summary["not_found"],
+            "skill_registry_last_sync_provider_order": normalized_provider_names,
+            "skill_registry_last_sync_provider_hits": summary["provider_hits"],
+        },
+        db_path,
+    )
+    return summary
+
+
+class _LegacyHellHadesProvider:
+    source_name = "hellhades"
+
+    def resolve_champion_match(self, champion_name: str) -> Optional[HellHadesChampionMatch]:
+        return resolve_champion_match(champion_name)
+
+    def fetch_champion_skills(self, match: HellHadesChampionMatch) -> List[Dict[str, Any]]:
+        return fetch_champion_skills(match.post_id)
+
+
+def resolve_champion_match(champion_name: str) -> Optional[HellHadesChampionMatch]:
+    provider = get_skill_enrichment_provider("hellhades")
+    match = provider.resolve_champion_match(champion_name)
+    if isinstance(match, HellHadesChampionMatch):
+        return match
+    if match is None:
+        return None
+    return HellHadesChampionMatch(
+        post_id=nullable_int(match.source_ref) or 0,
+        title=match.title,
+        url=match.url,
+    )
+
+
+def fetch_champion_skills(post_id: int) -> List[Dict[str, Any]]:
+    provider = get_skill_enrichment_provider("hellhades")
+    return provider.fetch_champion_skills(
+        HellHadesChampionMatch(post_id=int(post_id), title="", url="")
+    )
+
+
+def enrich_registry_from_hellhades(
+    db_path: Path = DB_PATH,
+    champion_names: Optional[Sequence[str]] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    return enrich_registry_from_provider(
+        provider=_LegacyHellHadesProvider(),
+        db_path=db_path,
+        champion_names=champion_names,
+        limit=limit,
+    )
+
+
+def enrich_registry_from_source(
+    source_name: str,
+    db_path: Path = DB_PATH,
+    champion_names: Optional[Sequence[str]] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    normalized_source_name = normalize_provider_name(source_name)
+    if normalized_source_name == "auto":
+        return enrich_registry_from_provider_chain(
+            provider_names=DEFAULT_PROVIDER_ORDER,
+            db_path=db_path,
+            champion_names=champion_names,
+            limit=limit,
+        )
+    return enrich_registry_from_provider(
+        provider=get_skill_enrichment_provider(normalized_source_name),
+        db_path=db_path,
+        champion_names=champion_names,
+        limit=limit,
+    )
+
+
+def normalize_provider_name(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized or "auto"
+
+
 def nullable_int(value: Any) -> Optional[int]:
     if value is None or value == "":
         return None
@@ -546,17 +751,38 @@ def nullable_int(value: Any) -> Optional[int]:
         return None
 
 
+def nullable_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Enrich champion skills from HellHades into SQLite.")
+    parser = argparse.ArgumentParser(description="Enrich champion skills into SQLite.")
     parser.add_argument("--db-path", type=Path, default=DB_PATH)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--champion", action="append", dest="champions", default=None)
+    parser.add_argument("--provider", default="auto")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    summary = enrich_registry_from_hellhades(
+    summary = enrich_registry_from_source(
+        source_name=normalize_provider_name(args.provider),
         db_path=args.db_path,
         champion_names=args.champions,
         limit=args.limit,

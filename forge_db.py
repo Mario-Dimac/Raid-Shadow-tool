@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from account_stats import build_stat_computation
+from set_curation import load_local_set_rules
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -14,20 +15,558 @@ INPUT_DIR = BASE_DIR / "input"
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "cbforge.sqlite3"
 NORMALIZED_SOURCE_PATH = INPUT_DIR / "normalized_account.json"
+RAW_SOURCE_PATH = INPUT_DIR / "raw_account.json"
 
 
 DEFAULT_SET_RULES: Dict[str, Dict[str, Any]] = {
-    "Attack Speed": {"pieces_required": 2, "stats": [("spd", 12.0)]},
-    "Accuracy": {"pieces_required": 2, "stats": [("acc", 40.0)]},
-    "Accuracy And Speed": {"pieces_required": 2, "stats": [("acc", 40.0), ("spd", 12.0)]},
-    "HP And Heal": {"pieces_required": 2, "stats": [("hp_pct", 15.0)], "heal_each_turn_pct": 3.0},
-    "HP And Defence": {"pieces_required": 2, "stats": [("hp_pct", 15.0), ("def_pct", 15.0)]},
-    "Attack Power And Ignore Defense": {"pieces_required": 2, "stats": [("atk_pct", 15.0)]},
-    "Shield And Speed": {"pieces_required": 2, "stats": [("spd", 12.0)]},
-    "Shield And HP": {"pieces_required": 2, "stats": [("hp_pct", 15.0)]},
-    "Shield And Attack Power": {"pieces_required": 2, "stats": [("atk_pct", 15.0)]},
-    "Shield And Critical Chance": {"pieces_required": 2, "stats": [("crit_rate", 12.0)]},
+    "Attack Speed": {"set_kind": "fixed", "pieces_required": 2, "max_pieces": 6, "counts_accessories": False, "stats": [("spd", 12.0)]},
+    "Accuracy": {"set_kind": "fixed", "pieces_required": 2, "max_pieces": 6, "counts_accessories": False, "stats": [("acc", 40.0)]},
+    "Accuracy And Speed": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("acc", 40.0), ("spd", 12.0)],
+    },
+    "HP And Heal": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("hp_pct", 15.0)],
+        "heal_each_turn_pct": 3.0,
+    },
+    "HP And Defence": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("hp_pct", 10.0), ("def_pct", 10.0)],
+    },
+    "Attack Power And Ignore Defense": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("atk_pct", 15.0)],
+    },
+    "Shield And Speed": {"set_kind": "fixed", "pieces_required": 2, "max_pieces": 6, "counts_accessories": False, "stats": [("spd", 12.0)]},
+    "Shield And HP": {"set_kind": "fixed", "pieces_required": 2, "max_pieces": 6, "counts_accessories": False, "stats": [("hp_pct", 15.0)]},
+    "Shield And Attack Power": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("atk_pct", 15.0)],
+    },
+    "Shield And Critical Chance": {
+        "set_kind": "fixed",
+        "pieces_required": 2,
+        "max_pieces": 6,
+        "counts_accessories": False,
+        "stats": [("crit_rate", 12.0)],
+    },
+    "Stone Skin": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("hp_pct", 8.0)]},
+            {"pieces_required": 2, "stats": [("res", 40.0)]},
+            {"pieces_required": 3, "stats": [("def_pct", 15.0)]},
+            {"pieces_required": 4, "effect_text": "Stone Skin for 1 turn at battle start"},
+            {"pieces_required": 5, "stats": [("def_pct", 15.0)]},
+            {"pieces_required": 6, "effect_text": "Stone Skin for 2 turns at battle start"},
+            {"pieces_required": 7, "stats": [("hp_pct", 8.0)]},
+            {"pieces_required": 8, "stats": [("res", 40.0)]},
+            {"pieces_required": 9, "effect_text": "Stone Skin shield upgraded to 75% HP"},
+        ],
+    },
+    "Protection": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("hp_pct", 15.0)]},
+            {"pieces_required": 3, "stats": [("spd", 12.0)]},
+            {"pieces_required": 4, "effect_text": "25% chance to place Protected buffs"},
+            {"pieces_required": 5, "stats": [("spd", 12.0)]},
+            {"pieces_required": 6, "effect_text": "50% chance to place Protected buffs"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 8.0)]},
+            {"pieces_required": 9, "effect_text": "75% chance to place Protected buffs and allies deal 5% more damage per wearer buff"},
+        ],
+    },
+    "Supersonic": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("hp_pct", 15.0)]},
+            {"pieces_required": 3, "stats": [("spd", 10.0)]},
+            {"pieces_required": 4, "effect_text": "Turn Meter increases by 2% per enemy buff"},
+            {"pieces_required": 5, "stats": [("spd", 10.0)]},
+            {"pieces_required": 6, "effect_text": "Reduces Turn Meter reduction effects by 30%"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 12.0)]},
+            {"pieces_required": 9, "effect_text": "Increases Turn Meter boost effects by 30%"},
+        ],
+    },
+    "Pinpoint": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("acc", 20.0)]},
+            {"pieces_required": 2, "stats": [("spd", 10.0)]},
+            {"pieces_required": 3, "stats": [("acc", 20.0)]},
+            {"pieces_required": 4, "effect_text": "Block Debuffs for 2 turns at the start of each round"},
+            {"pieces_required": 5, "stats": [("spd", 10.0)]},
+            {"pieces_required": 6, "effect_text": "50% chance to block Sheep from Polymorph"},
+            {"pieces_required": 7, "stats": [("acc", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 10.0)]},
+            {"pieces_required": 9, "effect_text": "Allies deal 5% more damage per wearer debuff"},
+        ],
+    },
+    "Stonecleaver": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("atk_pct", 10.0)]},
+            {"pieces_required": 2, "stats": [("crit_dmg", 15.0)]},
+            {"pieces_required": 3, "stats": [("spd", 5.0)]},
+            {"pieces_required": 4, "effect_text": "+30% damage to Stone Skin shields"},
+            {"pieces_required": 5, "stats": [("atk_pct", 15.0)]},
+            {"pieces_required": 6, "effect_text": "Ignores 20% DEF"},
+            {"pieces_required": 7, "stats": [("spd", 5.0)]},
+            {"pieces_required": 8, "stats": [("crit_dmg", 15.0)]},
+            {"pieces_required": 9, "effect_text": "+70% damage to Stone Skin shields"},
+        ],
+    },
+    "Rebirth": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("spd", 10.0)]},
+            {"pieces_required": 3, "stats": [("res", 20.0)]},
+            {"pieces_required": 4, "effect_text": "Revived allies gain +10% HP and +10% Turn Meter"},
+            {"pieces_required": 5, "stats": [("spd", 10.0)]},
+            {"pieces_required": 6, "effect_text": "Places Block Damage when an ally is killed once per round"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 12.0)]},
+            {"pieces_required": 9, "effect_text": "Revived allies have skill cooldowns reduced by 1"},
+        ],
+    },
+    "Chronophage": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("spd", 10.0)]},
+            {"pieces_required": 3, "stats": [("res", 20.0)]},
+            {"pieces_required": 4, "effect_text": "Starts the round with 1 Immutable stack"},
+            {"pieces_required": 5, "stats": [("spd", 10.0)]},
+            {"pieces_required": 6, "effect_text": "Starts the round with 2 Immutable stacks"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 12.0)]},
+            {"pieces_required": 9, "effect_text": "Starts the round with 3 Immutable stacks"},
+        ],
+    },
+    "Mercurial": {
+        "set_kind": "variable",
+        "pieces_required": 1,
+        "max_pieces": 9,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "stats": [("res", 20.0)]},
+            {"pieces_required": 2, "stats": [("hp_pct", 15.0)]},
+            {"pieces_required": 3, "stats": [("spd", 8.0)]},
+            {"pieces_required": 4, "effect_text": "Grants 1 Total Guard stack at the start of the round"},
+            {"pieces_required": 5, "stats": [("spd", 12.0)]},
+            {"pieces_required": 6, "effect_text": "Grants 2 Total Guard stacks at the start of the round"},
+            {"pieces_required": 7, "stats": [("res", 20.0)]},
+            {"pieces_required": 8, "stats": [("spd", 12.0)]},
+            {"pieces_required": 9, "effect_text": "Grants 3 Total Guard stacks and refreshes 1 stack at turn start if none remain"},
+        ],
+    },
+    "Counterattack Accessory": {
+        "set_kind": "accessory",
+        "pieces_required": 1,
+        "max_pieces": 3,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "effect_text": "5% chance to counterattack when hit"},
+            {"pieces_required": 2, "effect_text": "10% chance to counterattack when hit"},
+            {"pieces_required": 3, "effect_text": "15% chance to counterattack when hit"},
+        ],
+    },
+    "Shield Accessory": {
+        "set_kind": "accessory",
+        "pieces_required": 1,
+        "max_pieces": 3,
+        "counts_accessories": True,
+        "piece_bonuses": [
+            {"pieces_required": 1, "effect_text": "Shield worth 5% of damage dealt after attacking"},
+            {"pieces_required": 2, "effect_text": "Shield worth 10% of damage dealt after attacking"},
+            {"pieces_required": 3, "effect_text": "Shield worth 15% of damage dealt after attacking"},
+        ],
+    },
 }
+
+DEFAULT_SET_RULES["Pinpoint"] = {
+    "set_kind": "variable",
+    "pieces_required": 1,
+    "max_pieces": 9,
+    "counts_accessories": True,
+    "piece_bonuses": [
+        {"pieces_required": 1, "stats": [("acc", 20.0)]},
+        {"pieces_required": 2, "stats": [("spd", 10.0)]},
+        {"pieces_required": 3, "stats": [("acc", 20.0)]},
+        {"pieces_required": 4, "effect_text": "Grants 1 Intercept Stack at the start of each round"},
+        {"pieces_required": 5, "stats": [("spd", 10.0)]},
+        {"pieces_required": 6, "effect_text": "Grants 2 Intercept Stacks at the start of each round"},
+        {"pieces_required": 7, "stats": [("acc", 20.0)]},
+        {"pieces_required": 8, "stats": [("spd", 12.0)]},
+        {"pieces_required": 9, "effect_text": "Grants 4 Intercept Stacks at the start of each round"},
+    ],
+}
+
+DEFAULT_SET_RULES["Merciless"] = {
+    "set_kind": "variable",
+    "pieces_required": 1,
+    "max_pieces": 9,
+    "counts_accessories": True,
+    "piece_bonuses": [
+        {"pieces_required": 1, "stats": [("atk_pct", 10.0)]},
+        {"pieces_required": 2, "stats": [("crit_dmg", 15.0)]},
+        {"pieces_required": 3, "stats": [("spd", 5.0)]},
+        {"pieces_required": 4, "effect_text": "30% chance to reduce a random skill cooldown by 1"},
+        {"pieces_required": 5, "stats": [("atk_pct", 15.0)]},
+        {"pieces_required": 6, "effect_text": "Ignores 35% of enemy DEF"},
+        {"pieces_required": 7, "stats": [("spd", 5.0)]},
+        {"pieces_required": 8, "stats": [("crit_dmg", 15.0)]},
+        {"pieces_required": 9, "effect_text": "15% chance to gain an Extra Turn upon dealing damage"},
+    ],
+}
+
+GEAR_ALLOWED_MAIN_STATS: Dict[str, Dict[str, set[str]]] = {
+    "artifact": {
+        "weapon": {"atk"},
+        "helmet": {"hp"},
+        "shield": {"def"},
+        "gloves": {"hp_pct", "atk_pct", "def_pct", "crit_rate", "crit_dmg", "hp", "atk", "def"},
+        "chest": {"hp_pct", "atk_pct", "def_pct", "acc", "res", "hp", "atk", "def"},
+        "boots": {"spd", "hp_pct", "atk_pct", "def_pct", "hp", "atk", "def"},
+    },
+    "accessory": {
+        "ring": {"hp", "atk", "def"},
+        "amulet": {"hp", "atk", "def", "crit_dmg", "res"},
+        "banner": {"hp", "atk", "def", "acc", "res"},
+    },
+}
+
+GEAR_ALLOWED_SUBSTATS: Dict[str, Dict[str, set[str]]] = {
+    "accessory": {
+        "ring": {"hp", "atk", "def", "hp_pct", "atk_pct", "def_pct"},
+        "amulet": {"hp", "atk", "def", "acc", "res", "crit_dmg"},
+        "banner": {"hp", "atk", "def", "hp_pct", "atk_pct", "def_pct", "spd"},
+    },
+}
+
+LEGACY_KIND_SLOT_MAP: Dict[int, Tuple[str, str]] = {
+    1: ("artifact", "helmet"),
+    2: ("artifact", "gloves"),
+    3: ("artifact", "chest"),
+    4: ("artifact", "boots"),
+    5: ("artifact", "weapon"),
+    6: ("artifact", "shield"),
+    7: ("accessory", "ring"),
+    8: ("accessory", "amulet"),
+    9: ("accessory", "banner"),
+}
+
+DEFAULT_SET_RULES["Feral"] = {
+    "set_kind": "variable",
+    "pieces_required": 1,
+    "max_pieces": 9,
+    "counts_accessories": True,
+    "piece_bonuses": [
+        {"pieces_required": 1, "stats": [("acc", 40.0)]},
+        {"pieces_required": 2, "stats": [("spd", 5.0)]},
+        {"pieces_required": 3, "stats": [("acc", 40.0)]},
+        {"pieces_required": 4, "effect_text": "Places Block Debuffs on the wearer for 2 turns at the start of each round"},
+        {"pieces_required": 5, "stats": [("spd", 5.0)]},
+        {"pieces_required": 6, "effect_text": "50% chance to block the Sheep debuff from Polymorph"},
+        {"pieces_required": 7, "stats": [("acc", 40.0)]},
+        {"pieces_required": 8, "stats": [("spd", 5.0)]},
+        {"pieces_required": 9, "effect_text": "Allies deal 5% more damage per debuff inflicted by the wearer"},
+    ],
+}
+
+DEFAULT_SET_RULES["Righteous"] = {
+    "set_kind": "fixed",
+    "pieces_required": 2,
+    "max_pieces": 6,
+    "counts_accessories": False,
+    "stats": [("spd", 10.0), ("res", 40.0)],
+}
+
+DEFAULT_SET_RULES["Instinct"] = {
+    "set_kind": "fixed",
+    "pieces_required": 4,
+    "max_pieces": 6,
+    "counts_accessories": False,
+    "stats": [("spd", 12.0)],
+    "piece_bonuses": [
+        {"pieces_required": 4, "effect_text": "Ignores 20% of enemy DEF"},
+    ],
+}
+
+DEFAULT_SET_RULES["Killstroke"] = {
+    "set_kind": "fixed",
+    "pieces_required": 2,
+    "max_pieces": 6,
+    "counts_accessories": False,
+    "stats": [("crit_dmg", 20.0), ("spd", 5.0)],
+}
+
+DEFAULT_SET_RULES.update(
+    {
+        "Life Drain": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Heals by 30% of damage dealt"}],
+        },
+        "Counterattack On Crit": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "45% chance to counterattack when a debuff is placed on the wearer"}],
+        },
+        "Dot Rate": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "75% chance to place a 2.5% Poison debuff for 2 turns when attacking"}],
+        },
+        "Freeze Rate On Damage Received": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "20% chance to place Freeze for 1 turn when attacked by an enemy Champion"}],
+        },
+        "AoE Damage Decrease": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Decreases incoming AoE damage by 30%"}],
+        },
+        "Ignore Defense": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Ignores 25% of enemy DEF"}],
+        },
+        "Sleep Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "25% chance to place Sleep for 1 turn when attacking"}],
+        },
+        "Decrease Max HP": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Decreases target MAX HP by 40% of the damage dealt"}],
+        },
+        "Attack Power": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("atk_pct", 15.0)],
+        },
+        "Cooldown Reduction Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "40% chance to reduce a random skill cooldown by 1"}],
+        },
+        "Critical Heal Multiplier": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_dmg", 20.0)],
+        },
+        "Unkillable And SPD And CR Damage": {
+            "set_kind": "variable",
+            "pieces_required": 1,
+            "max_pieces": 9,
+            "counts_accessories": True,
+            "piece_bonuses": [
+                {"pieces_required": 1, "stats": [("crit_dmg", 15.0)]},
+                {"pieces_required": 2, "stats": [("spd", 8.0)]},
+                {"pieces_required": 3, "stats": [("crit_dmg", 15.0)]},
+                {"pieces_required": 4, "stats": [("spd", 10.0)], "effect_text": "50% chance to place Unkillable for 1 turn when receiving fatal damage"},
+                {"pieces_required": 5, "stats": [("hp_pct", 10.0)]},
+                {"pieces_required": 6, "effect_text": "Enemy single-target attacks deal 15% less damage to this Champion"},
+                {"pieces_required": 7, "stats": [("hp_pct", 15.0)]},
+                {"pieces_required": 8, "stats": [("spd", 10.0)]},
+                {"pieces_required": 9, "effect_text": "Ignores 50% of enemy DEF"},
+            ],
+        },
+        "Attack And Crit Rate": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("atk_pct", 15.0), ("crit_rate", 5.0)],
+        },
+        "Block Debuff": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Places Block Debuffs on the wearer for 2 turns at the start of each round"}],
+        },
+        "Crit Rate And Ignore DEF Multiplier": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_rate", 10.0)],
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Ignores 25% of enemy DEF"}],
+        },
+        "Damage Increase On HP Decrease": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Damage increases as HP decreases, up to +50% below 50% HP"}],
+        },
+        "Get Extra Turn": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "18% chance to gain an Extra Turn"}],
+        },
+        "HP": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("hp_pct", 15.0)],
+        },
+        "Stun Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "18% chance to place Stun for 1 turn when attacking"}],
+        },
+        "Crit Damage And Transform Week Into Crit Hit": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_dmg", 30.0)],
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "50% chance to change a weak hit into a critical hit"}],
+        },
+        "Crit Rate And Life Drain": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_rate", 12.0)],
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Heals by 30% of damage dealt"}],
+        },
+        "Resistance": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("res", 40.0)],
+        },
+        "Critical Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("crit_rate", 12.0)],
+        },
+        "Defense": {
+            "set_kind": "fixed",
+            "pieces_required": 2,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "stats": [("def_pct", 15.0)],
+        },
+        "Shield": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Places a Shield worth 30% of the wearer's HP on all allies for 3 turns at the start of each round"}],
+        },
+        "Counterattack": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "25% chance to counterattack when hit"}],
+        },
+        "Passive Share Damage And Heal": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "Absorbs 10% of damage dealt to allies and heals the wearer by 10% each turn"}],
+        },
+        "Provoke Chance": {
+            "set_kind": "fixed",
+            "pieces_required": 4,
+            "max_pieces": 6,
+            "counts_accessories": False,
+            "piece_bonuses": [{"pieces_required": 4, "effect_text": "30% chance to place Provoke for 1 turn when attacking"}],
+        },
+        "Change Hit Type": {
+            "set_kind": "accessory",
+            "pieces_required": 1,
+            "max_pieces": 3,
+            "counts_accessories": True,
+            "piece_bonuses": [
+                {"pieces_required": 1, "effect_text": "25% chance to change a Critical Hit into a Normal Hit when attacked before the first turn"},
+                {"pieces_required": 2, "effect_text": "50% chance to change a Critical Hit into a Normal Hit when attacked before the first turn"},
+                {"pieces_required": 3, "effect_text": "75% chance to change a Critical Hit into a Normal Hit when attacked before the first turn"},
+            ],
+        },
+    }
+)
 
 
 SCHEMA_STATEMENTS: Tuple[str, ...] = (
@@ -106,7 +645,8 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         rank INTEGER NOT NULL,
         awakening_level INTEGER NOT NULL,
         empowerment_level INTEGER NOT NULL,
-        booked INTEGER NOT NULL
+        booked INTEGER NOT NULL,
+        relic_count INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -123,6 +663,17 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         stat_name TEXT NOT NULL,
         stat_value REAL NOT NULL,
         PRIMARY KEY (champ_id, stat_name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS account_champion_masteries (
+        champ_id TEXT NOT NULL,
+        mastery_order INTEGER NOT NULL,
+        mastery_id TEXT NOT NULL,
+        mastery_name TEXT,
+        tree TEXT,
+        active INTEGER NOT NULL,
+        PRIMARY KEY (champ_id, mastery_order)
     )
     """,
     """
@@ -180,6 +731,9 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         set_name TEXT PRIMARY KEY,
         pieces_required INTEGER NOT NULL,
         heal_each_turn_pct REAL NOT NULL,
+        set_kind TEXT NOT NULL DEFAULT 'fixed',
+        counts_accessories INTEGER NOT NULL DEFAULT 0,
+        max_pieces INTEGER NOT NULL DEFAULT 0,
         source TEXT NOT NULL
     )
     """,
@@ -190,6 +744,17 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         stat_type TEXT NOT NULL,
         stat_value REAL NOT NULL,
         PRIMARY KEY (set_name, stat_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS set_definition_piece_bonuses (
+        set_name TEXT NOT NULL,
+        bonus_order INTEGER NOT NULL,
+        pieces_required INTEGER NOT NULL,
+        stat_type TEXT,
+        stat_value REAL NOT NULL,
+        effect_text TEXT,
+        PRIMARY KEY (set_name, bonus_order)
     )
     """,
     """
@@ -223,6 +788,144 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         affinity TEXT,
         source TEXT
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_runs (
+        run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        saved_at TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_run_uid TEXT,
+        battle_id TEXT,
+        probe_session_slug TEXT,
+        encounter_key TEXT NOT NULL,
+        encounter_name TEXT,
+        encounter_family TEXT,
+        area_region TEXT,
+        game_mode TEXT,
+        difficulty TEXT,
+        stage_id TEXT,
+        stage_label TEXT,
+        stage_tier INTEGER,
+        boss_affinity TEXT,
+        affinity_context TEXT,
+        result_code TEXT,
+        success INTEGER NOT NULL DEFAULT 0,
+        completed INTEGER NOT NULL DEFAULT 0,
+        auto_play INTEGER NOT NULL DEFAULT 1,
+        formation_index INTEGER,
+        team_name TEXT,
+        team_hash TEXT,
+        leader_slot INTEGER,
+        elapsed_seconds REAL,
+        turns INTEGER,
+        boss_turn INTEGER,
+        total_damage REAL,
+        account_power REAL,
+        model_target TEXT,
+        feature_schema_version TEXT NOT NULL DEFAULT 'run_history_v1',
+        notes TEXT,
+        labels_json TEXT NOT NULL DEFAULT '{}',
+        context_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_members (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        champ_id TEXT,
+        champion_name TEXT NOT NULL,
+        champion_type_id INTEGER,
+        role_hint TEXT,
+        level INTEGER,
+        rank INTEGER,
+        awakening_level INTEGER,
+        empowerment_level INTEGER,
+        booked INTEGER NOT NULL DEFAULT 0,
+        build_fingerprint TEXT,
+        set_summary_json TEXT NOT NULL DEFAULT '[]',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        PRIMARY KEY (run_id, member_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_member_stats (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        stat_name TEXT NOT NULL,
+        stat_value REAL NOT NULL,
+        stat_source TEXT,
+        PRIMARY KEY (run_id, member_order, stat_name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_member_metrics (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        damage_done REAL NOT NULL DEFAULT 0,
+        damage_taken REAL NOT NULL DEFAULT 0,
+        healing_done REAL NOT NULL DEFAULT 0,
+        shields_done REAL NOT NULL DEFAULT 0,
+        buffs_applied INTEGER NOT NULL DEFAULT 0,
+        debuffs_applied INTEGER NOT NULL DEFAULT 0,
+        deaths INTEGER NOT NULL DEFAULT 0,
+        revives INTEGER NOT NULL DEFAULT 0,
+        alive_at_end INTEGER,
+        metric_payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, member_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_member_skill_usage (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        skill_order INTEGER NOT NULL,
+        skill_slot TEXT,
+        skill_code TEXT,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        usage_payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, member_order, skill_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_assets (
+        run_id INTEGER NOT NULL,
+        asset_order INTEGER NOT NULL,
+        asset_kind TEXT NOT NULL,
+        asset_path TEXT NOT NULL,
+        sha256 TEXT,
+        size_bytes INTEGER,
+        captured_at TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, asset_order)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_history_events (
+        run_id INTEGER NOT NULL,
+        event_index INTEGER NOT NULL,
+        event_time TEXT,
+        event_type TEXT,
+        source_name TEXT,
+        actor_slot INTEGER,
+        target_slot INTEGER,
+        skill_id TEXT,
+        skill_name TEXT,
+        value_numeric REAL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, event_index)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_history_runs_encounter
+    ON run_history_runs (encounter_key, difficulty, success, elapsed_seconds)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_history_runs_battle
+    ON run_history_runs (battle_id, source)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_history_members_name
+    ON run_history_members (champion_name)
     """,
     """
     CREATE TABLE IF NOT EXISTS app_state (
@@ -279,6 +982,30 @@ def ensure_schema_columns(conn: sqlite3.Connection) -> None:
         column_name="source",
         column_sql="TEXT",
     )
+    ensure_column(
+        conn,
+        table_name="set_definitions",
+        column_name="set_kind",
+        column_sql="TEXT NOT NULL DEFAULT 'fixed'",
+    )
+    ensure_column(
+        conn,
+        table_name="set_definitions",
+        column_name="counts_accessories",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    ensure_column(
+        conn,
+        table_name="set_definitions",
+        column_name="max_pieces",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    ensure_column(
+        conn,
+        table_name="account_champions",
+        column_name="relic_count",
+        column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
 
 
 def ensure_column(
@@ -294,15 +1021,19 @@ def ensure_column(
 
 
 def reset_database(path: Path = DB_PATH) -> None:
-    if path.exists():
-        path.unlink()
     ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        clear_all_tables(conn)
+        conn.commit()
 
 
 def load_source_account(source_path: Path = NORMALIZED_SOURCE_PATH) -> Dict[str, Any]:
     account = json.loads(source_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(account, dict):
+        return {}
     reconcile_loaded_account_ownership(account)
-    return account if isinstance(account, dict) else {}
+    repair_loaded_account_gear(account, source_path)
+    return account
 
 
 def bootstrap_database(
@@ -321,6 +1052,9 @@ def bootstrap_database(
     bonuses = list_value(account.get("account_bonuses"))
     templates = select_best_template_rows(champions)
     observed_sets = collect_observed_sets(gear)
+    curated_set_rules = load_local_set_rules()
+    bootstrap_set_rules = dict(DEFAULT_SET_RULES)
+    bootstrap_set_rules.update(curated_set_rules)
 
     with sqlite3.connect(db_path) as conn:
         if not rebuild:
@@ -355,8 +1089,8 @@ def bootstrap_database(
                     """
                     INSERT INTO champion_skills (
                         champion_name, slot, skill_order, skill_id, skill_name,
-                        cooldown, booked_cooldown, description
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        cooldown, booked_cooldown, description, skill_type, description_clean, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         champion_name,
@@ -384,6 +1118,9 @@ def bootstrap_database(
                             )
                         ),
                         optional_string(first_non_empty(skill.get("description"), skill.get("text"))),
+                        optional_string(first_non_empty(skill.get("skill_type"), skill.get("type"))),
+                        optional_string(first_non_empty(skill.get("description_clean"), skill.get("description"), skill.get("text"))),
+                        optional_string(first_non_empty(skill.get("source"), "import")),
                     ),
                 )
                 for effect_order, effect in enumerate(list_value(skill.get("effects")), start=1):
@@ -436,8 +1173,8 @@ def bootstrap_database(
                 """
                 INSERT INTO account_champions (
                     champ_id, champion_name, rarity, affinity, faction,
-                    level, rank, awakening_level, empowerment_level, booked
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    level, rank, awakening_level, empowerment_level, booked, relic_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     champ_id,
@@ -450,6 +1187,7 @@ def bootstrap_database(
                     int_value(champion.get("awakening_level")),
                     int_value(champion.get("empowerment_level")),
                     1 if bool(champion.get("booked")) else 0,
+                    len(list_value(champion.get("relic_ids"))),
                 ),
             )
             for stat_name, stat_value in sorted(dict_value(champion.get("total_stats")).items()):
@@ -459,6 +1197,23 @@ def bootstrap_database(
                     VALUES (?, ?, ?)
                     """,
                     (champ_id, string_value(stat_name), float_value(stat_value)),
+                )
+            for mastery_order, mastery in enumerate(list_value(champion.get("masteries")), start=1):
+                mastery_map = dict_value(mastery)
+                conn.execute(
+                    """
+                    INSERT INTO account_champion_masteries (
+                        champ_id, mastery_order, mastery_id, mastery_name, tree, active
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        champ_id,
+                        mastery_order,
+                        string_value(mastery_map.get("mastery_id")),
+                        string_value(mastery_map.get("name")),
+                        string_value(mastery_map.get("tree")),
+                        1 if bool(mastery_map.get("active", True)) else 0,
+                    ),
                 )
 
         for item in gear:
@@ -525,18 +1280,23 @@ def bootstrap_database(
                 ),
             )
 
-        for set_name in sorted(observed_sets | set(DEFAULT_SET_RULES)):
-            rule = dict_value(DEFAULT_SET_RULES.get(set_name))
+        for set_name in sorted(observed_sets | set(bootstrap_set_rules)):
+            rule = dict_value(bootstrap_set_rules.get(set_name))
             conn.execute(
                 """
-                INSERT INTO set_definitions (set_name, pieces_required, heal_each_turn_pct, source)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO set_definitions (
+                    set_name, pieces_required, heal_each_turn_pct, set_kind, counts_accessories, max_pieces, source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     set_name,
                     int_value(rule.get("pieces_required")),
                     float_value(rule.get("heal_each_turn_pct")),
-                    "bootstrap_rules" if rule else "observed_gear",
+                    string_value(first_non_empty(rule.get("set_kind"), "unknown")),
+                    1 if bool(rule.get("counts_accessories")) else 0,
+                    int_value(first_non_empty(rule.get("max_pieces"), rule.get("pieces_required"))),
+                    string_value(first_non_empty(rule.get("source"), "bootstrap_rules" if rule else "observed_gear")),
                 ),
             )
             for stat_order, stat_row in enumerate(list_value(rule.get("stats")), start=1):
@@ -548,6 +1308,31 @@ def bootstrap_database(
                     """,
                     (set_name, stat_order, stat_type, stat_value),
                 )
+            bonus_order = 0
+            for piece_bonus in list_value(rule.get("piece_bonuses")):
+                pieces_required = int_value(piece_bonus.get("pieces_required"))
+                for stat_row in list_value(piece_bonus.get("stats")):
+                    stat_type, stat_value = normalize_set_stat(stat_row)
+                    bonus_order += 1
+                    conn.execute(
+                        """
+                        INSERT INTO set_definition_piece_bonuses (
+                            set_name, bonus_order, pieces_required, stat_type, stat_value, effect_text
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (set_name, bonus_order, pieces_required, stat_type, stat_value, None),
+                    )
+                effect_text = optional_string(first_non_empty(piece_bonus.get("effect_text"), piece_bonus.get("effect")))
+                if effect_text:
+                    bonus_order += 1
+                    conn.execute(
+                        """
+                        INSERT INTO set_definition_piece_bonuses (
+                            set_name, bonus_order, pieces_required, stat_type, stat_value, effect_text
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (set_name, bonus_order, pieces_required, None, 0.0, effect_text),
+                    )
 
         stats_summary = refresh_account_stat_models_in_conn(conn)
         conn.commit()
@@ -583,15 +1368,24 @@ def database_status(path: Path = DB_PATH) -> Dict[str, Any]:
         "account_champions",
         "account_champion_total_stats",
         "account_champion_imported_total_stats",
+        "account_champion_masteries",
         "account_champion_stat_models",
         "gear_items",
         "gear_substats",
         "account_bonuses",
         "set_definitions",
         "set_definition_stats",
+        "set_definition_piece_bonuses",
         "combat_runs",
         "combat_run_members",
         "combat_sessions",
+        "run_history_runs",
+        "run_history_members",
+        "run_history_member_stats",
+        "run_history_member_metrics",
+        "run_history_member_skill_usage",
+        "run_history_assets",
+        "run_history_events",
         "app_state",
     )
     with sqlite3.connect(path) as conn:
@@ -612,14 +1406,278 @@ def clear_runtime_tables(conn: sqlite3.Connection) -> None:
         "account_champions",
         "account_champion_total_stats",
         "account_champion_imported_total_stats",
+        "account_champion_masteries",
         "account_champion_stat_models",
         "gear_items",
         "gear_substats",
         "account_bonuses",
         "set_definitions",
         "set_definition_stats",
+        "set_definition_piece_bonuses",
     ):
         conn.execute(f"DELETE FROM {table}")
+
+
+def clear_all_tables(conn: sqlite3.Connection) -> None:
+    clear_runtime_tables(conn)
+    for table in (
+        "combat_run_members",
+        "combat_runs",
+        "combat_sessions",
+        "run_history_events",
+        "run_history_assets",
+        "run_history_member_metrics",
+        "run_history_member_skill_usage",
+        "run_history_member_stats",
+        "run_history_members",
+        "run_history_runs",
+        "app_state",
+    ):
+        conn.execute(f"DELETE FROM {table}")
+    conn.execute("DELETE FROM sqlite_sequence")
+
+
+def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    payload = dict_value(run_payload)
+    saved_at = optional_string(payload.get("saved_at")) or now_utc_iso()
+    source = optional_string(payload.get("source")) or "manual"
+    labels = dict_value(payload.get("labels"))
+    context = dict_value(payload.get("context"))
+    members = list_value(payload.get("members"))
+    assets = list_value(payload.get("assets"))
+    events = list_value(payload.get("events"))
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO run_history_runs (
+                saved_at, source, source_run_uid, battle_id, probe_session_slug,
+                encounter_key, encounter_name, encounter_family, area_region, game_mode,
+                difficulty, stage_id, stage_label, stage_tier, boss_affinity,
+                affinity_context, result_code, success, completed, auto_play,
+                formation_index, team_name, team_hash, leader_slot, elapsed_seconds,
+                turns, boss_turn, total_damage, account_power, model_target,
+                feature_schema_version, notes, labels_json, context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                saved_at,
+                source,
+                optional_string(first_non_empty(payload.get("source_run_uid"), payload.get("battle_id"))),
+                optional_string(payload.get("battle_id")),
+                optional_string(payload.get("probe_session_slug")),
+                optional_string(first_non_empty(payload.get("encounter_key"), payload.get("stage_id"), "unknown_encounter")) or "unknown_encounter",
+                optional_string(payload.get("encounter_name")),
+                optional_string(payload.get("encounter_family")),
+                optional_string(payload.get("area_region")),
+                optional_string(payload.get("game_mode")),
+                optional_string(payload.get("difficulty")),
+                optional_string(payload.get("stage_id")),
+                optional_string(payload.get("stage_label")),
+                nullable_int(payload.get("stage_tier")),
+                optional_string(payload.get("boss_affinity")),
+                optional_string(payload.get("affinity_context")),
+                optional_string(payload.get("result_code")),
+                1 if bool(payload.get("success")) else 0,
+                1 if bool(payload.get("completed", True)) else 0,
+                1 if bool(payload.get("auto_play", True)) else 0,
+                nullable_int(payload.get("formation_index")),
+                optional_string(payload.get("team_name")),
+                optional_string(payload.get("team_hash")),
+                nullable_int(payload.get("leader_slot")),
+                nullable_float(payload.get("elapsed_seconds")),
+                nullable_int(payload.get("turns")),
+                nullable_int(payload.get("boss_turn")),
+                nullable_float(payload.get("total_damage")),
+                nullable_float(payload.get("account_power")),
+                optional_string(payload.get("model_target")),
+                optional_string(payload.get("feature_schema_version")) or "run_history_v1",
+                optional_string(payload.get("notes")),
+                json_text(labels, {}),
+                json_text(context, {}),
+            ),
+        )
+        run_id = int(cursor.lastrowid)
+
+        for member_order, member in enumerate(members, start=1):
+            member_map = dict_value(member)
+            conn.execute(
+                """
+                INSERT INTO run_history_members (
+                    run_id, member_order, champ_id, champion_name, champion_type_id, role_hint,
+                    level, rank, awakening_level, empowerment_level, booked, build_fingerprint,
+                    set_summary_json, tags_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    member_order,
+                    optional_string(member_map.get("champ_id")),
+                    optional_string(first_non_empty(member_map.get("champion_name"), member_map.get("name"), f"slot_{member_order}")) or f"slot_{member_order}",
+                    nullable_int(first_non_empty(member_map.get("champion_type_id"), member_map.get("type_id"))),
+                    optional_string(first_non_empty(member_map.get("role_hint"), member_map.get("role"))),
+                    nullable_int(member_map.get("level")),
+                    nullable_int(member_map.get("rank")),
+                    nullable_int(member_map.get("awakening_level")),
+                    nullable_int(member_map.get("empowerment_level")),
+                    1 if bool(member_map.get("booked")) else 0,
+                    optional_string(member_map.get("build_fingerprint")),
+                    json_text(list_value(member_map.get("set_summary")), []),
+                    json_text(list_value(member_map.get("tags")), []),
+                ),
+            )
+
+            for stat_name, stat_value in sorted(dict_value(member_map.get("stats")).items()):
+                conn.execute(
+                    """
+                    INSERT INTO run_history_member_stats (
+                        run_id, member_order, stat_name, stat_value, stat_source
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        member_order,
+                        string_value(stat_name),
+                        float_value(stat_value),
+                        optional_string(member_map.get("stat_source")),
+                    ),
+                )
+
+            metrics = dict_value(member_map.get("metrics"))
+            if metrics:
+                conn.execute(
+                    """
+                    INSERT INTO run_history_member_metrics (
+                        run_id, member_order, damage_done, damage_taken, healing_done, shields_done,
+                        buffs_applied, debuffs_applied, deaths, revives, alive_at_end, metric_payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        member_order,
+                        float_value(metrics.get("damage_done")),
+                        float_value(metrics.get("damage_taken")),
+                        float_value(metrics.get("healing_done")),
+                        float_value(metrics.get("shields_done")),
+                        int_value(metrics.get("buffs_applied")),
+                        int_value(metrics.get("debuffs_applied")),
+                        int_value(metrics.get("deaths")),
+                        int_value(metrics.get("revives")),
+                        nullable_int(metrics.get("alive_at_end")),
+                        json_text(metrics, {}),
+                    ),
+                )
+
+            for skill_usage in list_value(member_map.get("skill_usage")):
+                skill_usage_map = dict_value(skill_usage)
+                conn.execute(
+                    """
+                    INSERT INTO run_history_member_skill_usage (
+                        run_id, member_order, skill_order, skill_slot, skill_code, usage_count, usage_payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        member_order,
+                        nullable_int(skill_usage_map.get("skill_order")),
+                        optional_string(skill_usage_map.get("skill_slot")),
+                        optional_string(skill_usage_map.get("skill_code")),
+                        int_value(skill_usage_map.get("usage_count")),
+                        json_text(skill_usage_map, {}),
+                    ),
+                )
+
+        for asset_order, asset in enumerate(assets, start=1):
+            asset_map = dict_value(asset)
+            conn.execute(
+                """
+                INSERT INTO run_history_assets (
+                    run_id, asset_order, asset_kind, asset_path, sha256, size_bytes, captured_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    asset_order,
+                    optional_string(first_non_empty(asset_map.get("asset_kind"), asset_map.get("kind"), "unknown")) or "unknown",
+                    optional_string(first_non_empty(asset_map.get("asset_path"), asset_map.get("path"), f"asset_{asset_order}")) or f"asset_{asset_order}",
+                    optional_string(asset_map.get("sha256")),
+                    nullable_int(first_non_empty(asset_map.get("size_bytes"), asset_map.get("size"))),
+                    optional_string(asset_map.get("captured_at")),
+                    json_text(dict_value(asset_map.get("metadata")), {}),
+                ),
+            )
+
+        for event_index, event in enumerate(events, start=1):
+            event_map = dict_value(event)
+            conn.execute(
+                """
+                INSERT INTO run_history_events (
+                    run_id, event_index, event_time, event_type, source_name,
+                    actor_slot, target_slot, skill_id, skill_name, value_numeric, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    event_index,
+                    optional_string(event_map.get("event_time")),
+                    optional_string(event_map.get("event_type")),
+                    optional_string(first_non_empty(event_map.get("source_name"), event_map.get("source"))),
+                    nullable_int(event_map.get("actor_slot")),
+                    nullable_int(event_map.get("target_slot")),
+                    optional_string(event_map.get("skill_id")),
+                    optional_string(event_map.get("skill_name")),
+                    nullable_float(first_non_empty(event_map.get("value_numeric"), event_map.get("value"))),
+                    json_text(event_map, {}),
+                ),
+            )
+        conn.commit()
+
+    return run_history_summary(run_id=run_id, db_path=db_path)
+
+
+def run_history_summary(run_id: int, db_path: Path = DB_PATH) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT run_id, encounter_key, stage_id, battle_id, success, elapsed_seconds, total_damage
+            FROM run_history_runs
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return {}
+        member_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_members WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        event_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_events WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        asset_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_assets WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        skill_usage_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_member_skill_usage WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    return {
+        "run_id": int(row[0]),
+        "encounter_key": string_value(row[1]),
+        "stage_id": string_value(row[2]),
+        "battle_id": string_value(row[3]),
+        "success": bool(row[4]),
+        "elapsed_seconds": float_value(row[5]),
+        "total_damage": float_value(row[6]),
+        "members": int(member_count[0] if member_count else 0),
+        "events": int(event_count[0] if event_count else 0),
+        "assets": int(asset_count[0] if asset_count else 0),
+        "skill_usages": int(skill_usage_count[0] if skill_usage_count else 0),
+    }
 
 
 def refresh_account_stat_models(db_path: Path = DB_PATH) -> Dict[str, Any]:
@@ -663,10 +1721,11 @@ def refresh_account_stat_models_in_conn(conn: sqlite3.Connection) -> Dict[str, A
     gear_by_owner = load_equipped_gear_by_owner(conn)
     base_stats_by_name = load_base_stats_by_champion(conn)
     raw_totals_by_champ = load_imported_total_stats_by_champion(conn)
+    masteries_by_champ = load_masteries_by_champion(conn)
 
     champion_rows = conn.execute(
         """
-        SELECT champ_id, champion_name, affinity
+        SELECT champ_id, champion_name, affinity, rarity, awakening_level, empowerment_level
         FROM account_champions
         ORDER BY champion_name ASC, champ_id ASC
         """
@@ -679,14 +1738,18 @@ def refresh_account_stat_models_in_conn(conn: sqlite3.Connection) -> Dict[str, A
     partial_count = 0
     computed_at = now_utc_iso()
 
-    for champ_id, champion_name, affinity in champion_rows:
+    for champ_id, champion_name, affinity, rarity, awakening_level, empowerment_level in champion_rows:
         stat_result = build_stat_computation(
             base_stats=base_stats_by_name.get(string_value(champion_name), {}),
             raw_total_stats=raw_totals_by_champ.get(string_value(champ_id), {}),
             equipped_items=gear_by_owner.get(string_value(champ_id), []),
             bonuses=bonuses,
             set_rules=set_rules,
+            masteries=masteries_by_champ.get(string_value(champ_id), []),
             affinity=string_value(affinity),
+            rarity=string_value(rarity),
+            awakening_level=int_value(awakening_level),
+            empowerment_level=int_value(empowerment_level),
         )
 
         for stat_name, stat_value in sorted(stat_result.total_stats.items()):
@@ -729,27 +1792,51 @@ def refresh_account_stat_models_in_conn(conn: sqlite3.Connection) -> Dict[str, A
 
 
 def load_set_rules(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
-    rows = conn.execute(
+    definition_rows = conn.execute(
         """
-        SELECT sd.set_name, sd.pieces_required, sd.heal_each_turn_pct, sds.stat_type, sds.stat_value
-        FROM set_definitions sd
-        LEFT JOIN set_definition_stats sds
-            ON sds.set_name = sd.set_name
-        ORDER BY sd.set_name ASC, sds.stat_order ASC
+        SELECT set_name, pieces_required, heal_each_turn_pct, set_kind, counts_accessories, max_pieces, source
+        FROM set_definitions
+        ORDER BY set_name ASC
+        """
+    ).fetchall()
+    stat_rows = conn.execute(
+        """
+        SELECT set_name, stat_type, stat_value
+        FROM set_definition_stats
+        ORDER BY set_name ASC, stat_order ASC
+        """
+    ).fetchall()
+    bonus_rows = conn.execute(
+        """
+        SELECT set_name, pieces_required, stat_type, stat_value, effect_text
+        FROM set_definition_piece_bonuses
+        ORDER BY set_name ASC, bonus_order ASC
         """
     ).fetchall()
     rules: Dict[str, Dict[str, Any]] = {}
-    for set_name, pieces_required, heal_each_turn_pct, stat_type, stat_value in rows:
-        rule = rules.setdefault(
-            string_value(set_name),
-            {
-                "pieces_required": int_value(pieces_required),
-                "heal_each_turn_pct": float_value(heal_each_turn_pct),
-                "stats": [],
-            },
-        )
+    for set_name, pieces_required, heal_each_turn_pct, set_kind, counts_accessories, max_pieces, source in definition_rows:
+        rules[string_value(set_name)] = {
+            "pieces_required": int_value(pieces_required),
+            "heal_each_turn_pct": float_value(heal_each_turn_pct),
+            "set_kind": string_value(set_kind),
+            "counts_accessories": bool(counts_accessories),
+            "max_pieces": int_value(max_pieces),
+            "source": string_value(source),
+            "stats": [],
+            "piece_bonuses": [],
+        }
+    for set_name, stat_type, stat_value in stat_rows:
+        rule = rules.setdefault(string_value(set_name), {"stats": [], "piece_bonuses": []})
         if stat_type is not None:
             rule["stats"].append((string_value(stat_type), float_value(stat_value)))
+    for set_name, pieces_required, stat_type, stat_value, effect_text in bonus_rows:
+        rule = rules.setdefault(string_value(set_name), {"stats": [], "piece_bonuses": []})
+        piece_bonus: Dict[str, Any] = {"pieces_required": int_value(pieces_required), "stats": []}
+        if stat_type is not None:
+            piece_bonus["stats"].append((string_value(stat_type), float_value(stat_value)))
+        if effect_text is not None and string_value(effect_text).strip():
+            piece_bonus["effect_text"] = string_value(effect_text)
+        rule["piece_bonuses"].append(piece_bonus)
     return rules
 
 
@@ -796,17 +1883,18 @@ def load_equipped_gear_by_owner(conn: sqlite3.Connection) -> Dict[str, List[Dict
 
     item_rows = conn.execute(
         """
-        SELECT item_id, slot, set_name, equipped_by, main_stat_type, main_stat_value
+        SELECT item_id, item_class, slot, set_name, equipped_by, main_stat_type, main_stat_value
         FROM gear_items
         WHERE equipped_by IS NOT NULL AND equipped_by != ''
         ORDER BY equipped_by ASC, item_id ASC
         """
     ).fetchall()
     gear_by_owner: Dict[str, List[Dict[str, Any]]] = {}
-    for item_id, slot, set_name, equipped_by, main_stat_type, main_stat_value in item_rows:
+    for item_id, item_class, slot, set_name, equipped_by, main_stat_type, main_stat_value in item_rows:
         gear_by_owner.setdefault(string_value(equipped_by), []).append(
             {
                 "item_id": string_value(item_id),
+                "item_class": string_value(item_class),
                 "slot": string_value(slot),
                 "set_name": string_value(set_name),
                 "main_stat": {
@@ -858,6 +1946,27 @@ def load_imported_total_stats_by_champion(conn: sqlite3.Connection) -> Dict[str,
     payload: Dict[str, Dict[str, float]] = {}
     for champ_id, stat_name, stat_value in rows:
         payload.setdefault(string_value(champ_id), {})[string_value(stat_name)] = float_value(stat_value)
+    return payload
+
+
+def load_masteries_by_champion(conn: sqlite3.Connection) -> Dict[str, List[Dict[str, Any]]]:
+    rows = conn.execute(
+        """
+        SELECT champ_id, mastery_id, mastery_name, tree, active
+        FROM account_champion_masteries
+        ORDER BY champ_id ASC, mastery_order ASC
+        """
+    ).fetchall()
+    payload: Dict[str, List[Dict[str, Any]]] = {}
+    for champ_id, mastery_id, mastery_name, tree, active in rows:
+        payload.setdefault(string_value(champ_id), []).append(
+            {
+                "mastery_id": string_value(mastery_id),
+                "name": string_value(mastery_name),
+                "tree": string_value(tree),
+                "active": bool(active),
+            }
+        )
     return payload
 
 
@@ -939,6 +2048,131 @@ def reconcile_loaded_account_ownership(account: Dict[str, Any]) -> None:
         owner_id = owner_by_item_id.get(item_id)
         if owner_id:
             item["equipped_by"] = owner_id
+
+
+def repair_loaded_account_gear(account: Dict[str, Any], source_path: Path) -> None:
+    gear = list_value(account.get("gear"))
+    if not gear:
+        return
+    kind_by_item_id = load_raw_item_kind_map(source_path.parent / RAW_SOURCE_PATH.name)
+    for item in gear:
+        repair_single_gear_item(item, kind_by_item_id.get(string_value(item.get("item_id"))))
+
+
+def load_raw_item_kind_map(raw_source_path: Path) -> Dict[str, int]:
+    if not raw_source_path.exists():
+        return {}
+    try:
+        raw_payload = json.loads(raw_source_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    containers = []
+    if isinstance(raw_payload, dict):
+        containers.extend(list_value(raw_payload.get("inventory")))
+        containers.extend(list_value(raw_payload.get("gear")))
+    mapping: Dict[str, int] = {}
+    for item in containers:
+        item_map = dict_value(item)
+        item_id = string_value(first_non_empty(item_map.get("item_id"), item_map.get("id")))
+        if not item_id:
+            continue
+        kind = int_value(item_map.get("kind"))
+        if kind > 0:
+            mapping[item_id] = kind
+    return mapping
+
+
+def repair_single_gear_item(item: Dict[str, Any], raw_kind: Optional[int] = None) -> None:
+    item_class = string_value(item.get("item_class")).strip().lower()
+    slot = string_value(item.get("slot")).strip().lower()
+    main_stat = dict_value(item.get("main_stat"))
+    main_stat_type = string_value(main_stat.get("type")).strip().lower()
+    substat_types = collect_item_substat_types(item)
+
+    if raw_kind is not None and raw_kind in LEGACY_KIND_SLOT_MAP:
+        expected_class, expected_slot = LEGACY_KIND_SLOT_MAP[raw_kind]
+        if is_valid_gear_item_for_slot(expected_class, expected_slot, main_stat_type, substat_types):
+            item["item_class"] = expected_class
+            item["slot"] = expected_slot
+            item_class = expected_class
+            slot = expected_slot
+
+    if is_valid_gear_item_for_slot(item_class, slot, main_stat_type, substat_types):
+        return
+
+    candidate_slots = [
+        candidate_slot
+        for candidate_slot in infer_candidate_slots(item_class, main_stat_type)
+        if is_valid_substats_for_slot(item_class, candidate_slot, substat_types)
+    ]
+    if len(candidate_slots) == 1:
+        item["slot"] = candidate_slots[0]
+
+
+def is_valid_main_stat_for_slot(item_class: str, slot: str, stat_type: str) -> bool:
+    if not item_class or not slot or not stat_type:
+        return True
+    allowed_by_slot = GEAR_ALLOWED_MAIN_STATS.get(item_class, {})
+    allowed_stats = allowed_by_slot.get(slot)
+    if not allowed_stats:
+        return True
+    return stat_type in allowed_stats
+
+
+def is_valid_substats_for_slot(item_class: str, slot: str, stat_types: Iterable[str]) -> bool:
+    if not item_class or not slot:
+        return True
+    allowed_by_slot = GEAR_ALLOWED_SUBSTATS.get(item_class, {})
+    allowed_stats = allowed_by_slot.get(slot)
+    if not allowed_stats:
+        return True
+    normalized_types = [string_value(stat_type).strip().lower() for stat_type in stat_types if string_value(stat_type).strip()]
+    return all(stat_type in allowed_stats for stat_type in normalized_types)
+
+
+def is_valid_gear_item_for_slot(item_class: str, slot: str, main_stat_type: str, substat_types: Iterable[str]) -> bool:
+    return is_valid_main_stat_for_slot(item_class, slot, main_stat_type) and is_valid_substats_for_slot(
+        item_class,
+        slot,
+        substat_types,
+    )
+
+
+def collect_item_substat_types(item: Dict[str, Any]) -> List[str]:
+    return [
+        string_value(dict_value(substat).get("type")).strip().lower()
+        for substat in list_value(item.get("substats"))
+        if string_value(dict_value(substat).get("type")).strip()
+    ]
+
+
+def collect_gear_validation_issues(item: Dict[str, Any]) -> List[str]:
+    item_class = string_value(item.get("item_class")).strip().lower()
+    slot = string_value(item.get("slot")).strip().lower()
+    main_stat = dict_value(item.get("main_stat"))
+    main_stat_type = string_value(main_stat.get("type")).strip().lower()
+    substat_types = collect_item_substat_types(item)
+    issues: List[str] = []
+    if not is_valid_main_stat_for_slot(item_class, slot, main_stat_type):
+        issues.append(f"main_stat:{main_stat_type or 'missing'}@{slot or 'unknown'}")
+    if not is_valid_substats_for_slot(item_class, slot, substat_types):
+        allowed_by_slot = GEAR_ALLOWED_SUBSTATS.get(item_class, {})
+        allowed_stats = allowed_by_slot.get(slot, set())
+        invalid_substats = [stat_type for stat_type in substat_types if stat_type not in allowed_stats]
+        for stat_type in invalid_substats:
+            issues.append(f"substat:{stat_type}@{slot or 'unknown'}")
+    return issues
+
+
+def is_valid_gear_item(item: Dict[str, Any]) -> bool:
+    return not collect_gear_validation_issues(item)
+
+
+def infer_candidate_slots(item_class: str, stat_type: str) -> List[str]:
+    if not item_class or not stat_type:
+        return []
+    allowed_by_slot = GEAR_ALLOWED_MAIN_STATS.get(item_class, {})
+    return [slot for slot, allowed_stats in allowed_by_slot.items() if stat_type in allowed_stats]
 
 
 def champion_sort_tuple(champion: Dict[str, Any]) -> Tuple[int, int, int, int]:
@@ -1024,6 +2258,11 @@ def nullable_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def json_text(value: Any, fallback: Any) -> str:
+    normalized = value if isinstance(value, (dict, list)) else fallback
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
 
 def now_utc_iso() -> str:

@@ -50,6 +50,30 @@ Enrichment HellHades:
 python hellhades_enrich.py
 ```
 
+Sync skill provider-first:
+
+```bash
+python hellhades_enrich.py --provider auto
+```
+
+Provider supportati oggi:
+
+- `local_registry` come prima scelta
+- `ayumilove` come catalogo skill/cooldown da pagine campione
+- `hellhades` come fallback aggiuntivo
+
+Export registry skill locale:
+
+```bash
+python build_local_skill_registry.py
+```
+
+Audit fonti locali e copertura registry:
+
+```bash
+python game_data_probe.py
+```
+
 Avvio web UI locale:
 
 ```bash
@@ -74,10 +98,15 @@ Pagine principali:
 - `forge_db.py`: schema e import dati principali
 - `account_stats.py`: calcolo stats account runtime
 - `hellhades_enrich.py`: enrichment skill e metadata da HellHades
+- `build_local_skill_registry.py`: export del registry skill locale a partire dal DB
+- `game_data_probe.py`: audit rapido di client RAID locale, bundle disponibili e copertura del registry skill
+- `providers/ayumilove_provider.py`: provider catalogo campioni da AyumiLove
+- `providers/local_registry_provider.py`: provider locale prioritario per skill e cooldown
 - `gear_advisor.py`: logica decisionale sui pezzi gear
 - `build_planner.py`: generazione proposte build per campioni
 - `cbforge_web.py`: server HTTP locale e API
 - `web/`: frontend statico per roster, gear e build planner
+- `data_sources/`: sorgenti locali versionabili, incluso il registry skill
 - `test_*.py`: suite test
 
 ## Stato del progetto
@@ -100,10 +129,15 @@ Priorita' attuali:
 
 - riallineare e stabilizzare il database runtime rispetto agli ultimi enrichment eseguiti
 - verificare la copertura reale dei campioni target HellHades nel DB corrente
+- ridurre la dipendenza da HellHades fino a poter lavorare anche senza quella sorgente esterna
 - ampliare la modellazione dei set speciali ancora trattati come parziali nel motore stats
 - migliorare il planner build con piu' profili, vincoli e criteri di scoring
 - aggiungere una vista piu' operativa per gli upgrade gear realmente perseguibili
 - consolidare la sell queue e il flusso di refresh da sorgente live
+
+Roadmap dedicata:
+
+- vedi `HELLHADES_DECOUPLING_PLAN.md`
 
 Roadmap successiva:
 

@@ -1,0 +1,46 @@
+{
+  "battles": [
+    {
+      "battle_id": "a5302770-d013-4572-8ba7-d31a8548c6ee",
+      "session_slug": "20260324T070903Z",
+      "stage_id": "5129021",
+      "encounter_name": "Luthiea",
+      "encounter_affinity": "force",
+      "members": [
+        {"champion_name": "Embrys the Anomaly", "damage_done": 1016812, "damage_taken": 82187, "healing_done": 338354},
+        {"champion_name": "Teodor the Savant", "damage_done": 1123880, "damage_taken": 38001, "healing_done": 162409},
+        {"champion_name": "Arix", "damage_done": 299001, "damage_taken": 223953, "healing_done": 94357},
+        {"champion_name": "Rector Drath", "damage_done": 40473, "damage_taken": 112868, "healing_done": 884314},
+        {"champion_name": "Skeletor", "damage_done": 128762, "damage_taken": 69553, "healing_done": 768}
+      ]
+    },
+    {
+      "battle_id": "368e1bb0-a147-4b58-9c85-668f395e3cb7",
+      "session_slug": "20260324T073610Z",
+      "stage_id": "2062010",
+      "content_label": "Dragon's Lair. Stage 10",
+      "members": [
+        {"champion_name": "Rakka Viletide", "damage_done": 476572, "damage_taken": 58334, "healing_done": 698315},
+        {"champion_name": "Yumeko", "damage_done": 1059210, "damage_taken": 20494, "healing_done": 44650},
+        {"champion_name": "Ninja", "damage_done": 7101899, "damage_taken": 26425, "healing_done": 645519},
+        {"champion_name": "Jintoro", "damage_done": 2992387, "damage_taken": 66020, "healing_done": 705036},
+        {"champion_name": "Valkyrie", "damage_done": 895599, "damage_taken": 9998, "healing_done": 285864}
+      ]
+    },
+    {
+      "battle_id": "ef6926bd-5d4d-46e9-8390-2295784e0a3d",
+      "session_slug": "20260324T074336Z",
+      "stage_id": "2149015",
+      "encounter_name": "Iron Twins",
+      "encounter_affinity": "force",
+      "content_label": "Stage 15",
+      "members": [
+        {"champion_name": "Minaya", "damage_done": 138161, "damage_taken": 89929, "healing_done": 1494906},
+        {"champion_name": "Stag Knight", "damage_done": 671929, "damage_taken": 75890, "healing_done": 35800},
+        {"champion_name": "Iudex Artor", "damage_done": 1554397, "damage_taken": 55024, "healing_done": 280049},
+        {"champion_name": "Valkyrie", "damage_done": 542309, "damage_taken": 3584, "healing_done": 166754},
+        {"champion_name": "Mithrala Lifebane", "damage_done": 596519, "damage_taken": 23948, "healing_done": 5832}
+      ]
+    }
+  ]
+}

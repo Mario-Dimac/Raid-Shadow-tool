@@ -6,6 +6,7 @@ __pycache__/
 # Local runtime data
 data/
 input/
+forge.db
 
 # Legacy archive kept only in local workspace
 old/
