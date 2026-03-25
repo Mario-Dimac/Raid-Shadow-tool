@@ -257,6 +257,110 @@ def test_import_probe_session_persists_skill_usage_when_available(tmp_path: Path
     ]
 
 
+def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, monkeypatch) -> None:
+    client_root = tmp_path / "client_probe"
+    live_root = tmp_path / "live_storage_probe"
+    session_slug = "20260325T173527Z"
+    client_session = client_root / session_slug
+    live_session = live_root / session_slug
+    client_session.mkdir(parents=True)
+    live_session.mkdir(parents=True)
+
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path = tmp_path / "normalized_account.json"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    hero_types_path = tmp_path / "hh_hero_types.json"
+    hero_types_path.write_text(json.dumps([]), encoding="utf-8")
+
+    raw_asset = client_session / "battle_results.bin"
+    raw_asset.write_bytes(b"rich-battle-results")
+    meta_asset = client_session / "battle_results.json"
+    meta_asset.write_text("{}", encoding="utf-8")
+
+    battle = {
+        "battle_id": "fbbbae7e-58d1-461e-8660-7c86297796c8",
+        "stage_id": "4019024",
+        "formation_index": 0,
+        "player_team": [
+            {"slot": 1, "type_id": 3666, "name": "Rakka Viletide", "grade": "Stars6", "level": 60},
+        ],
+        "enemy_rows": [{"slot": 1, "type_id": 22286, "name": "Demon Lord", "grade": "Stars6", "level": 250}],
+    }
+    client_events = [
+        {"captured_at": "2026-03-25T18:00:00+00:00", "event_type": "battle_context", "battle": battle},
+        {"captured_at": "2026-03-25T18:00:02+00:00", "event_type": "log_line", "line": "Change battle state [Loading -> Started]"},
+        {
+            "captured_at": "2026-03-25T18:06:12+00:00",
+            "event_type": "forced_file_snapshot",
+            "source_name": "battle_results",
+            "saved": {
+                "raw_path": str(raw_asset),
+                "meta_path": str(meta_asset),
+                "marker": {"size": 12399, "sha256": "abc123"},
+            },
+            "battle": battle,
+        },
+        {"captured_at": "2026-03-25T18:06:13+00:00", "event_type": "log_line", "line": "Change battle state [Started -> Finished]"},
+    ]
+    write_jsonl(client_session / "events.jsonl", client_events)
+    write_jsonl(live_session / "events.jsonl", [])
+
+    monkeypatch.setattr(
+        run_history_importer,
+        "extract_damage_summary",
+        lambda path: {
+            "total_damage": 41_949_610,
+            "total_damage_status": "candidate_demon_lord_s_a_dt_high32",
+            "member_damage_status": "candidate_demon_lord_manual_fit_normalized_total",
+            "members": [
+                {"member_order": 1, "damage_done": 1_408_214, "damage_done_status": "candidate_demon_lord_manual_fit_normalized_total", "damage_taken": 119_943, "raw_damage_done": 1_441_193, "raw_damage_taken": 119_943},
+            ],
+        },
+    )
+
+    summary = import_probe_session(
+        session_slug=session_slug,
+        client_root=client_root,
+        live_root=live_root,
+        db_path=db_path,
+        hero_types_path=hero_types_path,
+    )
+
+    assert summary["imported_runs"] == 1
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT total_damage, context_json
+            FROM run_history_runs
+            WHERE battle_id = ?
+            """,
+            ("fbbbae7e-58d1-461e-8660-7c86297796c8",),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == 41_949_610
+    context = json.loads(row[1])
+    assert context["total_damage_status"] == "candidate_demon_lord_s_a_dt_high32"
+    assert context["member_damage_status"] == "candidate_demon_lord_manual_fit_normalized_total"
+
+    with sqlite3.connect(db_path) as conn:
+        metric_row = conn.execute(
+            """
+            SELECT damage_done, damage_taken, metric_payload_json
+            FROM run_history_member_metrics
+            WHERE run_id = 1 AND member_order = 1
+            """
+        ).fetchone()
+
+    assert metric_row is not None
+    assert metric_row[0] == 1_408_214
+    assert metric_row[1] == 119_943
+    assert json.loads(metric_row[2])["damage_done_status"] == "candidate_demon_lord_manual_fit_normalized_total"
+
+
 def test_backfill_probe_skill_usage_updates_existing_runs(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "cbforge.sqlite3"
     source_path = tmp_path / "normalized_account.json"

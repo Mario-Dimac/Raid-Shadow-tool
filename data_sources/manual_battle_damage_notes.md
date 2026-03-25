@@ -55,3 +55,51 @@ Nella battaglia `ef6926bd-5d4d-46e9-8390-2295784e0a3d`, `Iudex Artor` ha fatto `
 Nella battaglia `ef6926bd-5d4d-46e9-8390-2295784e0a3d`, `Valkyrie` ha fatto `542,309` danni.
 
 Nella battaglia `ef6926bd-5d4d-46e9-8390-2295784e0a3d`, `Mithrala Lifebane` ha fatto `596,519` danni.
+
+## Battaglia `5d46944e-8521-4640-a635-f2d4a609b05f`
+
+Sessione probe: `20260322T114745Z`.
+
+Stage ID probe: `4019021`.
+
+Encounter ricostruito dal recorder: `Demon Lord` (`void`).
+
+Contenuto osservato a schermo: `Demon Lord. Ultra-Nightmare`.
+
+Totale schermata risultati: `45,621,553`.
+
+Nella battaglia `5d46944e-8521-4640-a635-f2d4a609b05f`, `Rakka Viletide` ha fatto `2,076,768` danni.
+
+Nella battaglia `5d46944e-8521-4640-a635-f2d4a609b05f`, `Valkyrie` ha fatto `3,635,789` danni.
+
+Nella battaglia `5d46944e-8521-4640-a635-f2d4a609b05f`, `Ninja` ha fatto `20,328,973` danni.
+
+Nella battaglia `5d46944e-8521-4640-a635-f2d4a609b05f`, `Jintoro` ha fatto `12,762,763` danni.
+
+Nella battaglia `5d46944e-8521-4640-a635-f2d4a609b05f`, `Stag Knight` ha fatto `6,817,260` danni.
+
+## Battaglia `fbbbae7e-58d1-461e-8660-7c86297796c8`
+
+Sessione probe: `20260325T173527Z`.
+
+Stage ID probe: `4019024`.
+
+Encounter ricostruito dal recorder: `Demon Lord` (`spirit`).
+
+Contenuto osservato a schermo: `Demon Lord. Ultra-Nightmare`.
+
+Totale schermata risultati: `41,949,623`.
+
+Cumulativo chiave dopo run 1 + run 2 dichiarato dall'utente: `85,470,000`.
+
+Totale run 1 inferito per differenza: `43,520,377`.
+
+Nella battaglia `fbbbae7e-58d1-461e-8660-7c86297796c8`, `Rakka Viletide` ha fatto `1,294,986` danni.
+
+Nella battaglia `fbbbae7e-58d1-461e-8660-7c86297796c8`, `Valkyrie` ha fatto `3,600,191` danni.
+
+Nella battaglia `fbbbae7e-58d1-461e-8660-7c86297796c8`, `Ninja` ha fatto `19,131,025` danni.
+
+Nella battaglia `fbbbae7e-58d1-461e-8660-7c86297796c8`, `Jintoro` ha fatto `12,292,494` danni.
+
+Nella battaglia `fbbbae7e-58d1-461e-8660-7c86297796c8`, `Stag Knight` ha fatto `5,630,927` danni.

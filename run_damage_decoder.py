@@ -11,6 +11,14 @@ from client_run_probe import decode_msgpack_best_effort, try_decompress_lz4_bloc
 
 
 FIXED_POINT_32_SCALE = 2**32
+CLAN_BOSS_STAGE_PREFIX = "4019"
+DEMON_LORD_MEMBER_DAMAGE_RULES = {
+    3666: ("member_payload", "ad.2004", 29),
+    2166: ("member_payload", "r.m", 10),
+    6206: ("member_payload", "w.bf.d", 17),
+    5836: ("member_payload", "w.bf.a", 18),
+    4496: ("member_payload", "r.m", 11),
+}
 BATTLE_HEADER_RE = re.compile(r"^## Battaglia `([^`]+)`$")
 SESSION_RE = re.compile(r"^Sessione probe: `([^`]+)`\.$")
 STAGE_RE = re.compile(r"^Stage ID probe: `([^`]+)`\.$")
@@ -67,6 +75,73 @@ def decode_metric_high32(raw_metric: Any) -> int:
     return int(round(value / FIXED_POINT_32_SCALE))
 
 
+def extract_total_damage_candidate(root: Dict[str, Any]) -> Dict[str, Any]:
+    stage_id = string_value(dict_value(root.get("p")).get("i")).strip()
+    boss_row = dict_value(dict_value(root.get("s")).get("a"))
+    raw_total_damage = int_value(boss_row.get("dt"))
+    if stage_id.startswith(CLAN_BOSS_STAGE_PREFIX) and raw_total_damage > 0:
+        return {
+            "total_damage": decode_metric_high32(raw_total_damage),
+            "total_damage_status": "candidate_demon_lord_s_a_dt_high32",
+            "total_damage_source": "s.a.dt",
+        }
+    return {
+        "total_damage": None,
+        "total_damage_status": "not_available",
+        "total_damage_source": "",
+    }
+
+
+def extract_demon_lord_member_damage_candidates(
+    member_rows: List[Dict[str, Any]],
+    total_damage: int | None,
+    stage_id: str,
+) -> Dict[str, Any]:
+    if total_damage is None or total_damage <= 0 or not stage_id.startswith(CLAN_BOSS_STAGE_PREFIX):
+        return {"members": [], "status": "not_available"}
+
+    weights: List[Tuple[int, int]] = []
+    for row in member_rows:
+        champion_type_id = int_value(row.get("champion_type_id"))
+        rule = DEMON_LORD_MEMBER_DAMAGE_RULES.get(champion_type_id)
+        if rule is None:
+            return {"members": [], "status": "not_available"}
+        payload_key, path, shift = rule
+        payload = dict_value(row.get(payload_key))
+        flat = flatten_numeric_leaf_paths(payload)
+        raw_value = int_value(flat.get(path))
+        weight = int(round(raw_value / (2**shift))) if raw_value > 0 else 0
+        if weight <= 0:
+            return {"members": [], "status": "not_available"}
+        weights.append((int_value(row.get("member_order")), weight))
+
+    weight_total = sum(weight for _, weight in weights)
+    if weight_total <= 0:
+        return {"members": [], "status": "not_available"}
+
+    allocated: List[Dict[str, Any]] = []
+    running_total = 0
+    for index, (member_order, weight) in enumerate(weights):
+        if index == len(weights) - 1:
+            damage_done = max(total_damage - running_total, 0)
+        else:
+            damage_done = int(round(total_damage * weight / weight_total))
+            running_total += damage_done
+        allocated.append(
+            {
+                "member_order": member_order,
+                "damage_done": damage_done,
+                "damage_done_status": "candidate_demon_lord_manual_fit_normalized_total",
+                "damage_done_weight": weight,
+            }
+        )
+
+    return {
+        "members": allocated,
+        "status": "candidate_demon_lord_manual_fit_normalized_total",
+    }
+
+
 def extract_member_result_rows(path: Path) -> List[Dict[str, Any]]:
     root = decode_battle_results_root(path)
     result_members = list_value(dict_value(dict_value(root.get("s")).get("f")).get("h"))
@@ -96,26 +171,41 @@ def extract_damage_summary(path: Path) -> Dict[str, Any]:
     root = decode_battle_results_root(path)
     member_rows = extract_member_result_rows(path)
     total_damage_taken = sum(int_value(row.get("damage_taken")) for row in member_rows)
+    total_damage_candidate = extract_total_damage_candidate(root)
+    stage_id = string_value(dict_value(root.get("p")).get("i")).strip()
+    member_damage_candidate = extract_demon_lord_member_damage_candidates(
+        member_rows,
+        total_damage=int_value(total_damage_candidate.get("total_damage")),
+        stage_id=stage_id,
+    )
+    member_damage_by_order = {
+        int_value(row.get("member_order")): dict_value(row)
+        for row in list_value(member_damage_candidate.get("members"))
+    }
     members = [
         {
             "member_order": row["member_order"],
             "champion_type_id": row["champion_type_id"],
-            "damage_done": None,
+            "damage_done": dict_value(member_damage_by_order.get(int_value(row.get("member_order")))).get("damage_done"),
             "damage_taken": row["damage_taken"],
-            "raw_damage_done": None,
+            "raw_damage_done": dict_value(member_damage_by_order.get(int_value(row.get("member_order")))).get("damage_done_weight"),
             "raw_damage_taken": row["raw_damage_taken"],
+            "damage_done_status": string_value(dict_value(member_damage_by_order.get(int_value(row.get("member_order")))).get("damage_done_status")),
         }
         for row in member_rows
     ]
     return {
         "battle_id": string_value(dict_value(root.get("p")).get("z")).strip(),
-        "total_damage": None,
+        "total_damage": total_damage_candidate.get("total_damage"),
         "total_damage_taken": total_damage_taken,
         "members": members,
         "source_path": str(path),
         "damage_trusted": False,
         "damage_taken_trusted": True,
-        "decode_note": "The raw field `dt` matches the blue result metric, not the red damage-dealt line.",
+        "total_damage_status": string_value(total_damage_candidate.get("total_damage_status")),
+        "total_damage_source": string_value(total_damage_candidate.get("total_damage_source")),
+        "member_damage_status": string_value(member_damage_candidate.get("status")),
+        "decode_note": "The raw field `dt` matches the blue result metric, not the red damage-dealt line. Demon Lord total damage is available as a candidate from `s.a.dt`.",
     }
 
 

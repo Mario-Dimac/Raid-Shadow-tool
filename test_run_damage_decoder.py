@@ -10,6 +10,7 @@ from run_damage_decoder import (
     build_manual_result_metrics_dataset,
     decode_metric_high32,
     detect_battle_id_from_meta_payload,
+    extract_damage_summary,
     extract_member_result_rows,
     index_rich_battle_result_assets,
     parse_manual_battle_damage_notes,
@@ -157,3 +158,39 @@ def test_extract_member_result_rows_preserves_zero_slot_index(monkeypatch: pytes
 
     assert rows[0]["slot_index"] == 0
     assert rows[0]["damage_taken"] == 3
+
+
+def test_extract_damage_summary_reads_demon_lord_total_damage_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        run_damage_decoder,
+        "decode_battle_results_root",
+        lambda path: {
+            "p": {"i": "4019021", "z": "battle-1", "f": {"h": [{}]}},
+            "s": {
+                "a": {"dt": 45_621_541 * FIXED_POINT_32_SCALE},
+                "f": {
+                    "h": [
+                        {"i": 0, "t": 3666, "dt": 119_943 * FIXED_POINT_32_SCALE, "ad": {"2004": 1_441_193 * (2**29)}},
+                        {"i": 1, "t": 2166, "dt": 176_992 * FIXED_POINT_32_SCALE, "r": {"m": 3_607_101 * (2**10)}},
+                        {"i": 2, "t": 6206, "dt": 117_565 * FIXED_POINT_32_SCALE, "w": {"bf": {"d": 19_660_800 * (2**17)}}},
+                        {"i": 3, "t": 5836, "dt": 161_248 * FIXED_POINT_32_SCALE, "w": {"bf": {"a": 12_288_000 * (2**18)}}},
+                        {"i": 4, "t": 4496, "dt": 178_375 * FIXED_POINT_32_SCALE, "r": {"m": 5_934_940 * (2**11)}},
+                    ]
+                },
+            },
+        },
+    )
+
+    summary = extract_damage_summary(tmp_path / "sample.bin")
+
+    assert summary["battle_id"] == "battle-1"
+    assert summary["total_damage"] == 45_621_541
+    assert summary["total_damage_status"] == "candidate_demon_lord_s_a_dt_high32"
+    assert summary["member_damage_status"] == "candidate_demon_lord_manual_fit_normalized_total"
+    assert summary["damage_trusted"] is False
+    assert summary["members"][2]["damage_taken"] == 117_565
+    assert summary["members"][2]["damage_done"] > 19_000_000
+    assert sum(int(member["damage_done"] or 0) for member in summary["members"]) == 45_621_541

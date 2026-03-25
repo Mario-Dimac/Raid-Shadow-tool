@@ -1438,6 +1438,7 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
     metrics_by_member: Dict[int, Dict[str, Any]] = {}
     for row in metric_rows:
         member_order = int(row["member_order"] or 0)
+        payload = parse_json_text(str(row["metric_payload_json"] or ""), {})
         metrics_by_member[member_order] = {
             "damage_done": parse_float_value(row["damage_done"]),
             "damage_taken": parse_float_value(row["damage_taken"]),
@@ -1448,7 +1449,10 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
             "deaths": int(row["deaths"] or 0),
             "revives": int(row["revives"] or 0),
             "alive_at_end": row["alive_at_end"],
-            "payload": parse_json_text(str(row["metric_payload_json"] or ""), {}),
+            "damage_done_status": str(payload.get("damage_done_status") or ""),
+            "damage_done_weight": parse_float_value(payload.get("damage_done_weight")),
+            "damage_taken_trusted": bool(payload.get("damage_taken_trusted")),
+            "payload": payload,
         }
 
     skill_usage_by_member: Dict[int, List[Dict[str, Any]]] = {}

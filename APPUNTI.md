@@ -1,8 +1,8 @@
 # Appunti CB Forge
 
-Documento unico di riferimento che consolida tutti gli appunti storici del progetto fino al 2026-03-24.
+Documento unico di riferimento che consolida tutti gli appunti storici del progetto fino al 2026-03-25.
 
-## Stato corrente verificato il 2026-03-24
+## Stato corrente verificato il 2026-03-25
 
 - Il database runtime canonico e' `data/cbforge.sqlite3`.
 - Il file `forge.db` in root era obsoleto e vuoto; puo' essere rimosso.
@@ -12,7 +12,9 @@ Documento unico di riferimento che consolida tutti gli appunti storici del proge
   - `encounter_key = demon_lord_ultra_nightmare`
   - `success = 1`
 - La cattura delle run e' reale, ma non tutto il flusso e' ancora live/automatico in tempo reale.
-- Il decoder del `battleResults` va ancora rifinito per fidarsi del danno per campione come dato finale canonicale.
+- Per `Demon Lord`, il `total_damage` della run e' ora recuperabile dal raw `battleResults` come candidato forte da `s.a.dt >> 32`.
+- Il `damage_by_champion` per `Demon Lord` e' ancora solo `candidate`, non `trusted`.
+- Il `healing_done` non e' ancora mappato in modo affidabile: il verde finale sembra mescolare cure da skill e sustain da set come `Lifesteal`.
 - La roadmap di decoupling da HellHades e' mantenuta in questo file; `HELLHADES_DECOUPLING_PLAN.md` resta solo come rimando per evitare divergenze.
 
 ## Decisioni ormai fissate
@@ -994,6 +996,59 @@ Non e' ancora sufficiente per una AI tattica micro completa.
   - confrontare il danno diretto teorico atteso con i log della run
   - separare meglio contributi diretti e indiretti
 
+## 2026-03-25 - Demon Lord: totale run chiuso, heal ancora aperto
+
+### Confermato
+
+- Sessione probe `20260325T173527Z` con due run `Demon Lord. Ultra-Nightmare` spirit:
+  - `afad85e9-4c1c-4fd0-a8fe-fc5aa7bf6368`
+  - `fbbbae7e-58d1-461e-8660-7c86297796c8`
+- Il `total_damage` della run e' recuperabile dal raw `battleResults` in `s.a.dt` come fixed-point:
+  - decoder pratico: `s.a.dt >> 32`
+  - status salvato: `candidate_demon_lord_s_a_dt_high32`
+- Confronto run 2:
+  - screen: `41,949,623`
+  - raw: `41,949,610`
+  - differenza: `13`
+- Confronto run 1:
+  - cumulativo utente dopo run 1 + run 2: `85,470,000`
+  - run 1 inferita da differenza: `43,520,377`
+  - raw run 1: `43,522,952`
+  - differenza: `2,575`
+- `damage_taken` per campione resta affidabile da `member.dt >> 32` e coincide con la linea blu della schermata risultato.
+
+### Stato del danno per campione
+
+- Per il team Demon Lord noto e' stato cablato un `damage_done` per campione come `candidate`, non `trusted`.
+- La stima attuale usa pesi specifici per campione normalizzati sul `total_damage` della run.
+- Status salvato: `candidate_demon_lord_manual_fit_normalized_total`
+- Questo e' utile in UI e DB come diagnostica, ma non va ancora trattato come valore canonicale generale.
+- Se cambia team, il mapping attuale non va applicato alla cieca.
+
+### Stato delle cure
+
+- Il `healing_done` non ha ancora un mapping trusted nel payload `battleResults`.
+- Punto importante verificato con l'utente:
+  - il numero verde finale include sia cure da skill sia sustain da set, per esempio `Lifesteal` su `Ninja` e `Jintoro`
+- I campi raw sembrano distribuire il sustain su bucket multipli, non su una singola chiave pulita analoga a `dt`.
+- Quindi oggi non va importato nessun `healing_done` candidato come se fosse affidabile.
+
+### Prossimo focus operativo
+
+- Analizzare buff/debuff nel raw con timeline strutturata per turno.
+- Obiettivi principali:
+  - chi applica cosa
+  - su quale target
+  - `placed`, `extended`, `resisted`, `blocked`
+  - uptime per buff/debuff chiave
+- Per Clan Boss interessano in particolare:
+  - `Decrease DEF`
+  - `Weaken`
+  - `Increase DEF`
+  - `Counterattack`
+  - `Block Debuffs`
+  - eventuali effetti tipo `Ally Protect`
+
 ## Roadmap operativa 2026-03-24
 
 ### Done
@@ -1008,6 +1063,7 @@ Non e' ancora sufficiente per una AI tattica micro completa.
 - Pagina optimizer con boss/affinita'/livello, team proposto, coverage, rischi e build planner collegato
 - Pagina run ripulita con segnali leggibili per campione e raw spostato in debug
 - Persistenza `skill_usage` da `battleResults` nel DB e in UI
+- Persistenza `total_damage` candidato Demon Lord da `s.a.dt >> 32` nel DB
 - Modello teorico del danno diretto derivato dal foglio `Delta89`
 - Correzione pipeline gear/accessori del 24 marzo 2026:
   - confermato che nel dump HH `Kind 8 = amulet` e `Kind 9 = banner`
@@ -1028,12 +1084,15 @@ Non e' ancora sufficiente per una AI tattica micro completa.
 ### Next
 
 - Trovare il mapping trusted tra payload raw `battleResults` e danni UI per campione
+- Tenere il `damage_done` Demon Lord attuale come `candidate`, non come verita' canonica
 - Formalizzare un piccolo dataset di run note con:
   - `battle_id`
   - danni manuali per campione
   - path del miglior snapshot raw
-- Aggiornare `run_damage_decoder.py` per confrontare campi numerici candidati contro il dataset noto
-- Quando il mapping torna, importare `member_damage` trusted nel DB e nella UI run
+- Formalizzare anche un dataset manuale con `damage_taken` e `healing_done` da schermata quando disponibili
+- Trovare il mapping trusted del `healing_done`, tenendo conto che il verde finale include sia skill sia set come `Lifesteal`
+- Costruire timeline buff/debuff strutturata da `root.r.c`
+- Quando il mapping torna, importare `member_damage` e `healing_done` trusted nel DB e nella UI run
 - Ricontrollare i totali build/stats reali su un piccolo set sentinella dopo il fix accessori
 - Estendere la diagnostica gear sospetto anche alla pagina gear/account, non solo optimizer
 

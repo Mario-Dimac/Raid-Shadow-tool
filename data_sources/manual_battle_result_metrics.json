@@ -41,6 +41,40 @@
         {"champion_name": "Valkyrie", "damage_done": 542309, "damage_taken": 3584, "healing_done": 166754},
         {"champion_name": "Mithrala Lifebane", "damage_done": 596519, "damage_taken": 23948, "healing_done": 5832}
       ]
+    },
+    {
+      "battle_id": "5d46944e-8521-4640-a635-f2d4a609b05f",
+      "session_slug": "20260322T114745Z",
+      "stage_id": "4019021",
+      "encounter_name": "Demon Lord",
+      "encounter_affinity": "void",
+      "content_label": "Demon Lord. Ultra-Nightmare",
+      "result_screen_total_damage": 45621553,
+      "members": [
+        {"champion_name": "Rakka Viletide", "damage_done": 2076768},
+        {"champion_name": "Valkyrie", "damage_done": 3635789},
+        {"champion_name": "Ninja", "damage_done": 20328973},
+        {"champion_name": "Jintoro", "damage_done": 12762763},
+        {"champion_name": "Stag Knight", "damage_done": 6817260}
+      ]
+    },
+    {
+      "battle_id": "fbbbae7e-58d1-461e-8660-7c86297796c8",
+      "session_slug": "20260325T173527Z",
+      "stage_id": "4019024",
+      "encounter_name": "Demon Lord",
+      "encounter_affinity": "spirit",
+      "content_label": "Demon Lord. Ultra-Nightmare",
+      "result_screen_total_damage": 41949623,
+      "cumulative_damage_after_run_1_plus_2": 85470000,
+      "inferred_run_1_total_damage": 43520377,
+      "members": [
+        {"champion_name": "Rakka Viletide", "damage_done": 1294986, "damage_taken": 119943, "healing_done": 1205263},
+        {"champion_name": "Valkyrie", "damage_done": 3600191, "damage_taken": 176992, "healing_done": 478560},
+        {"champion_name": "Ninja", "damage_done": 19131025, "damage_taken": 117565, "healing_done": 3241806},
+        {"champion_name": "Jintoro", "damage_done": 12292494, "damage_taken": 161248, "healing_done": 3178030},
+        {"champion_name": "Stag Knight", "damage_done": 5630927, "damage_taken": 178375, "healing_done": 95171}
+      ]
     }
   ]
 }

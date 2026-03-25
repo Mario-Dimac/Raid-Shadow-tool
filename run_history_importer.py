@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from battle_event_decoder import extract_skill_usage_counts
 from forge_db import DB_PATH, ensure_schema, record_run_history
+from run_damage_decoder import extract_damage_summary
 from run_mapper import HH_HERO_TYPES_PATH, derive_run_mapping
 
 
@@ -344,10 +345,30 @@ def build_run_payload(
     started_at = find_started_at(client_events, max(start_index, 0), max(end_index, 0))
     finished_at = find_finished_at(client_events, max(start_index, 0), max(end_index, 0))
     saved = dict_value(client_event.get("saved"))
+    damage_summary = extract_damage_summary(Path(string_value(saved.get("raw_path"))))
     skill_usage_by_slot = build_member_skill_usage_by_slot(string_value(saved.get("raw_path")))
+    damage_members_by_order = {
+        int_value(row.get("member_order")): dict_value(row)
+        for row in list_value(damage_summary.get("members"))
+    }
     members = build_members(battle_context)
     for member in members:
         slot_index = int_value(member.get("slot_index"))
+        member_order = slot_index + 1
+        damage_member = dict_value(damage_members_by_order.get(member_order))
+        metrics: Dict[str, Any] = {}
+        if damage_member:
+            metrics["damage_taken"] = damage_member.get("damage_taken")
+            metrics["damage_taken_trusted"] = True
+            if damage_member.get("damage_done") is not None:
+                metrics["damage_done"] = damage_member.get("damage_done")
+            if string_value(damage_member.get("damage_done_status")):
+                metrics["damage_done_status"] = string_value(damage_member.get("damage_done_status"))
+            if damage_member.get("raw_damage_done") is not None:
+                metrics["damage_done_weight"] = damage_member.get("raw_damage_done")
+            metrics["raw_damage_taken"] = damage_member.get("raw_damage_taken")
+        if metrics:
+            member["metrics"] = metrics
         member["skill_usage"] = list_value(skill_usage_by_slot.get(slot_index))
 
     payload: Dict[str, Any] = {
@@ -361,6 +382,7 @@ def build_run_payload(
         "success": True,
         "completed": True,
         "elapsed_seconds": elapsed_seconds(started_at, finished_at),
+        "total_damage": damage_summary.get("total_damage"),
         "notes": "Imported from probe session. success is inferred from a completed battleResults capture.",
         "labels": {
             "mapping_confidence": string_value(mapping.get("mapping_confidence")),
@@ -372,6 +394,8 @@ def build_run_payload(
             "mapping_sources": list_value(mapping.get("mapping_sources")),
             "difficulty_source": string_value(mapping.get("difficulty_source")),
             "damage_status": "not_imported_untrusted_decoder",
+            "total_damage_status": string_value(damage_summary.get("total_damage_status")) or "not_available",
+            "member_damage_status": string_value(damage_summary.get("member_damage_status")) or "not_available",
             "skill_usage_status": "imported_from_raw_events" if skill_usage_by_slot else "not_available",
         },
         "members": members,
