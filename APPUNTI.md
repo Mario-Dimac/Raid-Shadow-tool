@@ -1064,6 +1064,18 @@ Non e' ancora sufficiente per una AI tattica micro completa.
 - Pagina run ripulita con segnali leggibili per campione e raw spostato in debug
 - Persistenza `skill_usage` da `battleResults` nel DB e in UI
 - Persistenza `total_damage` candidato Demon Lord da `s.a.dt >> 32` nel DB
+- Timeline run estesa oltre i soli effetti candidati:
+  - nuovo estrattore `run_effect_timeline.py`
+  - persistenza `run_history_effect_timeline` nel DB
+  - sezione timeline visibile nella pagina run
+  - timeline ora include anche i cast boss/nemico e i cast player senza effetti candidati
+  - ogni evento ha contesto turn-based minimo:
+    - `timeline_index`
+    - `source_turn_index`
+    - `turn_window_index`
+    - `enemy_turn_index`
+    - `actions_until_upcoming_enemy_turn`
+  - ogni effetto candidato prova anche a risolvere i target candidati (`self`, `all_allies`, boss, ecc.)
 - Modello teorico del danno diretto derivato dal foglio `Delta89`
 - Correzione pipeline gear/accessori del 24 marzo 2026:
   - confermato che nel dump HH `Kind 8 = amulet` e `Kind 9 = banner`
@@ -1091,7 +1103,14 @@ Non e' ancora sufficiente per una AI tattica micro completa.
   - path del miglior snapshot raw
 - Formalizzare anche un dataset manuale con `damage_taken` e `healing_done` da schermata quando disponibili
 - Trovare il mapping trusted del `healing_done`, tenendo conto che il verde finale include sia skill sia set come `Lifesteal`
-- Costruire timeline buff/debuff strutturata da `root.r.c`
+- Portare la timeline da `skill/event sequence` a `turn consumed sequence`:
+  - distinguere `cast_skill` da `turno consumato ma skill saltata`
+  - cercare nel raw segnali per `stun`, `fear`, `true fear`, `provoke`
+  - capire se un campione ha avuto il turno ma non ha eseguito la skill attesa
+  - usare i turni boss come ancore per coverage di `Decrease ATK`, `Decrease DEF`, `Weaken`, `Block Debuffs`, `Counterattack`
+- Tenere la timeline attuale come `candidate` e non come verita' finale:
+  - oggi utile per timing/tune e AI features
+  - non ancora trusted per `placed`, `resisted`, `blocked`, `extended`
 - Quando il mapping torna, importare `member_damage` e `healing_done` trusted nel DB e nella UI run
 - Ricontrollare i totali build/stats reali su un piccolo set sentinella dopo il fix accessori
 - Estendere la diagnostica gear sospetto anche alla pagina gear/account, non solo optimizer
