@@ -6,7 +6,7 @@ from pathlib import Path
 
 import run_history_importer
 from forge_db import bootstrap_database
-from run_history_importer import backfill_probe_skill_usage, event_battle_id, import_probe_session
+from run_history_importer import backfill_probe_effect_timeline, backfill_probe_skill_usage, event_battle_id, import_probe_session
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -319,6 +319,54 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
             ],
         },
     )
+    monkeypatch.setattr(
+        run_history_importer,
+        "extract_effect_timeline",
+        lambda path, hero_types_path=None: {
+            "status_timeline_status": "candidate_from_cast_order_plus_skill_metadata",
+            "status_timeline_count": 1,
+            "timeline": [
+                {
+                    "event_index": 13,
+                    "source_slot": 0,
+                    "source_name": "Rakka Viletide",
+                    "source_type_id": 3666,
+                    "target_party_id": 83832666,
+                    "target_slot": 0,
+                    "skill_order": 2,
+                    "skill_slot": "A2",
+                    "skill_code": "36602",
+                    "skill_name": "Oozing Blessing",
+                    "skill_type": "Active",
+                    "skill_provider": "ayumilove",
+                    "status_effects": [
+                        {
+                            "effect_type": "increase_atk",
+                            "category": "buff",
+                            "action": "place",
+                            "target": "all_allies",
+                            "duration": 2,
+                            "chance": None,
+                            "effect_value": 50.0,
+                            "resolution": "candidate_from_skill_metadata",
+                            "condition_text": "Places Increase ATK.",
+                        },
+                        {
+                            "effect_type": "shield",
+                            "category": "buff",
+                            "action": "place",
+                            "target": "all_allies",
+                            "duration": 2,
+                            "chance": None,
+                            "effect_value": 25.0,
+                            "resolution": "candidate_from_skill_metadata",
+                            "condition_text": "Places Shield.",
+                        },
+                    ],
+                }
+            ],
+        },
+    )
 
     summary = import_probe_session(
         session_slug=session_slug,
@@ -345,6 +393,8 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
     context = json.loads(row[1])
     assert context["total_damage_status"] == "candidate_demon_lord_s_a_dt_high32"
     assert context["member_damage_status"] == "candidate_demon_lord_manual_fit_normalized_total"
+    assert context["effect_timeline_status"] == "candidate_from_cast_order_plus_skill_metadata"
+    assert context["effect_timeline_rows"] == 1
 
     with sqlite3.connect(db_path) as conn:
         metric_row = conn.execute(
@@ -354,11 +404,22 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
             WHERE run_id = 1 AND member_order = 1
             """
         ).fetchone()
+        effect_rows = conn.execute(
+            """
+            SELECT source_name, skill_slot, effect_type, effect_action
+            FROM run_history_effect_timeline
+            ORDER BY timeline_index, effect_index
+            """
+        ).fetchall()
 
     assert metric_row is not None
     assert metric_row[0] == 1_408_214
     assert metric_row[1] == 119_943
     assert json.loads(metric_row[2])["damage_done_status"] == "candidate_demon_lord_manual_fit_normalized_total"
+    assert effect_rows == [
+        ("Rakka Viletide", "A2", "increase_atk", "place"),
+        ("Rakka Viletide", "A2", "shield", "place"),
+    ]
 
 
 def test_backfill_probe_skill_usage_updates_existing_runs(tmp_path: Path, monkeypatch) -> None:
@@ -443,3 +504,102 @@ def test_backfill_probe_skill_usage_updates_existing_runs(tmp_path: Path, monkey
         (1, 1, "A1", "36601", 10),
         (2, 3, "A3", "69003", 5),
     ]
+
+
+def test_backfill_probe_effect_timeline_updates_existing_runs(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path = tmp_path / "normalized_account.json"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    raw_asset = tmp_path / "battle_results.bin"
+    raw_asset.write_bytes(b"rich")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO run_history_runs (
+                saved_at, source, source_run_uid, battle_id, encounter_key, success, completed, auto_play,
+                feature_schema_version, labels_json, context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-03-24T09:05:00+00:00",
+                "probe_import",
+                "battle-1",
+                "battle-1",
+                "dragon_10",
+                1,
+                1,
+                1,
+                "run_history_v1",
+                "{}",
+                "{}",
+            ),
+        )
+        run_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO run_history_assets (
+                run_id, asset_order, asset_kind, asset_path, metadata_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (run_id, 1, "client_probe_battle_results_bin", str(raw_asset), "{}"),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(
+        run_history_importer,
+        "extract_effect_timeline",
+        lambda path, hero_types_path=None: {
+            "status_timeline_status": "candidate_from_cast_order_plus_skill_metadata",
+            "status_timeline_count": 1,
+            "timeline": [
+                {
+                    "event_index": 8,
+                    "source_slot": 4,
+                    "source_name": "Stag Knight",
+                    "source_type_id": 4496,
+                    "target_party_id": -1,
+                    "target_slot": 5,
+                    "skill_order": 2,
+                    "skill_slot": "A2",
+                    "skill_code": "44902",
+                    "skill_name": "Huntmaster",
+                    "skill_type": "Active",
+                    "skill_provider": "ayumilove",
+                    "status_effects": [
+                        {"effect_type": "decrease_def", "category": "debuff", "action": "place", "target": "enemy", "duration": 2},
+                        {"effect_type": "decrease_atk", "category": "debuff", "action": "place", "target": "enemy", "duration": 2},
+                    ],
+                }
+            ],
+        },
+    )
+
+    summary = backfill_probe_effect_timeline(db_path=db_path)
+
+    assert summary["backfilled_runs"] == 1
+    assert summary["skipped_runs"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT source_name, skill_slot, effect_type, effect_action
+            FROM run_history_effect_timeline
+            ORDER BY timeline_index, effect_index
+            """
+        ).fetchall()
+        context_row = conn.execute(
+            "SELECT context_json FROM run_history_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+
+    assert rows == [
+        ("Stag Knight", "A2", "decrease_def", "place"),
+        ("Stag Knight", "A2", "decrease_atk", "place"),
+    ]
+    assert context_row is not None
+    context = json.loads(context_row[0])
+    assert context["effect_timeline_status"] == "candidate_from_cast_order_plus_skill_metadata"
+    assert context["effect_timeline_rows"] == 1

@@ -27,6 +27,7 @@ from hellhades_enrich import enrich_registry_from_source
 from registry_report import build_registry_report
 from run_mapper import HH_HERO_TYPES_PATH, derive_run_mapping
 from run_damage_decoder import extract_member_result_rows
+from run_effect_timeline import extract_effect_timeline
 from run_history_importer import LIVE_STORAGE_ROOT, import_probe_session, import_probe_sessions
 from set_curation import load_local_set_entries, save_local_set_entry
 from team_optimizer import build_team_optimizer_report, list_team_optimizer_targets
@@ -1483,6 +1484,7 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
 
     raw_member_rows_by_order: Dict[int, Dict[str, Any]] = {}
     incoming_rows_by_order: Dict[int, Dict[str, Any]] = {}
+    effect_timeline: Dict[str, Any] = {}
     raw_asset_path = next(
         (
             Path(str(asset.get("asset_path") or ""))
@@ -1516,6 +1518,10 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
                 }
         except Exception:
             incoming_rows_by_order = {}
+        try:
+            effect_timeline = dict_value(extract_effect_timeline(raw_asset_path))
+        except Exception:
+            effect_timeline = {}
 
     members = []
     for row in member_rows:
@@ -1597,6 +1603,7 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
         "members": members,
         "assets": assets,
         "raw_asset_path": str(raw_asset_path) if raw_asset_path else "",
+        "effect_timeline": effect_timeline,
     }
 
 

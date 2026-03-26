@@ -422,6 +422,7 @@ def test_bootstrap_database_exposes_run_history_tables(tmp_path: Path) -> None:
     assert summary["run_history_member_skill_usage"] == 0
     assert summary["run_history_assets"] == 0
     assert summary["run_history_events"] == 0
+    assert summary["run_history_effect_timeline"] == 0
 
 
 def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -> None:
@@ -481,6 +482,50 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
                 "payload": {"size": 13528},
             }
         ],
+        "effect_timeline": {
+            "status_timeline_status": "candidate_from_cast_order_plus_skill_metadata",
+            "status_timeline_count": 1,
+            "timeline": [
+                {
+                    "event_index": 0,
+                    "source_slot": 1,
+                    "source_name": "Jintoro",
+                    "source_type_id": 5836,
+                    "target_party_id": -1,
+                    "target_slot": 5,
+                    "skill_order": 3,
+                    "skill_slot": "A3",
+                    "skill_code": "58303",
+                    "skill_name": "Oni's Rage",
+                    "skill_type": "Active",
+                    "skill_provider": "ayumilove",
+                    "status_effects": [
+                        {
+                            "effect_type": "decrease_def",
+                            "category": "debuff",
+                            "action": "place",
+                            "target": "enemy",
+                            "duration": 2,
+                            "chance": None,
+                            "effect_value": 60.0,
+                            "resolution": "candidate_from_skill_metadata",
+                            "condition_text": "Places a 60% [Decrease DEF] debuff for 2 turns.",
+                        },
+                        {
+                            "effect_type": "weaken",
+                            "category": "debuff",
+                            "action": "place",
+                            "target": "enemy",
+                            "duration": 2,
+                            "chance": None,
+                            "effect_value": 25.0,
+                            "resolution": "candidate_from_skill_metadata",
+                            "condition_text": "Places a 25% [Weaken] debuff for 2 turns.",
+                        },
+                    ],
+                }
+            ],
+        },
         "members": [
             {
                 "champ_id": "champ-rakka",
@@ -533,6 +578,7 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
     assert summary["events"] == 1
     assert summary["assets"] == 1
     assert summary["skill_usages"] == 3
+    assert summary["effect_timeline_rows"] == 2
     assert summary["total_damage"] == 314451.3
 
     with sqlite3.connect(db_path) as conn:
@@ -571,6 +617,15 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
             """,
             (summary["run_id"],),
         ).fetchall()
+        effect_timeline_rows = conn.execute(
+            """
+            SELECT source_name, skill_slot, effect_type, effect_action, effect_target, duration_turns
+            FROM run_history_effect_timeline
+            WHERE run_id = ?
+            ORDER BY timeline_index, effect_index
+            """,
+            (summary["run_id"],),
+        ).fetchall()
 
     assert run_row is not None
     assert run_row[0] == "client_probe"
@@ -596,6 +651,10 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
         (1, 1, "A1", "36601", 10),
         (1, 2, "A2", "36602", 12),
         (2, 1, "A1", "58301", 11),
+    ]
+    assert effect_timeline_rows == [
+        ("Jintoro", "A3", "decrease_def", "place", "enemy", 2),
+        ("Jintoro", "A3", "weaken", "place", "enemy", 2),
     ]
 
 

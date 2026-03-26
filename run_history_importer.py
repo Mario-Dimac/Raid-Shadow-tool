@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from battle_event_decoder import extract_skill_usage_counts
-from forge_db import DB_PATH, ensure_schema, record_run_history
+from forge_db import DB_PATH, ensure_schema, insert_run_effect_timeline, record_run_history
 from run_damage_decoder import extract_damage_summary
+from run_effect_timeline import extract_effect_timeline
 from run_mapper import HH_HERO_TYPES_PATH, derive_run_mapping
 
 
@@ -345,8 +346,15 @@ def build_run_payload(
     started_at = find_started_at(client_events, max(start_index, 0), max(end_index, 0))
     finished_at = find_finished_at(client_events, max(start_index, 0), max(end_index, 0))
     saved = dict_value(client_event.get("saved"))
-    damage_summary = extract_damage_summary(Path(string_value(saved.get("raw_path"))))
+    raw_path = Path(string_value(saved.get("raw_path")))
+    damage_summary = extract_damage_summary(raw_path)
     skill_usage_by_slot = build_member_skill_usage_by_slot(string_value(saved.get("raw_path")))
+    effect_timeline: Dict[str, Any] = {}
+    if raw_path.exists() and raw_path.is_file():
+        try:
+            effect_timeline = extract_effect_timeline(raw_path, hero_types_path=hero_types_path)
+        except Exception:
+            effect_timeline = {}
     damage_members_by_order = {
         int_value(row.get("member_order")): dict_value(row)
         for row in list_value(damage_summary.get("members"))
@@ -397,10 +405,13 @@ def build_run_payload(
             "total_damage_status": string_value(damage_summary.get("total_damage_status")) or "not_available",
             "member_damage_status": string_value(damage_summary.get("member_damage_status")) or "not_available",
             "skill_usage_status": "imported_from_raw_events" if skill_usage_by_slot else "not_available",
+            "effect_timeline_status": string_value(effect_timeline.get("status_timeline_status")) or "not_available",
+            "effect_timeline_rows": int_value(effect_timeline.get("status_timeline_count")),
         },
         "members": members,
         "assets": build_assets(client_event, live_events, battle_id),
         "events": build_timeline_events(client_events, max(start_index, 0), max(end_index, 0)),
+        "effect_timeline": effect_timeline,
     }
     payload.update(mapping)
     return payload
@@ -551,6 +562,76 @@ def backfill_probe_skill_usage(db_path: Path = DB_PATH) -> Dict[str, Any]:
                 imported.append({"run_id": run_id, "battle_id": battle_id, "skill_usages": inserted})
             else:
                 skipped.append({"run_id": run_id, "battle_id": battle_id, "reason": "no_matching_members"})
+
+        conn.commit()
+
+    return {
+        "backfilled_runs": len(imported),
+        "skipped_runs": len(skipped),
+        "imported": imported,
+        "skipped": skipped,
+    }
+
+
+def backfill_probe_effect_timeline(db_path: Path = DB_PATH, hero_types_path: Path = HH_HERO_TYPES_PATH) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    imported: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        run_rows = conn.execute(
+            """
+            SELECT r.run_id, r.battle_id, r.context_json, a.asset_path
+            FROM run_history_runs r
+            JOIN run_history_assets a
+              ON a.run_id = r.run_id
+            WHERE r.source = 'probe_import'
+              AND a.asset_kind = 'client_probe_battle_results_bin'
+            ORDER BY r.run_id ASC
+            """
+        ).fetchall()
+
+        for run_row in run_rows:
+            run_id = int(run_row["run_id"])
+            battle_id = string_value(run_row["battle_id"])
+            existing_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM run_history_effect_timeline WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            if existing_count > 0:
+                skipped.append({"run_id": run_id, "battle_id": battle_id, "reason": "already_backfilled"})
+                continue
+
+            raw_path = Path(string_value(run_row["asset_path"]))
+            if not raw_path.exists() or not raw_path.is_file():
+                skipped.append({"run_id": run_id, "battle_id": battle_id, "reason": "raw_asset_missing"})
+                continue
+
+            try:
+                effect_timeline = extract_effect_timeline(raw_path, hero_types_path=hero_types_path)
+            except Exception:
+                skipped.append({"run_id": run_id, "battle_id": battle_id, "reason": "decode_failed"})
+                continue
+
+            inserted = insert_run_effect_timeline(conn, run_id=run_id, effect_timeline=effect_timeline)
+            if inserted <= 0:
+                skipped.append({"run_id": run_id, "battle_id": battle_id, "reason": "no_effect_rows_found"})
+                continue
+
+            try:
+                context = dict_value(json.loads(string_value(run_row["context_json"]) or "{}"))
+            except json.JSONDecodeError:
+                context = {}
+            context["effect_timeline_status"] = string_value(effect_timeline.get("status_timeline_status")) or "not_available"
+            context["effect_timeline_rows"] = int_value(effect_timeline.get("status_timeline_count"))
+            conn.execute(
+                "UPDATE run_history_runs SET context_json = ? WHERE run_id = ?",
+                (json.dumps(context, ensure_ascii=False, separators=(",", ":")), run_id),
+            )
+            imported.append({"run_id": run_id, "battle_id": battle_id, "effect_timeline_rows": inserted})
 
         conn.commit()
 

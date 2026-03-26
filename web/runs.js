@@ -114,6 +114,68 @@ function renderDebugDetails(title, value) {
   `;
 }
 
+function renderEffectTimeline(effectTimeline) {
+  const payload = effectTimeline || {};
+  const effectTotals = payload.effect_totals || {};
+  const timeline = payload.timeline || [];
+  const providerByChampion = payload.provider_by_champion || {};
+  const providerSummary = Object.entries(providerByChampion).map(([name, provider]) => `${name}: ${provider}`).join(" | ");
+
+  return `
+    <section class="card">
+      <h3>Buff / Debuff Timeline</h3>
+      ${timeline.length ? `
+        <div class="kv single-column" style="margin-bottom: 12px;">
+          ${kvRow("Status", payload.status_timeline_status || "candidate")}
+          ${kvRow("Eventi timeline", payload.status_timeline_count || 0)}
+          ${kvRow("Eventi raw", payload.event_count || 0)}
+          ${kvRow("Provider", providerSummary || "-")}
+        </div>
+        <div class="grid">
+          <div class="card">
+            <h3>Effetti Più Visti</h3>
+            <div class="list-block">
+              ${Object.entries(effectTotals).length ? Object.entries(effectTotals).map(([effectType, count]) => `
+                <div class="list-row">
+                  <strong>${escapeHtml(effectType)}</strong>
+                  <div class="subtext">${escapeHtml(String(count))}</div>
+                </div>
+              `).join("") : '<div class="empty">Nessun effetto candidato trovato.</div>'}
+            </div>
+          </div>
+          <div class="card">
+            <h3>Nota</h3>
+            <div class="subtext">
+              Timeline candidata costruita da cast order reale + metadata skill provider. Non e' ancora un log trusted di placed, resisted, blocked o extended.
+            </div>
+          </div>
+        </div>
+        <div class="list-block scroll-card" style="margin-top: 12px;">
+          ${timeline.map((row) => {
+            const effects = (row.status_effects || []).map((effect) => {
+              const duration = effect.duration ? ` ${effect.duration}t` : "";
+              const chance = Number(effect.chance || 0) > 0 ? ` ${effect.chance}%` : "";
+              return `${effect.action}:${effect.effect_type}${duration}${chance}`;
+            }).join(" | ");
+            return `
+              <div class="list-row">
+                <strong>#${escapeHtml(String(row.event_index))} ${escapeHtml(row.source_name || "-")} ${escapeHtml(row.skill_slot || "-")} ${escapeHtml(row.skill_name || "-")}</strong>
+                <div class="subtext">${escapeHtml(effects || "nessun effetto candidato")}</div>
+                <div class="subtext mono">${escapeHtml(`target party ${row.target_party_id ?? "-"} slot ${row.target_slot ?? "-"}`)}</div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+        <div class="stack" style="margin-top: 12px;">
+          ${renderDebugDetails("Effect timeline raw", payload)}
+        </div>
+      ` : `
+        <div class="empty">Timeline buff/debuff non disponibile per questa run o raw asset non sufficiente.</div>
+      `}
+    </section>
+  `;
+}
+
 function recorderStatusText() {
   const status = state.status || {};
   if (status.running) {
@@ -356,6 +418,7 @@ function renderDetails() {
   const dbRuns = detail.db_runs || [];
   const runDetail = state.runDetail || null;
   const derivedTotals = runDetail?.derived_totals || {};
+  const effectTimeline = runDetail?.effect_timeline || {};
   const selectedMember = runDetail?.members?.find((member) => Number(member.member_order) === Number(state.selectedMemberOrder)) || runDetail?.members?.[0] || null;
 
   detailsEl.innerHTML = `
@@ -479,10 +542,11 @@ function renderDetails() {
           </div>
         </div>
         ${renderSelectedMember(selectedMember)}
+        ${renderEffectTimeline(effectTimeline)}
         <section class="card">
           <h3>Debug Run</h3>
           <div class="stack">
-            ${renderDebugDetails("Run / context", { run: runDetail.run || {}, derived_totals: derivedTotals || {} })}
+            ${renderDebugDetails("Run / context", { run: runDetail.run || {}, derived_totals: derivedTotals || {}, effect_timeline_status: effectTimeline.status_timeline_status || "" })}
             ${renderDebugDetails("Assets", runDetail.assets || [])}
           </div>
         </section>

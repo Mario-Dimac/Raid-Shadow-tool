@@ -916,6 +916,37 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS run_history_effect_timeline (
+        run_id INTEGER NOT NULL,
+        timeline_index INTEGER NOT NULL,
+        effect_index INTEGER NOT NULL,
+        event_index INTEGER,
+        source_member_order INTEGER,
+        source_slot INTEGER,
+        source_name TEXT,
+        source_type_id INTEGER,
+        target_party_id INTEGER,
+        target_slot INTEGER,
+        skill_order INTEGER,
+        skill_slot TEXT,
+        skill_code TEXT,
+        skill_name TEXT,
+        skill_type TEXT,
+        skill_provider TEXT,
+        effect_type TEXT NOT NULL,
+        effect_category TEXT,
+        effect_action TEXT,
+        effect_target TEXT,
+        duration_turns INTEGER,
+        chance_pct REAL,
+        effect_value REAL,
+        resolution_status TEXT,
+        condition_text TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, timeline_index, effect_index)
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_run_history_runs_encounter
     ON run_history_runs (encounter_key, difficulty, success, elapsed_seconds)
     """,
@@ -926,6 +957,10 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_run_history_members_name
     ON run_history_members (champion_name)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_history_effect_timeline_effect
+    ON run_history_effect_timeline (run_id, effect_type, source_name)
     """,
     """
     CREATE TABLE IF NOT EXISTS app_state (
@@ -1386,6 +1421,7 @@ def database_status(path: Path = DB_PATH) -> Dict[str, Any]:
         "run_history_member_skill_usage",
         "run_history_assets",
         "run_history_events",
+        "run_history_effect_timeline",
         "app_state",
     )
     with sqlite3.connect(path) as conn:
@@ -1425,6 +1461,7 @@ def clear_all_tables(conn: sqlite3.Connection) -> None:
         "combat_runs",
         "combat_sessions",
         "run_history_events",
+        "run_history_effect_timeline",
         "run_history_assets",
         "run_history_member_metrics",
         "run_history_member_skill_usage",
@@ -1437,6 +1474,63 @@ def clear_all_tables(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM sqlite_sequence")
 
 
+def insert_run_effect_timeline(conn: sqlite3.Connection, run_id: int, effect_timeline: Dict[str, Any]) -> int:
+    timeline_rows = list_value(dict_value(effect_timeline).get("timeline"))
+    inserted = 0
+
+    for timeline_index, timeline_row in enumerate(timeline_rows, start=1):
+        timeline_map = dict_value(timeline_row)
+        source_slot = nullable_int(timeline_map.get("source_slot"))
+        source_member_order = nullable_int(timeline_map.get("source_member_order"))
+        if source_member_order is None and source_slot is not None:
+            source_member_order = source_slot + 1
+
+        for effect_index, raw_effect in enumerate(list_value(timeline_map.get("status_effects")), start=1):
+            effect_map = dict_value(raw_effect)
+            conn.execute(
+                """
+                INSERT INTO run_history_effect_timeline (
+                    run_id, timeline_index, effect_index, event_index, source_member_order,
+                    source_slot, source_name, source_type_id, target_party_id, target_slot,
+                    skill_order, skill_slot, skill_code, skill_name, skill_type, skill_provider,
+                    effect_type, effect_category, effect_action, effect_target, duration_turns,
+                    chance_pct, effect_value, resolution_status, condition_text, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    timeline_index,
+                    effect_index,
+                    nullable_int(timeline_map.get("event_index")),
+                    source_member_order,
+                    source_slot,
+                    optional_string(timeline_map.get("source_name")),
+                    nullable_int(timeline_map.get("source_type_id")),
+                    nullable_int(timeline_map.get("target_party_id")),
+                    nullable_int(timeline_map.get("target_slot")),
+                    nullable_int(timeline_map.get("skill_order")),
+                    optional_string(timeline_map.get("skill_slot")),
+                    optional_string(timeline_map.get("skill_code")),
+                    optional_string(timeline_map.get("skill_name")),
+                    optional_string(timeline_map.get("skill_type")),
+                    optional_string(timeline_map.get("skill_provider")),
+                    optional_string(effect_map.get("effect_type")) or "unknown_effect",
+                    optional_string(effect_map.get("category")),
+                    optional_string(effect_map.get("action")),
+                    optional_string(effect_map.get("target")),
+                    nullable_int(effect_map.get("duration")),
+                    nullable_float(effect_map.get("chance")),
+                    nullable_float(effect_map.get("effect_value")),
+                    optional_string(effect_map.get("resolution")),
+                    optional_string(effect_map.get("condition_text")),
+                    json_text({"timeline_event": timeline_map, "effect": effect_map}, {}),
+                ),
+            )
+            inserted += 1
+
+    return inserted
+
+
 def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> Dict[str, Any]:
     ensure_schema(db_path)
     payload = dict_value(run_payload)
@@ -1447,6 +1541,7 @@ def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> 
     members = list_value(payload.get("members"))
     assets = list_value(payload.get("assets"))
     events = list_value(payload.get("events"))
+    effect_timeline = dict_value(payload.get("effect_timeline"))
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.execute(
@@ -1631,6 +1726,8 @@ def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> 
                     json_text(event_map, {}),
                 ),
             )
+
+        insert_run_effect_timeline(conn, run_id=run_id, effect_timeline=effect_timeline)
         conn.commit()
 
     return run_history_summary(run_id=run_id, db_path=db_path)
@@ -1665,6 +1762,10 @@ def run_history_summary(run_id: int, db_path: Path = DB_PATH) -> Dict[str, Any]:
             "SELECT COUNT(*) FROM run_history_member_skill_usage WHERE run_id = ?",
             (run_id,),
         ).fetchone()
+        effect_timeline_count = conn.execute(
+            "SELECT COUNT(*) FROM run_history_effect_timeline WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
     return {
         "run_id": int(row[0]),
         "encounter_key": string_value(row[1]),
@@ -1677,6 +1778,7 @@ def run_history_summary(run_id: int, db_path: Path = DB_PATH) -> Dict[str, Any]:
         "events": int(event_count[0] if event_count else 0),
         "assets": int(asset_count[0] if asset_count else 0),
         "skill_usages": int(skill_usage_count[0] if skill_usage_count else 0),
+        "effect_timeline_rows": int(effect_timeline_count[0] if effect_timeline_count else 0),
     }
 
 
