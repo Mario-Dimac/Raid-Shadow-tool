@@ -5,11 +5,13 @@ import json
 import re
 import sqlite3
 from datetime import datetime
+from hashlib import sha1
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from account_stats import summarize_sets
 from battle_event_decoder import extract_skill_usage_counts
-from forge_db import DB_PATH, ensure_schema, insert_run_effect_timeline, record_run_history
+from forge_db import DB_PATH, ensure_schema, insert_run_effect_timeline, load_equipped_gear_by_owner, load_set_rules, record_run_history
 from run_damage_decoder import extract_damage_summary
 from run_effect_timeline import extract_effect_timeline
 from run_mapper import HH_HERO_TYPES_PATH, derive_run_mapping
@@ -186,6 +188,62 @@ def build_members(battle_context: Dict[str, Any]) -> List[Dict[str, Any]]:
     return members
 
 
+def build_fingerprint_for_items(items: List[Dict[str, Any]]) -> str:
+    item_ids = sorted(string_value(item.get("item_id")).strip() for item in items if string_value(item.get("item_id")).strip())
+    if not item_ids:
+        return ""
+    payload = "|".join(item_ids)
+    return sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def load_account_member_enrichment(db_path: Path = DB_PATH) -> Dict[str, Dict[str, Any]]:
+    ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        set_rules = load_set_rules(conn)
+        gear_by_owner = load_equipped_gear_by_owner(conn)
+        champion_rows = conn.execute(
+            """
+            SELECT champ_id, champion_name, level, rank, awakening_level, empowerment_level, booked
+            FROM account_champions
+            ORDER BY champion_name ASC, level DESC, rank DESC, booked DESC, champ_id ASC
+            """
+        ).fetchall()
+        stat_rows = conn.execute(
+            """
+            SELECT champ_id, stat_name, stat_value
+            FROM account_champion_total_stats
+            ORDER BY champ_id ASC, stat_name ASC
+            """
+        ).fetchall()
+
+    stats_by_champ_id: Dict[str, Dict[str, Any]] = {}
+    for row in stat_rows:
+        champ_id = string_value(row["champ_id"])
+        stats_by_champ_id.setdefault(champ_id, {})[string_value(row["stat_name"])] = row["stat_value"]
+
+    enrichment_by_name: Dict[str, Dict[str, Any]] = {}
+    for row in champion_rows:
+        champion_name = string_value(row["champion_name"]).strip()
+        champ_id = string_value(row["champ_id"]).strip()
+        if not champion_name or champion_name in enrichment_by_name:
+            continue
+        equipped_items = list_value(gear_by_owner.get(champ_id))
+        applied_sets, unsupported_sets = summarize_sets(equipped_items, set_rules)
+        enrichment_by_name[champion_name] = {
+            "champ_id": champ_id,
+            "level": int_value(row["level"]) or None,
+            "rank": int_value(row["rank"]) or None,
+            "awakening_level": int_value(row["awakening_level"]) or None,
+            "empowerment_level": int_value(row["empowerment_level"]) or None,
+            "booked": bool(row["booked"]),
+            "stats": dict(stats_by_champ_id.get(champ_id, {})),
+            "set_summary": applied_sets + [{"set_name": set_name, "set_kind": "unsupported"} for set_name in unsupported_sets],
+            "build_fingerprint": build_fingerprint_for_items(equipped_items),
+        }
+    return enrichment_by_name
+
+
 def build_member_skill_usage_by_slot(raw_path: str) -> Dict[int, List[Dict[str, Any]]]:
     path_text = string_value(raw_path).strip()
     if not path_text:
@@ -336,6 +394,7 @@ def build_run_payload(
     client_events: List[Dict[str, Any]],
     live_events: List[Dict[str, Any]],
     hero_types_path: Path,
+    db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
     battle_context = dict_value(client_event.get("battle"))
     battle_id = event_battle_id(client_event) or string_value(battle_context.get("battle_id"))
@@ -360,14 +419,37 @@ def build_run_payload(
         for row in list_value(damage_summary.get("members"))
     }
     members = build_members(battle_context)
+    member_enrichment_by_name = load_account_member_enrichment(db_path=db_path)
     for member in members:
+        champion_name = string_value(member.get("champion_name")).strip()
+        enrichment = dict_value(member_enrichment_by_name.get(champion_name))
+        if enrichment:
+            member["champ_id"] = string_value(enrichment.get("champ_id"))
+            if int_value(member.get("level")) <= 0 and int_value(enrichment.get("level")) > 0:
+                member["level"] = int_value(enrichment.get("level"))
+            if int_value(member.get("rank")) <= 0 and int_value(enrichment.get("rank")) > 0:
+                member["rank"] = int_value(enrichment.get("rank"))
+            if int_value(enrichment.get("awakening_level")) > 0:
+                member["awakening_level"] = int_value(enrichment.get("awakening_level"))
+            if int_value(enrichment.get("empowerment_level")) > 0:
+                member["empowerment_level"] = int_value(enrichment.get("empowerment_level"))
+            member["booked"] = bool(enrichment.get("booked"))
+            if dict_value(enrichment.get("stats")):
+                member["stats"] = dict_value(enrichment.get("stats"))
+                member["stat_source"] = "account_champion_total_stats"
+            if list_value(enrichment.get("set_summary")):
+                member["set_summary"] = list_value(enrichment.get("set_summary"))
+            if string_value(enrichment.get("build_fingerprint")):
+                member["build_fingerprint"] = string_value(enrichment.get("build_fingerprint"))
         slot_index = int_value(member.get("slot_index"))
         member_order = slot_index + 1
         damage_member = dict_value(damage_members_by_order.get(member_order))
         metrics: Dict[str, Any] = {}
         if damage_member:
             metrics["damage_taken"] = damage_member.get("damage_taken")
-            metrics["damage_taken_trusted"] = True
+            metrics["damage_taken_trusted"] = bool(damage_summary.get("damage_taken_trusted"))
+            if string_value(damage_member.get("damage_taken_status")):
+                metrics["damage_taken_status"] = string_value(damage_member.get("damage_taken_status"))
             if damage_member.get("damage_done") is not None:
                 metrics["damage_done"] = damage_member.get("damage_done")
             if string_value(damage_member.get("damage_done_status")):
@@ -449,6 +531,7 @@ def import_probe_session(
             client_events=client_events,
             live_events=live_events,
             hero_types_path=hero_types_path,
+            db_path=db_path,
         )
         summaries.append(record_run_history(payload, db_path=db_path))
 

@@ -367,3 +367,508 @@ def test_team_optimizer_marks_derived_stats_as_untrusted(tmp_path: Path) -> None
     assert candidate["stat_reliability"]["confidence"] < 1.0
     assert "imported_total_stats" in candidate["stat_reliability"]["missing_sources"]
     assert "relic_stats" in candidate["stat_reliability"]["missing_sources"]
+
+
+def test_team_optimizer_surfaces_skill_windows_for_rotation_reasoning(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-stag",
+                "name": "Stag Knight",
+                "rarity": "epic",
+                "affinity": "magic",
+                "faction": "Banner Lords",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 19000, "atk": 1200, "def": 1200, "spd": 102},
+                "total_stats": {"hp": 54000, "atk": 2400, "def": 3600, "spd": 219, "acc": 345, "res": 210},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A2",
+                        "skill_id": "stag_a2",
+                        "name": "Huntmaster",
+                        "cooldown": 4,
+                        "description": "Places Decrease ATK and Decrease DEF.",
+                        "effects": [
+                            {"type": "decrease_attack", "target": "enemy", "duration": 2, "chance": 100},
+                            {"type": "decrease_def", "target": "enemy", "duration": 2, "chance": 100},
+                        ],
+                    }
+                ],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    report = build_team_optimizer_report(boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=db_path)
+    candidate = next(item for item in report["candidates"] if item["champion_name"] == "Stag Knight")
+
+    assert candidate["skills"][0]["slot"] == "A2"
+    assert candidate["skill_windows"]["decrease_attack"]["cooldown"] == 4
+    assert candidate["skill_windows"]["decrease_attack"]["quality"] > 0.6
+    assert candidate["skill_windows"]["decrease_defense"]["duration"] == 2
+
+
+def test_team_optimizer_penalizes_maneater_without_real_tune_partner(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-me",
+                "name": "Maneater",
+                "rarity": "epic",
+                "affinity": "void",
+                "faction": "Ogryn Tribes",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["health"],
+                "base_stats": {"hp": 20000, "def": 1200, "spd": 98},
+                "total_stats": {"hp": 65000, "def": 3600, "spd": 248, "res": 240},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A3",
+                        "skill_id": "me-a3",
+                        "name": "Ancient Blood",
+                        "cooldown": 5,
+                        "description": "Places Unkillable and Block Debuffs on all allies.",
+                        "effects": [{"type": "unkillable", "target": "ally", "duration": 2}],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-brogni",
+                "name": "Underpriest Brogni",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 21000, "def": 1400, "spd": 96},
+                "total_stats": {"hp": 72000, "def": 4100, "spd": 196, "res": 260, "acc": 265},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A3",
+                        "skill_id": "brogni-a3",
+                        "name": "Resilient Growth",
+                        "cooldown": 3,
+                        "description": "Places Shield and Block Debuffs on all allies.",
+                        "effects": [
+                            {"type": "shield", "target": "ally", "duration": 2},
+                            {"type": "block_debuffs", "target": "ally", "duration": 2},
+                        ],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-ninja",
+                "name": "Ninja",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"atk": 1500, "spd": 98},
+                "total_stats": {"hp": 42000, "atk": 5400, "def": 2800, "spd": 177, "acc": 265, "crit_rate": 100, "crit_dmg": 220},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A2",
+                        "skill_id": "ninja_a2",
+                        "name": "Hailburn",
+                        "cooldown": 3,
+                        "description": "Attacks 3 times and places HP Burn.",
+                        "effects": [{"type": "hp_burn", "target": "enemy", "duration": 3, "chance": 100}],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-teodor",
+                "name": "Teodor the Savant",
+                "rarity": "legendary",
+                "affinity": "spirit",
+                "faction": "Knight Revenant",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 21000, "atk": 1000, "def": 1400, "spd": 100},
+                "total_stats": {"hp": 62000, "atk": 1900, "def": 3400, "spd": 214, "acc": 360, "res": 250},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A2",
+                        "skill_id": "teodor_a2",
+                        "name": "Thralls of Misery",
+                        "cooldown": 4,
+                        "description": "Places Poisons and heals this Champion.",
+                        "effects": [
+                            {"type": "poison", "target": "enemy", "duration": 2, "chance": 100},
+                            {"type": "heal", "target": "self", "value": 10},
+                        ],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-michi",
+                "name": "Michinaki",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"atk": 1400, "def": 1300, "spd": 97},
+                "total_stats": {"hp": 52000, "atk": 4700, "def": 3600, "spd": 192, "acc": 290, "crit_rate": 100, "crit_dmg": 210},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A2",
+                        "skill_id": "michi-a2",
+                        "name": "Flame-Touched",
+                        "cooldown": 4,
+                        "description": "Places HP Burn and Decrease DEF.",
+                        "effects": [
+                            {"type": "hp_burn", "target": "enemy", "duration": 2},
+                            {"type": "decrease_def", "target": "enemy", "duration": 2},
+                        ],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-stag",
+                "name": "Stag Knight",
+                "rarity": "epic",
+                "affinity": "magic",
+                "faction": "Banner Lords",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 19000, "atk": 1200, "def": 1200, "spd": 102},
+                "total_stats": {"hp": 54000, "atk": 2400, "def": 3600, "spd": 219, "acc": 345, "res": 210},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A2",
+                        "skill_id": "stag_a2",
+                        "name": "Huntmaster",
+                        "cooldown": 4,
+                        "description": "Places Decrease ATK and Decrease DEF.",
+                        "effects": [
+                            {"type": "decrease_attack", "target": "enemy", "duration": 2, "chance": 100},
+                            {"type": "decrease_def", "target": "enemy", "duration": 2, "chance": 100},
+                        ],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-doom",
+                "name": "Doompriest",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Knight Revenant",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 21000, "atk": 900, "def": 1300, "spd": 100},
+                "total_stats": {"hp": 68000, "atk": 1700, "def": 4300, "spd": 198, "res": 320},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "P1",
+                        "skill_id": "doom_p1",
+                        "name": "Bolster",
+                        "cooldown": 0,
+                        "description": "Removes a random debuff and heals all allies.",
+                        "effects": [
+                            {"type": "remove_debuff", "target": "ally"},
+                            {"type": "heal", "target": "ally", "value": 7.5},
+                        ],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-valk",
+                "name": "Valkyrie",
+                "rarity": "legendary",
+                "affinity": "spirit",
+                "faction": "Barbarians",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["defense", "support"],
+                "base_stats": {"hp": 21000, "atk": 1000, "def": 1500, "spd": 95},
+                "total_stats": {"hp": 70000, "atk": 1800, "def": 5200, "spd": 171, "acc": 230, "crit_rate": 100, "crit_dmg": 165, "res": 260},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A2",
+                        "skill_id": "valk_a2",
+                        "name": "Stand Firm",
+                        "cooldown": 3,
+                        "description": "Places Shield and Counterattack on all allies.",
+                        "effects": [
+                            {"type": "shield", "target": "ally", "value": 10},
+                            {"type": "counterattack", "target": "ally", "duration": 2},
+                        ],
+                    }
+                ],
+            },
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    report = build_team_optimizer_report(boss_key="demon_lord", level_key="ultra_nightmare", affinity="spirit", db_path=db_path)
+    selected_names = {member["champion_name"] for member in report["selected_team"]}
+
+    assert "Maneater" not in selected_names
+    assert "Stag Knight" in selected_names
+    assert "Valkyrie" in selected_names
+    assert "Underpriest Brogni" in selected_names
+    assert report["team_fit"]["has_maneater_tune"] is False
+
+
+def test_team_optimizer_detects_ready_maneater_ninja_tune(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-me",
+                "name": "Maneater",
+                "rarity": "epic",
+                "affinity": "void",
+                "faction": "Ogryn Tribes",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["health"],
+                "base_stats": {"hp": 20000, "def": 1200, "spd": 98},
+                "total_stats": {"hp": 65000, "def": 3600, "spd": 240, "res": 240},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A3",
+                        "skill_id": "me-a3",
+                        "name": "Ancient Blood",
+                        "cooldown": 7,
+                        "booked_cooldown": 5,
+                        "description": "Places Unkillable and Block Debuffs on all allies.",
+                        "effects": [{"type": "unkillable", "target": "ally", "duration": 2}],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-pk",
+                "name": "Pain Keeper",
+                "rarity": "rare",
+                "affinity": "void",
+                "faction": "Dark Elves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 18000, "def": 1200, "spd": 102},
+                "total_stats": {"hp": 48000, "def": 2600, "spd": 220, "res": 190},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A3",
+                        "skill_id": "pk-a3",
+                        "name": "Combat Tactics",
+                        "cooldown": 4,
+                        "booked_cooldown": 3,
+                        "description": "Reduces the cooldowns of all ally skills by 1 turn.",
+                        "effects": [{"type": "decrease_cooldown", "target": "ally"}],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-ninja",
+                "name": "Ninja",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"atk": 1500, "spd": 98},
+                "total_stats": {"hp": 42000, "atk": 5400, "def": 2800, "spd": 162, "acc": 265, "crit_rate": 100, "crit_dmg": 220},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A3",
+                        "skill_id": "ninja_a3",
+                        "name": "Cyan Slash",
+                        "cooldown": 4,
+                        "booked_cooldown": 3,
+                        "description": "Attacks 1 enemy and activates HP Burn debuffs.",
+                        "effects": [{"type": "hp_burn", "target": "enemy", "duration": 3, "chance": 100}],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-stag",
+                "name": "Stag Knight",
+                "rarity": "epic",
+                "affinity": "magic",
+                "faction": "Banner Lords",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 19000, "atk": 1200, "def": 1200, "spd": 102},
+                "total_stats": {"hp": 54000, "atk": 2400, "def": 3600, "spd": 176, "acc": 345, "res": 210},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A2",
+                        "skill_id": "stag_a2",
+                        "name": "Huntmaster",
+                        "cooldown": 4,
+                        "booked_cooldown": 4,
+                        "description": "Places Decrease ATK and Decrease DEF.",
+                        "effects": [
+                            {"type": "decrease_attack", "target": "enemy", "duration": 2, "chance": 100},
+                            {"type": "decrease_def", "target": "enemy", "duration": 2, "chance": 100},
+                        ],
+                    }
+                ],
+            },
+            {
+                "champ_id": "champ-coffin",
+                "name": "Coffin Smasher",
+                "rarity": "rare",
+                "affinity": "magic",
+                "faction": "Undead Hordes",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 18000, "atk": 1000, "def": 1200, "spd": 96},
+                "total_stats": {"hp": 50000, "atk": 2200, "def": 3200, "spd": 112, "acc": 280, "res": 180},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A1",
+                        "skill_id": "coffin-a1",
+                        "name": "Smash",
+                        "cooldown": 0,
+                        "description": "Has a chance to place Decrease ATK.",
+                        "effects": [{"type": "decrease_attack", "target": "enemy", "duration": 2, "chance": 100}],
+                    }
+                ],
+            },
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    report = build_team_optimizer_report(boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=db_path)
+    selected_names = {member["champion_name"] for member in report["selected_team"]}
+
+    assert "Maneater" in selected_names
+    assert "Pain Keeper" in selected_names
+    assert report["team_fit"]["has_maneater_tune"] is True
+    assert report["team_fit"]["maneater_tune_label"] == "Budget Unkillable Ninja"
+    assert any("ME 240-241" in item for item in report["team_fit"]["build_requirements"])
+
+
+def test_team_optimizer_warns_when_team_lacks_sustain_defense_and_key_debuffs(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": f"champ-dps-{index}",
+                "name": f"DPS {index}",
+                "rarity": "epic",
+                "affinity": "magic",
+                "faction": "Banner Lords",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"atk": 1300, "spd": 100},
+                "total_stats": {"hp": 36000, "atk": 5100, "def": 2400, "spd": 180, "acc": 90, "crit_rate": 100, "crit_dmg": 220},
+                "equipped_item_ids": [],
+                "skills": [
+                    {
+                        "slot": "A1",
+                        "skill_id": f"dps-{index}-a1",
+                        "name": "Hit",
+                        "cooldown": 0,
+                        "description": "Attacks 1 enemy.",
+                        "effects": [{"type": "damage", "target": "enemy", "value": 1.0}],
+                    }
+                ],
+            }
+            for index in range(1, 6)
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    report = build_team_optimizer_report(boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=db_path)
+    warnings_text = " | ".join(report["warnings"])
+
+    assert "cure o sustain affidabile" in warnings_text
+    assert "strati difensivi" in warnings_text
+    assert "Decrease ATK" in warnings_text
+    assert "Decrease DEF o Weaken" in warnings_text

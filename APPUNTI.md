@@ -1,8 +1,8 @@
 # Appunti CB Forge
 
-Documento unico di riferimento che consolida tutti gli appunti storici del progetto fino al 2026-03-25.
+Documento unico di riferimento che consolida tutti gli appunti storici del progetto fino al 2026-03-28.
 
-## Stato corrente verificato il 2026-03-25
+## Stato corrente verificato il 2026-03-28
 
 - Il database runtime canonico e' `data/cbforge.sqlite3`.
 - Il file `forge.db` in root era obsoleto e vuoto; puo' essere rimosso.
@@ -15,6 +15,22 @@ Documento unico di riferimento che consolida tutti gli appunti storici del proge
 - Per `Demon Lord`, il `total_damage` della run e' ora recuperabile dal raw `battleResults` come candidato forte da `s.a.dt >> 32`.
 - Il `damage_by_champion` per `Demon Lord` e' ancora solo `candidate`, non `trusted`.
 - Il `healing_done` non e' ancora mappato in modo affidabile: il verde finale sembra mescolare cure da skill e sustain da set come `Lifesteal`.
+- Per `Demon Lord`, il blu `damage_taken` non deve essere trattato come `trusted`: oggi resta `candidate_member_dt_high32_clan_boss`.
+- Esiste una prima pagina web `Clan Boss Simulator` raggiungibile da `/clan-boss`.
+- Esiste una guida di setup portabile in `README_SETUP_ALTRO_PC.md`.
+- Esiste una prima baseline AI tabellare in `ml_team_baseline.py`.
+- Esiste una pagina web dedicata al training AI in `/ai-lab`.
+- Il simulatore Clan Boss attuale e' utile per:
+  - speed tune leggibile
+  - rotazione skill semplificata
+  - copertura `Decrease ATK`, `Increase DEF`, `Ally Protect`, `Block Debuffs`, `Counterattack`, `Unkillable`
+  - lettura turno per turno del ciclo `AoE 1 / AoE 2 / Stun`
+- Il simulatore Clan Boss non e' ancora un simulatore di danno reale:
+  - non modella ancora AI avanzata
+  - non modella ancora targeting affinity reale
+  - non modella ancora set/mastery in combattimento
+  - non modella ancora il danno finale atteso
+- E' stato avviato un manuale tecnico per sviluppatori in `MANUALE_PROGRAMMATORI.md`.
 - La roadmap di decoupling da HellHades e' mantenuta in questo file; `HELLHADES_DECOUPLING_PLAN.md` resta solo come rimando per evitare divergenze.
 
 ## Decisioni ormai fissate
@@ -34,8 +50,119 @@ Documento unico di riferimento che consolida tutti gli appunti storici del proge
   - metriche run
   - asset raw
   - timeline eventi
+- Regola operativa permanente:
+  - ogni feature nuova o cambiamento strutturale deve aggiornare anche:
+    - `README.md`
+    - eventuali `requirements*.txt`
+    - `MANUALE_PROGRAMMATORI.md`
+    - eventuale guida di setup come `README_SETUP_ALTRO_PC.md`
+  - il codice non va considerato "finito" finche' documentazione e dipendenze non sono riallineate
 
 ## Cronologia sintetica
+
+### 2026-03-28 - Clan Boss simulator e documentazione tecnica
+
+#### Risultati chiusi
+
+- Corretto il posizionamento del `damage_taken` Clan Boss:
+  - non e' piu `trusted`
+  - viene salvato come candidato `candidate_member_dt_high32_clan_boss`
+- Aggiunto un motore locale di simulazione in `clan_boss_simulator.py`.
+- Aggiunta una nuova pagina web in `web/clan-boss.html` con logica frontend in `web/clanboss.js`.
+- Aggiunti endpoint dedicati in `cbforge_web.py`:
+  - `GET /clan-boss`
+  - `GET /api/clan-boss-simulator-bootstrap`
+  - `POST /api/clan-boss-simulate`
+- Collegato il bootstrap del simulatore al roster reale e al team proposto dal `team_optimizer`.
+- Aggiunti template rapidi per ruoli Clan Boss:
+  - `counterattack_anchor`
+  - `block_debuffs_support`
+  - `ally_protect_support`
+  - `decrease_attack_a1`
+  - `poisoner`
+  - `burner`
+  - `unkillable_support`
+  - `cleanser_speed`
+- Aggiunto il documento iniziale `MANUALE_PROGRAMMATORI.md`.
+- Aggiunta la guida `README_SETUP_ALTRO_PC.md` per clonazione e setup su un altro PC.
+- Aggiunto il baseline AI iniziale `ml_team_baseline.py`.
+- Aggiunta la pagina web `AI Lab` per allenare il baseline senza console.
+- Aggiunti i requirements separati:
+  - `requirements.txt`
+  - `requirements-dev.txt`
+  - `requirements-ai.txt`
+
+#### Stato emerso
+
+- Il simulatore e' gia' utile per capire se una tune regge o si rompe in una finestra breve.
+- Il simulatore ragiona su:
+  - ordine turni
+  - cooldown semplificati
+  - priorita skill
+  - speed aura
+  - buff/debuff modellati a mano
+- Il simulatore non legge ancora in automatico gli effetti reali delle skill dal DB:
+  - il DB ha `champion_skills`
+  - ma non ha ancora una copertura affidabile di `champion_skill_effects` sufficiente per auto-popolare il Clan Boss
+- Il primo layer AI scelto non e' una rete neurale end-to-end:
+  - e' una baseline tabellare supervisionata
+  - usa le run storiche in `run_history_*`
+  - featurizza team, stats aggregate, contesto encounter e presenza campioni
+  - salva un modello `.joblib` sotto `models/`
+- E' stata aggiunta anche la pagina web `AI Lab` per:
+  - vedere gli encounter allenabili
+  - vedere se esiste gia' un modello
+  - lanciare il training dal browser
+- Problemi emersi nel rollout `AI Lab`:
+  - il server puo' essere avviato con un Python diverso da quello dove sono installate le dipendenze AI
+  - se nel Python del server manca `scikit-learn`, la pagina deve comunque mostrare gli encounter e disabilitare solo il training
+  - il pannello AI deve mostrare anche `python_executable`, versione Python e dettaglio errore import, cosi' il mismatch ambiente si capisce dal browser senza usare la console
+  - aggiunto launcher Windows `start_cbforge_web.ps1` con wrapper `start_cbforge_web.bat`:
+    - forza un interprete coerente per il server
+    - preferisce `Python 3.11` quando disponibile
+    - controlla e installa `requirements.txt` e `requirements-ai.txt` sullo stesso interprete
+    - supporta override con variabile ambiente `CBFORGE_PYTHON`
+  - non tutti gli encounter con run storiche sono allenabili: servono almeno `3` run con `total_damage`
+  - la UI inizialmente poteva selezionare encounter non allenabili e mostrare l'errore `Nessuna run utile trovata nel DB per il training baseline`
+  - e' emerso anche un crash su `cbforge_web.py` in `champion_sort_key`: alcuni record parziali del roster speed non hanno sempre `booked` o `enriched`, quindi il sort deve usare fallback sicuri invece di accessi diretti
+  - nel DB attuale gli encounter davvero train-ready visti il `2026-03-28` sono:
+    - `4019024`
+    - `demon_lord_ultra_nightmare`
+- Restano problemi aperti da rivedere con calma:
+  - deduplicazione / consolidamento tra encounter Clan Boss semanticamente uguali ma con chiavi diverse (`4019024` vs `demon_lord_ultra_nightmare`)
+  - possibile confusione utente tra encounter tecnici e encounter canonici lato AI Lab
+  - da verificare il comportamento finale live del training end-to-end dal browser nel tuo ambiente reale dopo tutti i refresh
+  - da migliorare il messaging della pagina quando il modello non si puo' ancora allenare
+- La UI e' stata progettata per essere leggibile da persona:
+  - configurazione per slot
+  - guida iniziale in pagina
+  - timeline boss e timeline azioni
+  - warnings riassuntivi sulle rotture della tune
+- Problemi emersi dal primo uso reale del simulatore Clan Boss:
+  - il team consigliato puo' essere formalmente simulabile ma concettualmente sbagliato come tune reale
+  - esempio osservato: `Maneater / Underpriest Brogni / Valkyrie / Ninja / Stag Knight`
+  - il simulatore oggi non sta modellando correttamente effetti chiave del team consigliato:
+    - `Decrease ATK` risulta sempre assente anche con `Stag Knight`
+    - `Increase DEF` risulta `0%`
+    - lo stun va sempre su `Stag Knight` e gli fa perdere turni a catena
+  - timeline troppo generica:
+    - molte skill restano `Nessun effetto modellato`
+    - i preset automatici non bastano ancora per simulare bene team reali
+  - il simulatore in questa fase e' utile come debugger di tune/preset, non ancora come verita' affidabile di copertura effetti
+  - priorita' prossime:
+    - migliorare mapping skill -> effetti reali per campioni noti del roster
+    - correggere preset inference per campioni CB chiave
+    - rivedere stun targeting
+    - distinguere meglio `team consigliato ma incoerente` da `team meccanicamente plausibile`
+
+#### Verifica tecnica
+
+- `python -m py_compile cbforge_web.py clan_boss_simulator.py test_clan_boss_simulator.py`
+- `pytest test_clan_boss_simulator.py -q` -> `5 passed`
+- `pytest test_run_damage_decoder.py test_run_history_importer.py -q` -> `15 passed`
+- `python -m py_compile ml_team_baseline.py test_ml_team_baseline.py`
+- `pytest test_ml_team_baseline.py -q` -> `1 passed`
+- `pytest test_cbforge_web.py test_ml_team_baseline.py -q` -> `33 passed`
 
 ### 2026-03-18 - Fondazioni del progetto
 
@@ -1033,6 +1160,25 @@ Non e' ancora sufficiente per una AI tattica micro completa.
 - I campi raw sembrano distribuire il sustain su bucket multipli, non su una singola chiave pulita analoga a `dt`.
 - Quindi oggi non va importato nessun `healing_done` candidato come se fosse affidabile.
 
+## 2026-03-28 - Clan Boss: blu `damage_taken` da declassare a candidate
+
+### Verifica incrociata con dataset manuale
+
+- Fuori da Clan Boss, `member.dt >> 32` continua a combaciare quasi perfettamente con la linea blu della schermata risultato:
+  - `a5302770-d013-4572-8ba7-d31a8548c6ee`: scarto totale `2`
+  - `368e1bb0-a147-4b58-9c85-668f395e3cb7`: scarto totale `0`
+  - `ef6926bd-5d4d-46e9-8390-2295784e0a3d`: scarto totale `0`
+- In Clan Boss invece no:
+  - `fbbbae7e-58d1-461e-8660-7c86297796c8`: `dt` sopra la schermata di `26,815`
+  - run `2026-03-28` team `Underpriest Brogni / Valkyrie / Ninja / Jintoro / Minaya`: `dt` sopra la schermata di `41,147`
+- Quindi per `Demon Lord` il blu da `member.dt >> 32` resta il miglior candidato disponibile, ma non va piu' marcato come `trusted`.
+
+### Decisione operativa
+
+- Lasciare il numero importato per diagnostica e confronto.
+- Marcare `damage_taken` Clan Boss come `candidate_member_dt_high32_clan_boss`.
+- Tenere `damage_taken_trusted = false` per le run Clan Boss finche' non troviamo il mapping esatto della UI.
+
 ### Prossimo focus operativo
 
 - Analizzare buff/debuff nel raw con timeline strutturata per turno.
@@ -1095,6 +1241,20 @@ Non e' ancora sufficiente per una AI tattica micro completa.
 
 ### Next
 
+- Fix prioritario optimizer Clan Boss emerso il 2026-03-27:
+  - oggi l'optimizer premia troppo score individuale/ruoli teorici e troppo poco la coerenza reale del team
+  - esempio concreto: proposta `Brogni / Maneater / Ninja / Teodor / Michinaki` risultata scarsa in run reale
+  - caso critico: `Maneater` viene proposto anche senza un asse `unkillable` davvero chiuso e senza sustain coerente
+  - domani rivedere scoring e penalita':
+    - penalizzare forte `Maneater` se manca una tune compatibile o un partner tipo `Pain Keeper`
+    - penalizzare team senza sustain reale o recupero HP coerente
+    - penalizzare mix di "buoni campioni" senza piano CB chiaro
+    - aumentare il peso della coerenza di team rispetto allo score del singolo campione
+- Tracciare il caso `Ninja` rimasto spogliato dopo i test equip del 2026-03-27:
+  - ipotesi piu' probabile: `Ninja` equipaggiato in un passaggio e poi usato come donor da un campione successivo
+  - verificare la sequenza reale dei pezzi spostati e chi ha riutilizzato item di `Ninja`
+  - rendere espliciti in UI i donor toccati prima di confermare l'equip
+  - migliorare snapshot/ripristino per recuperare subito i donor rimasti nudi
 - Trovare il mapping trusted tra payload raw `battleResults` e danni UI per campione
 - Tenere il `damage_done` Demon Lord attuale come `candidate`, non come verita' canonica
 - Formalizzare un piccolo dataset di run note con:
@@ -1140,3 +1300,68 @@ La direzione corretta ormai e':
 - consolidare il catalogo encounter
 - migliorare la qualita' del dato run
 - usare lo storico account-specifico per planner e AI di ottimizzazione
+
+### 2026-04-04 - Boss Intel e optimizer boss-aware
+
+#### Completato
+
+- Inserita una knowledge base modulare per boss in `boss_modules/` con loader centrale.
+- Primo pacchetto boss supportato:
+  - `Demon Lord`
+  - `Hydra`
+  - `Iron Twins Fortress`
+- L'optimizer ora non usa piu' solo una scheda informativa:
+  - `team_optimizer.py` applica scoring, coverage e warning boss-specifici
+  - il build planner/loadout usa anche l'`area_region` coerente col boss scelto
+- In UI `/optimizer` aggiunta la card `Boss Intel` con:
+  - target rapidi
+  - meccaniche chiave
+  - ruoli da premiare
+  - timing / tune
+  - gap noti del modulo
+  - fonti
+  - backlog boss ancora da implementare
+
+#### Hydra
+
+- Sostituito il finto selettore affinity `N/A` con `Rotazione 1-5`.
+- Ogni rotazione espone:
+  - starter heads
+  - substitute heads
+  - affinity per testa
+  - focus pratici per optimizer
+- La rotazione Hydra entra anche nello scoring:
+  - `Decay` in opening -> aumenta il peso di `Provoke`
+  - `Mischief` in opening -> aumenta il peso di `Mischief tank` / `Block Buffs`
+  - `Torment` in opening -> aumenta il peso di `Perfect Veil` / risposta dedicata
+  - `Wrath` in opening -> aumenta il peso di mitigazione danni / `Decrease ATK`
+
+#### Nota importante Hydra
+
+- Per `Rotazione 4` l'affinita' della testa `Suffering` e' stata chiusa come `Magic`, ma va considerata:
+  - `inferenza community`
+  - non conferma ufficiale Plarium
+- Motivo:
+  - il breakdown HellHades della `Rotation 4` ha un typo evidente sul quinto/sesto head
+  - il dato e' stato ricostruito dal contesto del breakdown stesso
+
+#### Stato pratico al prossimo riavvio
+
+- `Demon Lord`: modulo piu' rifinito
+- `Hydra`: molto piu' usabile, ma senza simulazione reale delle head rotation e del devour timing
+- `Iron Twins`: scoring e warning attivi, ma senza simulatore dedicato del pattern boss
+
+#### Backlog dichiarato in UI
+
+- `Spider`
+- `Sand Devil`
+- `Fire Knight`
+- `Dragon`
+- `Ice Golem`
+- `Phantom Shogun`
+
+#### Prossimo passo consigliato
+
+- Quando riprendiamo:
+  - scegliere se estendere `Spider` come prossimo boss
+  - oppure rifinire ancora `Hydra` con warning ancora piu' stretti per testa/rotazione e gestione devour

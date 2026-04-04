@@ -75,11 +75,15 @@ def decode_metric_high32(raw_metric: Any) -> int:
     return int(round(value / FIXED_POINT_32_SCALE))
 
 
+def is_clan_boss_stage(stage_id: str) -> bool:
+    return stage_id.startswith(CLAN_BOSS_STAGE_PREFIX)
+
+
 def extract_total_damage_candidate(root: Dict[str, Any]) -> Dict[str, Any]:
     stage_id = string_value(dict_value(root.get("p")).get("i")).strip()
     boss_row = dict_value(dict_value(root.get("s")).get("a"))
     raw_total_damage = int_value(boss_row.get("dt"))
-    if stage_id.startswith(CLAN_BOSS_STAGE_PREFIX) and raw_total_damage > 0:
+    if is_clan_boss_stage(stage_id) and raw_total_damage > 0:
         return {
             "total_damage": decode_metric_high32(raw_total_damage),
             "total_damage_status": "candidate_demon_lord_s_a_dt_high32",
@@ -97,7 +101,7 @@ def extract_demon_lord_member_damage_candidates(
     total_damage: int | None,
     stage_id: str,
 ) -> Dict[str, Any]:
-    if total_damage is None or total_damage <= 0 or not stage_id.startswith(CLAN_BOSS_STAGE_PREFIX):
+    if total_damage is None or total_damage <= 0 or not is_clan_boss_stage(stage_id):
         return {"members": [], "status": "not_available"}
 
     weights: List[Tuple[int, int]] = []
@@ -173,6 +177,10 @@ def extract_damage_summary(path: Path) -> Dict[str, Any]:
     total_damage_taken = sum(int_value(row.get("damage_taken")) for row in member_rows)
     total_damage_candidate = extract_total_damage_candidate(root)
     stage_id = string_value(dict_value(root.get("p")).get("i")).strip()
+    damage_taken_trusted = not is_clan_boss_stage(stage_id)
+    damage_taken_status = "trusted_member_dt_high32"
+    if not damage_taken_trusted:
+        damage_taken_status = "candidate_member_dt_high32_clan_boss"
     member_damage_candidate = extract_demon_lord_member_damage_candidates(
         member_rows,
         total_damage=int_value(total_damage_candidate.get("total_damage")),
@@ -188,6 +196,7 @@ def extract_damage_summary(path: Path) -> Dict[str, Any]:
             "champion_type_id": row["champion_type_id"],
             "damage_done": dict_value(member_damage_by_order.get(int_value(row.get("member_order")))).get("damage_done"),
             "damage_taken": row["damage_taken"],
+            "damage_taken_status": damage_taken_status,
             "raw_damage_done": dict_value(member_damage_by_order.get(int_value(row.get("member_order")))).get("damage_done_weight"),
             "raw_damage_taken": row["raw_damage_taken"],
             "damage_done_status": string_value(dict_value(member_damage_by_order.get(int_value(row.get("member_order")))).get("damage_done_status")),
@@ -201,11 +210,16 @@ def extract_damage_summary(path: Path) -> Dict[str, Any]:
         "members": members,
         "source_path": str(path),
         "damage_trusted": False,
-        "damage_taken_trusted": True,
+        "damage_taken_trusted": damage_taken_trusted,
+        "damage_taken_status": damage_taken_status,
         "total_damage_status": string_value(total_damage_candidate.get("total_damage_status")),
         "total_damage_source": string_value(total_damage_candidate.get("total_damage_source")),
         "member_damage_status": string_value(member_damage_candidate.get("status")),
-        "decode_note": "The raw field `dt` matches the blue result metric, not the red damage-dealt line. Demon Lord total damage is available as a candidate from `s.a.dt`.",
+        "decode_note": (
+            "The raw field `dt` is the best current candidate for the blue result metric. "
+            "Outside Clan Boss it matches the screen closely; for Clan Boss it remains a candidate and not a trusted exact match. "
+            "Demon Lord total damage is available as a candidate from `s.a.dt`."
+        ),
     }
 
 

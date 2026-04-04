@@ -35,6 +35,32 @@ L'obiettivo del progetto non e' usare i JSON come database applicativo, ma avere
 2. costruire o aggiornare il database SQLite
 3. opzionalmente arricchire i campioni target tramite HellHades
 4. aprire la web UI locale per consultare roster, gear e proposte di build
+5. quando hai abbastanza run storiche, allenare il baseline AI tabellare
+
+## Installazione rapida
+
+Dipendenze base:
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Per i test:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Per il primo layer AI:
+
+```bash
+pip install -r requirements-ai.txt
+```
+
+Guida completa per un altro PC o un altro account:
+
+- `README_SETUP_ALTRO_PC.md`
 
 ## Comandi utili
 
@@ -80,6 +106,22 @@ Avvio web UI locale:
 python cbforge_web.py
 ```
 
+Avvio consigliato su Windows, per evitare mismatch tra Python 3.11 / 3.12:
+
+```powershell
+.\start_cbforge_web.ps1
+```
+
+Oppure con doppio click:
+
+- `start_cbforge_web.bat`
+
+Training baseline AI:
+
+```bash
+python ml_team_baseline.py --encounter demon_lord_ultra_nightmare --output models/demon_lord_ultra_nightmare_team_baseline_v1.joblib
+```
+
 Test:
 
 ```bash
@@ -91,6 +133,7 @@ Pagine principali:
 - roster: `http://127.0.0.1:8765/`
 - gear: `http://127.0.0.1:8765/gear`
 - build planner: `http://127.0.0.1:8765/build`
+- AI Lab: `http://127.0.0.1:8765/ai-lab`
 
 ## Struttura del progetto
 
@@ -105,6 +148,9 @@ Pagine principali:
 - `gear_advisor.py`: logica decisionale sui pezzi gear
 - `build_planner.py`: generazione proposte build per campioni
 - `cbforge_web.py`: server HTTP locale e API
+- `clan_boss_simulator.py`: simulatore Clan Boss turno per turno
+- `ml_team_baseline.py`: baseline AI tabellare da run storiche
+- `web/ai-lab.html` + `web/ailab.js`: UI web per allenare il baseline AI
 - `web/`: frontend statico per roster, gear e build planner
 - `data_sources/`: sorgenti locali versionabili, incluso il registry skill
 - `test_*.py`: suite test
@@ -138,6 +184,8 @@ Priorita' attuali:
 Roadmap dedicata:
 
 - vedi `HELLHADES_DECOUPLING_PLAN.md`
+- manuale tecnico iniziale: `MANUALE_PROGRAMMATORI.md`
+- setup su altro PC: `README_SETUP_ALTRO_PC.md`
 
 Roadmap successiva:
 
@@ -145,6 +193,7 @@ Roadmap successiva:
 - selettore candidati Clan Boss
 - builder loadout piu' avanzato
 - simulatore turn order
+- baseline AI su run storiche
 - analisi sinergie team e recommendation engine
 
 ## Note

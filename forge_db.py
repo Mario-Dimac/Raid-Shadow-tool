@@ -968,6 +968,22 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         state_value TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS gear_snapshots (
+        snapshot_key TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT '',
+        snapshot_kind TEXT NOT NULL DEFAULT 'manual',
+        saved_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        context_json TEXT NOT NULL DEFAULT '{}',
+        snapshot_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_gear_snapshots_scope
+    ON gear_snapshots (scope, updated_at)
+    """,
 )
 
 

@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Common">
+      <HintPath>$(APPDATA)\HellHades Artifact Extractor\Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="HellHades.ArtifactExtractor">
+      <HintPath>$(APPDATA)\HellHades Artifact Extractor\HellHades.ArtifactExtractor.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="HellHades.ArtifactExtractor.Models">
+      <HintPath>$(APPDATA)\HellHades Artifact Extractor\HellHades.ArtifactExtractor.Models.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="HellHades.ArtifactExtractor.Models.Reader">
+      <HintPath>$(APPDATA)\HellHades Artifact Extractor\HellHades.ArtifactExtractor.Models.Reader.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Logging.Abstractions">
+      <HintPath>$(APPDATA)\HellHades Artifact Extractor\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

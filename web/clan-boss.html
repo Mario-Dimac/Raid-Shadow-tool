@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CB Forge Clan Boss Simulator</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="hero">
+        <div class="eyebrow">CB Forge</div>
+        <h1>Clan Boss Simulator</h1>
+        <p class="subtext">Simulatore leggibile turno per turno: ordine azioni, finestre buff/debuff e punti in cui la tune si rompe.</p>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Campioni</a>
+          <a class="nav-link" href="/gear">Equip</a>
+          <a class="nav-link" href="/build">Build</a>
+          <a class="nav-link" href="/optimizer">Optimizer</a>
+          <a class="nav-link active" href="/clan-boss">Clan Boss</a>
+          <a class="nav-link" href="/ai-lab">AI Lab</a>
+          <a class="nav-link" href="/runs">Runs</a>
+          <a class="nav-link" href="/sets">Sets</a>
+        </div>
+      </div>
+      <div class="toolbar">
+        <select id="cbDifficulty"></select>
+        <select id="cbAffinity"></select>
+        <input id="cbBossTurns" type="number" min="3" max="50" step="1" value="12" placeholder="Turni boss">
+        <input id="cbAuraSpeed" type="number" min="0" max="60" step="0.5" value="0" placeholder="Speed aura %">
+        <select id="cbStunTarget"></select>
+      </div>
+      <div id="cbStatus" class="status"></div>
+      <div id="cbRoster" class="roster"></div>
+    </aside>
+
+    <main class="panel main">
+      <section id="cbSummary" class="summary"></section>
+      <section class="main-toolbar">
+        <button id="cbUseOptimizerBtn" class="secondary">Carica Consiglio</button>
+        <button id="cbUseAiBtn" class="secondary">Carica AI</button>
+        <button id="cbCompareBtn" class="ghost">Confronta</button>
+        <button id="cbResetBtn" class="ghost">Reset</button>
+        <button id="cbSimulateBtn" class="primary">Simula Battaglia</button>
+      </section>
+      <section id="cbDetails" class="details">
+        <div class="empty">Caricamento simulator in corso.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/clanboss.js?v=20260328a"></script>
+</body>
+</html>

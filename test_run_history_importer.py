@@ -312,10 +312,19 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
         "extract_damage_summary",
         lambda path: {
             "total_damage": 41_949_610,
+            "damage_taken_trusted": False,
             "total_damage_status": "candidate_demon_lord_s_a_dt_high32",
             "member_damage_status": "candidate_demon_lord_manual_fit_normalized_total",
             "members": [
-                {"member_order": 1, "damage_done": 1_408_214, "damage_done_status": "candidate_demon_lord_manual_fit_normalized_total", "damage_taken": 119_943, "raw_damage_done": 1_441_193, "raw_damage_taken": 119_943},
+                {
+                    "member_order": 1,
+                    "damage_done": 1_408_214,
+                    "damage_done_status": "candidate_demon_lord_manual_fit_normalized_total",
+                    "damage_taken": 119_943,
+                    "damage_taken_status": "candidate_member_dt_high32_clan_boss",
+                    "raw_damage_done": 1_441_193,
+                    "raw_damage_taken": 119_943,
+                },
             ],
         },
     )
@@ -416,6 +425,8 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
     assert metric_row[0] == 1_408_214
     assert metric_row[1] == 119_943
     assert json.loads(metric_row[2])["damage_done_status"] == "candidate_demon_lord_manual_fit_normalized_total"
+    assert json.loads(metric_row[2])["damage_taken_trusted"] is False
+    assert json.loads(metric_row[2])["damage_taken_status"] == "candidate_member_dt_high32_clan_boss"
     assert effect_rows == [
         ("Rakka Viletide", "A2", "increase_atk", "place"),
         ("Rakka Viletide", "A2", "shield", "place"),

@@ -7,6 +7,7 @@ __pycache__/
 data/
 input/
 forge.db
+models/
 
 # Legacy archive kept only in local workspace
 old/
@@ -19,3 +20,9 @@ venv/
 # OS / editors
 Thumbs.db
 .DS_Store
+
+# Local tooling / build outputs
+.tmp_*/
+.tmp_*.log
+tools/**/bin/
+tools/**/obj/

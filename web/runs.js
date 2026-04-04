@@ -264,6 +264,7 @@ function renderRunList(runs) {
       <div class="subtext">${escapeHtml([run.boss_name || run.encounter_name || "", run.boss_affinity || ""].filter(Boolean).join(" | ") || "Boss n/d")}</div>
       <div class="subtext">${escapeHtml((run.team_members || []).join(", ") || "Team n/d")}</div>
       <div class="pillbar" style="margin-top: 8px;">
+        <span class="pill">${escapeHtml(run.category_label || "Altro")}</span>
         <span class="pill gold">${escapeHtml(damageLabel(run))}</span>
         <span class="pill">${escapeHtml(run.started_at || run.first_seen_at || "-")}</span>
         <span class="pill">${escapeHtml(run.finished_at || "-")}</span>
@@ -287,6 +288,7 @@ function renderDbRunList(runs) {
       </div>
       <div class="subtext">${escapeHtml(run.stage_label || run.stage_id || run.encounter_name || "Run DB")}</div>
       <div class="pillbar">
+        <span class="pill">${escapeHtml(run.category_label || "Altro")}</span>
         <span class="pill ${run.success ? "ok" : "warn"}">${run.success ? "Success" : "Fail"}</span>
         <span class="pill gold">${escapeHtml(damageLabel(run))}</span>
         <span class="pill">${escapeHtml(String(run.members || 0))} membri</span>
@@ -295,6 +297,35 @@ function renderDbRunList(runs) {
       </div>
     </button>
   `).join("");
+}
+
+function summarizeRunsByCategory(runs) {
+  const grouped = new Map();
+  for (const run of runs || []) {
+    const key = String(run?.category_key || "other");
+    const label = String(run?.category_label || "Altro");
+    const current = grouped.get(key) || { key, label, count: 0 };
+    current.count += 1;
+    grouped.set(key, current);
+  }
+  return [...grouped.values()].sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label, "it-IT"));
+}
+
+function renderCategorySummary(runs, title, emptyLabel) {
+  const rows = summarizeRunsByCategory(runs);
+  return `
+    <div class="card">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="list-block">
+        ${rows.length ? rows.map((row) => `
+          <div class="list-row">
+            <strong>${escapeHtml(row.label)}</strong>
+            <div class="subtext">${escapeHtml(String(row.count))} run</div>
+          </div>
+        `).join("") : `<div class="empty">${escapeHtml(emptyLabel)}</div>`}
+      </div>
+    </div>
+  `;
 }
 
 function renderRunMemberList(members) {
@@ -495,6 +526,8 @@ function renderDetails() {
           ${kvRow("Best result size", latestRun.best_battle_results_size || "-")}
         </div>
       </div>
+      ${renderCategorySummary(runs, "Categorie Web", "Nessuna run web disponibile per questa sessione.")}
+      ${renderCategorySummary(dbRuns, "Categorie DB", "Nessuna run DB disponibile per questa sessione.")}
     </section>
 
     <section class="card">
@@ -532,6 +565,7 @@ function renderDetails() {
         <div class="kv single-column" style="margin-bottom: 12px;">
           ${kvRow("Run ID", runDetail.run?.run_id || "-")}
           ${kvRow("Battle ID", runDetail.run?.battle_id || "-")}
+          ${kvRow("Categoria", runDetail.run?.category_label || "-")}
           ${kvRow("Stage", runDetail.run?.stage_label || runDetail.run?.stage_id || "-")}
           ${kvRow("Encounter", runDetail.run?.encounter_name || runDetail.run?.encounter_key || "-")}
           ${kvRow("Saved at", runDetail.run?.saved_at || "-")}

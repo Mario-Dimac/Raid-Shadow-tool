@@ -191,6 +191,38 @@ def test_extract_damage_summary_reads_demon_lord_total_damage_candidate(
     assert summary["total_damage_status"] == "candidate_demon_lord_s_a_dt_high32"
     assert summary["member_damage_status"] == "candidate_demon_lord_manual_fit_normalized_total"
     assert summary["damage_trusted"] is False
+    assert summary["damage_taken_trusted"] is False
     assert summary["members"][2]["damage_taken"] == 117_565
+    assert summary["members"][2]["damage_taken_status"] == "candidate_member_dt_high32_clan_boss"
     assert summary["members"][2]["damage_done"] > 19_000_000
     assert sum(int(member["damage_done"] or 0) for member in summary["members"]) == 45_621_541
+
+
+def test_extract_damage_summary_keeps_non_clan_boss_damage_taken_trusted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        run_damage_decoder,
+        "decode_battle_results_root",
+        lambda path: {
+            "p": {
+                "i": "2062010",
+                "z": "battle-2",
+                "f": {"h": [{}]},
+            },
+            "s": {
+                "f": {
+                    "h": [
+                        {"i": 0, "t": 6206, "dt": 58_334 * FIXED_POINT_32_SCALE},
+                    ]
+                }
+            },
+        }
+    )
+
+    summary = extract_damage_summary(tmp_path / "sample.bin")
+
+    assert summary["damage_taken_trusted"] is True
+    assert summary["damage_taken_status"] == "trusted_member_dt_high32"
+    assert summary["members"][0]["damage_taken_status"] == "trusted_member_dt_high32"

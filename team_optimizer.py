@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set
 
+from clan_boss_simulator import default_member_row as default_clan_boss_member_row, simulate_clan_boss_battle
 from forge_db import DB_PATH, ensure_schema
 
 
@@ -57,6 +58,30 @@ BOSS_PROFILES: Dict[str, OptimizerBossProfile] = {
         ),
         valuable_roles=("speed", "poisoner", "burner", "cleanse", "ally_protect", "counterattack", "decrease_attack"),
     ),
+    "hydra": OptimizerBossProfile(
+        key="hydra",
+        label="Hydra",
+        description="Optimizer Hydra orientato a utility coverage: Block Buffs, Provoke, Hex, sustain e controllo della rotazione.",
+        team_size=6,
+        required_role_groups=(
+            RoleRequirement("damage_core", "Damage core", ("damage", "burner", "hexer")),
+            RoleRequirement("control_core", "Control core", ("block_buffs", "provoke", "hexer", "debuffer")),
+            RoleRequirement("survival_core", "Survival core", ("support", "survival", "cleanse", "revive", "mischief_tank")),
+        ),
+        valuable_roles=("speed", "block_buffs", "provoke", "hexer", "cleanse", "revive", "mischief_tank", "decrease_speed"),
+    ),
+    "iron_twins": OptimizerBossProfile(
+        key="iron_twins",
+        label="Iron Twins Fortress",
+        description="Optimizer Iron Twins orientato a comp dedicate con controllo velocita, sustain e gestione delle finestre punitive.",
+        team_size=5,
+        required_role_groups=(
+            RoleRequirement("pressure_core", "Pressure core", ("damage", "burner", "decrease_speed")),
+            RoleRequirement("survival_core", "Survival core", ("support", "survival", "cleanse", "ally_protect", "revive_on_death")),
+            RoleRequirement("utility_core", "Utility core", ("debuffer", "decrease_speed", "cleanse", "block_buffs")),
+        ),
+        valuable_roles=("speed", "decrease_speed", "cleanse", "ally_protect", "block_buffs", "burner", "revive_on_death"),
+    ),
 }
 
 LEVEL_THRESHOLDS: Dict[str, Dict[str, float]] = {
@@ -66,6 +91,57 @@ LEVEL_THRESHOLDS: Dict[str, Dict[str, float]] = {
     "brutal": {"required_speed": 170.0, "required_accuracy": 210.0, "survival_floor": 0.62},
     "nightmare": {"required_speed": 176.0, "required_accuracy": 230.0, "survival_floor": 0.66},
     "ultra_nightmare": {"required_speed": 190.0, "required_accuracy": 250.0, "survival_floor": 0.70},
+}
+
+HYDRA_LEVEL_THRESHOLDS: Dict[str, Dict[str, float]] = {
+    "normal": {"required_speed": 190.0, "required_accuracy": 220.0, "required_resistance": 250.0, "survival_floor": 0.62},
+    "hard": {"required_speed": 215.0, "required_accuracy": 270.0, "required_resistance": 320.0, "survival_floor": 0.68},
+    "brutal": {"required_speed": 230.0, "required_accuracy": 330.0, "required_resistance": 390.0, "survival_floor": 0.73},
+    "nightmare": {"required_speed": 245.0, "required_accuracy": 380.0, "required_resistance": 470.0, "survival_floor": 0.78},
+}
+
+HYDRA_ROTATION_RULES: Dict[str, Dict[str, Any]] = {
+    "rotation_1": {
+        "label": "Rotazione 1",
+        "starter_heads": ("Decay", "Torment", "Suffering", "Mischief"),
+        "priority_roles": ("provoke", "block_buffs", "mischief_tank"),
+        "needs_perfect_veil": True,
+        "needs_wrath_mitigation": False,
+    },
+    "rotation_2": {
+        "label": "Rotazione 2",
+        "starter_heads": ("Blight", "Torment", "Mischief", "Wrath"),
+        "priority_roles": ("block_buffs", "mischief_tank", "decrease_attack"),
+        "needs_perfect_veil": True,
+        "needs_wrath_mitigation": True,
+    },
+    "rotation_3": {
+        "label": "Rotazione 3",
+        "starter_heads": ("Decay", "Blight", "Suffering", "Wrath"),
+        "priority_roles": ("provoke", "block_buffs", "decrease_attack"),
+        "needs_perfect_veil": False,
+        "needs_wrath_mitigation": True,
+    },
+    "rotation_4": {
+        "label": "Rotazione 4",
+        "starter_heads": ("Decay", "Blight", "Mischief", "Wrath"),
+        "priority_roles": ("provoke", "block_buffs", "mischief_tank", "decrease_attack"),
+        "needs_perfect_veil": False,
+        "needs_wrath_mitigation": True,
+    },
+    "rotation_5": {
+        "label": "Rotazione 5",
+        "starter_heads": ("Decay", "Blight", "Suffering", "Mischief"),
+        "priority_roles": ("provoke", "block_buffs", "mischief_tank"),
+        "needs_perfect_veil": False,
+        "needs_wrath_mitigation": False,
+    },
+}
+
+IRON_TWINS_LEVEL_THRESHOLDS: Dict[str, Dict[str, float]] = {
+    "stage_6": {"required_speed": 180.0, "required_accuracy": 180.0, "required_resistance": 0.0, "survival_floor": 0.62},
+    "stage_12": {"required_speed": 220.0, "required_accuracy": 280.0, "required_resistance": 300.0, "survival_floor": 0.70},
+    "stage_15": {"required_speed": 240.0, "required_accuracy": 360.0, "required_resistance": 450.0, "survival_floor": 0.76},
 }
 
 BOSS_FAMILIES: Dict[str, BossFamily] = {
@@ -90,6 +166,44 @@ BOSS_FAMILIES: Dict[str, BossFamily] = {
         default_level="ultra_nightmare",
         default_affinity="void",
     ),
+    "hydra": BossFamily(
+        key="hydra",
+        label="Hydra",
+        description="Clan Boss a sei teste con focus su utility coverage, sustain e gestione della rotazione.",
+        levels=(
+            ("normal", "Normal"),
+            ("hard", "Hard"),
+            ("brutal", "Brutal"),
+            ("nightmare", "Nightmare"),
+        ),
+        affinities=(
+            ("rotation_1", "Rotazione 1"),
+            ("rotation_2", "Rotazione 2"),
+            ("rotation_3", "Rotazione 3"),
+            ("rotation_4", "Rotazione 4"),
+            ("rotation_5", "Rotazione 5"),
+        ),
+        default_level="normal",
+        default_affinity="rotation_1",
+    ),
+    "iron_twins": BossFamily(
+        key="iron_twins",
+        label="Iron Twins Fortress",
+        description="Dungeon con affinity giornaliera, stage dedicate e comp molto piu rigide del dungeon medio.",
+        levels=(
+            ("stage_6", "Stage 6+"),
+            ("stage_12", "Stage 12+"),
+            ("stage_15", "Stage 15"),
+        ),
+        affinities=(
+            ("void", "Void"),
+            ("magic", "Magic"),
+            ("force", "Force"),
+            ("spirit", "Spirit"),
+        ),
+        default_level="stage_15",
+        default_affinity="void",
+    ),
 }
 
 DEMON_LORD_ENCOUNTER_KEYS: Dict[str, str] = {
@@ -105,9 +219,9 @@ DEMON_LORD_ENCOUNTER_KEYS: Dict[str, str] = {
 CHAMPION_HINTS: Dict[str, ChampionHint] = {
     "Maneater": ChampionHint(("speed", "survival", "unkillable", "support"), {"demon_lord_unm": 100.0}, "speed_tuned_support"),
     "Pain Keeper": ChampionHint(("speed", "support", "cooldown"), {"demon_lord_unm": 94.0}, "cooldown_support"),
-    "Geomancer": ChampionHint(("damage", "burner", "debuffer"), {"demon_lord_unm": 96.0}, "hp_burner"),
+    "Geomancer": ChampionHint(("damage", "burner", "debuffer"), {"demon_lord_unm": 96.0, "iron_twins_stage_15": 99.0, "hydra_hard": 84.0}, "hp_burner"),
     "Frozen Banshee": ChampionHint(("damage", "poisoner", "debuffer"), {"demon_lord_unm": 90.0}, "poisoner"),
-    "Ninja": ChampionHint(("damage", "burner"), {"demon_lord_unm": 93.0}, "clan_boss_dps"),
+    "Ninja": ChampionHint(("damage", "burner"), {"demon_lord_unm": 93.0, "hydra_hard": 82.0}, "clan_boss_dps"),
     "Heiress": ChampionHint(("cleanse", "speed", "support"), {"demon_lord_unm": 78.0}, "cleanser"),
     "Doompriest": ChampionHint(("cleanse", "support", "survival"), {"demon_lord_unm": 84.0}, "cleanser"),
     "Martyr": ChampionHint(("survival", "ally_protect", "damage", "debuffer"), {"demon_lord_unm": 88.0}, "ally_protector"),
@@ -136,7 +250,13 @@ CHAMPION_HINTS: Dict[str, ChampionHint] = {
     "Aox the Rememberer": ChampionHint(("poisoner", "support", "debuffer"), {"demon_lord_unm": 70.0}, "poisoner"),
     "Occult Brawler": ChampionHint(("poisoner", "damage"), {"demon_lord_unm": 74.0}, "poisoner"),
     "Apothecary": ChampionHint(("speed", "support"), {"demon_lord_unm": 58.0}, "support_general"),
-    "Mithrala Lifebane": ChampionHint(("support", "cleanse", "survival"), {"demon_lord_unm": 80.0}, "support_general"),
+    "Mithrala Lifebane": ChampionHint(("support", "cleanse", "survival", "hexer"), {"demon_lord_unm": 80.0, "hydra_hard": 96.0, "iron_twins_stage_15": 94.0}, "debuffer_acc_spd"),
+    "Uugo": ChampionHint(("support", "debuffer", "block_buffs"), {"hydra_hard": 92.0}, "debuffer_acc_spd"),
+    "Husk": ChampionHint(("damage", "provoke"), {"hydra_hard": 88.0}, "support_tank"),
+    "Firrol the Barkhorn": ChampionHint(("support", "block_buffs", "mischief_tank", "decrease_speed"), {"hydra_hard": 98.0}, "debuffer_acc_spd"),
+    "Duchess Lilitu": ChampionHint(("support", "revive", "survival"), {"hydra_hard": 94.0, "iron_twins_stage_15": 90.0}, "support_tank"),
+    "Krisk the Ageless": ChampionHint(("support", "ally_protect", "decrease_speed", "survival"), {"hydra_hard": 95.0, "iron_twins_stage_15": 93.0}, "ally_protector"),
+    "Pythion": ChampionHint(("support", "cleanse", "revive", "survival"), {"hydra_hard": 91.0, "iron_twins_stage_15": 89.0}, "support_tank"),
 }
 
 
@@ -153,18 +273,119 @@ ACCOUNT_ROLE_MAP: Dict[str, tuple[str, ...]] = {
 ROLE_INFERENCE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("poison",), ("poisoner", "debuffer", "damage")),
     (("hp burn", "burn"), ("burner", "debuffer", "damage")),
+    (("block buffs",), ("block_buffs", "debuffer", "support")),
+    (("provoke",), ("provoke", "support")),
+    (("hex",), ("hexer", "debuffer", "damage")),
+    (("decrease speed", "spd down"), ("decrease_speed", "debuffer", "support")),
     (("decrease attack", "decrease atk"), ("debuffer", "decrease_attack", "survival")),
     (("decrease def", "decrease defense", "weaken"), ("debuffer",)),
+    (("perfect veil", "increase resistance"), ("mischief_tank", "support", "survival")),
     (("ally protect",), ("ally_protect", "support", "survival")),
     (("shield",), ("support", "survival")),
     (("counterattack", "counter attack"), ("counterattack", "support", "damage")),
     (("unkillable", "block damage"), ("unkillable", "survival", "support")),
+    (("revive on death",), ("revive_on_death", "support", "survival")),
     (("remove debuff", "remove all debuffs", "removes all debuffs", "cleanse", "block debuffs"), ("cleanse", "support", "survival")),
     (("heal", "continuous heal"), ("support", "survival")),
     (("revive",), ("revive", "support")),
     (("turn meter", "fill turn meter", "increase speed", "increase turn meter"), ("speed", "support")),
     (("damage",), ("damage",)),
 )
+
+CAPABILITY_INFERENCE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("heal", "continuous heal", "leech"), ("healing", "sustain")),
+    (("shield",), ("shield", "sustain", "defense_core")),
+    (("ally protect",), ("ally_protect", "sustain", "defense_core")),
+    (("increase def", "increase defense", "strengthen"), ("increase_defense", "defense_core")),
+    (("increase resistance",), ("increase_resistance", "defense_core")),
+    (("counterattack", "counter attack"), ("counterattack", "defense_core")),
+    (("unkillable", "block damage"), ("unkillable", "defense_core")),
+    (("block buffs",), ("block_buffs", "boss_control")),
+    (("provoke",), ("provoke", "boss_control")),
+    (("hex",), ("hex", "boss_pressure")),
+    (("decrease speed", "spd down"), ("decrease_speed", "boss_control")),
+    (("perfect veil",), ("perfect_veil", "mischief_tank")),
+    (("revive on death",), ("revive_on_death", "defense_core")),
+    (("block debuffs",), ("block_debuffs", "cleanse_support")),
+    (("remove debuff", "remove all debuffs", "removes all debuffs", "cleanse"), ("cleanse", "cleanse_support")),
+    (("decrease attack", "decrease atk"), ("decrease_attack", "boss_debuff")),
+    (("decrease def", "decrease defense"), ("decrease_defense", "boss_debuff")),
+    (("weaken",), ("weaken", "boss_debuff")),
+    (("poison",), ("poison", "boss_pressure")),
+    (("hp burn", "burn"), ("hp_burn", "boss_pressure")),
+    (("increase speed", "increase turn meter", "fill turn meter", "turn meter"), ("speed_boost",)),
+    (("decrease cooldown", "cooldown"), ("cooldown_reset",)),
+)
+
+EFFECT_TYPE_ALIASES: Dict[str, str] = {
+    "decrease attack": "decrease_attack",
+    "decrease def": "decrease_defense",
+    "decrease defense": "decrease_defense",
+    "decrease_defense": "decrease_defense",
+    "decrease speed": "decrease_speed",
+    "decrease_speed": "decrease_speed",
+    "weaken": "weaken",
+    "poison": "poison",
+    "block buffs": "block_buffs",
+    "block_buffs": "block_buffs",
+    "provoke": "provoke",
+    "hex": "hex",
+    "increase def": "increase_defense",
+    "increase defense": "increase_defense",
+    "increase_defense": "increase_defense",
+    "increase resistance": "increase_resistance",
+    "increase_resistance": "increase_resistance",
+    "perfect veil": "perfect_veil",
+    "perfect_veil": "perfect_veil",
+    "block debuffs": "block_debuffs",
+    "ally protect": "ally_protect",
+    "counterattack": "counterattack",
+    "counter attack": "counterattack",
+    "hp burn": "hp_burn",
+    "burn": "hp_burn",
+    "unkillable": "unkillable",
+    "shield": "shield",
+    "cleanse": "cleanse",
+    "remove debuff": "cleanse",
+    "revive on death": "revive_on_death",
+    "revive_on_death": "revive_on_death",
+    "cooldown reset": "cooldown_reset",
+    "decrease cooldown": "cooldown_reset",
+    "turn meter fill": "speed_boost",
+    "increase speed": "speed_boost",
+}
+
+WINDOW_DEFAULT_DURATIONS: Dict[str, int] = {
+    "decrease_attack": 2,
+    "decrease_defense": 2,
+    "decrease_speed": 2,
+    "weaken": 2,
+    "hp_burn": 3,
+    "poison": 2,
+    "block_buffs": 2,
+    "provoke": 1,
+    "hex": 2,
+    "block_debuffs": 2,
+    "increase_defense": 2,
+    "increase_resistance": 2,
+    "ally_protect": 2,
+    "counterattack": 2,
+    "unkillable": 2,
+    "shield": 2,
+    "perfect_veil": 2,
+    "revive_on_death": 2,
+    "speed_boost": 2,
+}
+
+MANEATER_TUNE_PARTNERS: Set[str] = {
+    "Pain Keeper",
+    "Heiress",
+    "Seeker",
+    "Warcaster",
+    "Roschard the Tower",
+    "Helicath",
+    "Demytha",
+}
 
 
 def list_team_optimizer_targets() -> List[Dict[str, Any]]:
@@ -227,13 +448,13 @@ def build_team_optimizer_report(
         role_rows = conn.execute("SELECT champion_name, role_tag FROM champion_roles").fetchall()
         skill_rows = conn.execute(
             """
-            SELECT champion_name, slot, skill_type, description, description_clean
+            SELECT champion_name, slot, skill_order, skill_id, skill_name, cooldown, booked_cooldown, skill_type, description, description_clean
             FROM champion_skills
             """
         ).fetchall()
         effect_rows = conn.execute(
             """
-            SELECT champion_name, effect_type, target, condition_text
+            SELECT champion_name, slot, effect_order, effect_type, target, effect_value, duration, chance, condition_text
             FROM champion_skill_effects
             """
         ).fetchall()
@@ -263,6 +484,7 @@ def build_team_optimizer_report(
     bonus_sources = sorted({str(row["source"] or "").strip() for row in bonus_source_rows if str(row["source"] or "").strip()})
     account_roles_by_name = _group_roles_by_name(role_rows)
     effect_texts_by_name = _group_effect_texts_by_name(skill_rows, effect_rows)
+    skills_by_name = _group_skills_by_name(skill_rows, effect_rows)
     evidence_by_name = {
         str(row["champion_name"] or ""): {
             "run_count": int(row["run_count"] or 0),
@@ -280,6 +502,7 @@ def build_team_optimizer_report(
             stat_model=stat_models_by_champ_id.get(str(row["champ_id"] or ""), {}),
             account_roles=account_roles_by_name.get(str(row["champion_name"] or ""), set()),
             effect_texts=effect_texts_by_name.get(str(row["champion_name"] or ""), []),
+            skills=skills_by_name.get(str(row["champion_name"] or ""), []),
             evidence=evidence_by_name.get(str(row["champion_name"] or ""), {}),
             target_key=encounter_key,
             boss_affinity=effective_affinity,
@@ -290,7 +513,13 @@ def build_team_optimizer_report(
     ]
     candidates.sort(key=lambda item: (-float(item["score"]), item["champion_name"].lower()))
 
-    selected_team = _select_team(candidates, profile)
+    selected_team = _select_team(
+        candidates,
+        profile,
+        target_key=encounter_key,
+        thresholds=thresholds,
+        boss_affinity=effective_affinity,
+    )
     selected_names = {str(item["champion_name"] or "") for item in selected_team}
     bench = [item for item in candidates if str(item["champion_name"] or "") not in selected_names][:5]
 
@@ -317,17 +546,35 @@ def build_team_optimizer_report(
         role: [str(member["champion_name"]) for member in selected_team if role in list(member.get("roles") or [])]
         for role in profile.valuable_roles
     }
+    team_fit = _evaluate_team_fit(
+        selected_team,
+        target_key=encounter_key,
+        thresholds=thresholds,
+        boss_affinity=effective_affinity,
+    )
     warnings: List[str] = []
     if missing_required:
         warnings.append(f"Coverage incompleta: {', '.join(missing_required)}.")
     if "speed" not in team_roles:
         warnings.append("Il team non ha un motore speed esplicito.")
-    if "cleanse" not in team_roles and "unkillable" not in team_roles:
-        warnings.append("Manca una risposta chiara a stun/debuff, salvo tune specifici.")
-    if sum(1 for member in selected_team if "damage" in list(member.get("roles") or [])) < 2:
-        warnings.append("Il team ha pochi slot dichiaratamente offensivi.")
-    if effective_affinity != "void":
-        warnings.append(f"Affinita boss selezionata: {effective_affinity}. Controlla i campioni in weak affinity.")
+    if family.key == "demon_lord":
+        if "cleanse" not in team_roles and "unkillable" not in team_roles:
+            warnings.append("Manca una risposta chiara a stun/debuff, salvo tune specifici.")
+        if sum(1 for member in selected_team if "damage" in list(member.get("roles") or [])) < 2:
+            warnings.append("Il team ha pochi slot dichiaratamente offensivi.")
+        if effective_affinity != "void":
+            warnings.append(f"Affinita boss selezionata: {effective_affinity}. Controlla i campioni in weak affinity.")
+    elif family.key == "hydra":
+        if "block_buffs" not in team_roles:
+            warnings.append("Hydra senza ruolo Block Buffs esplicito nel team proposto.")
+        if "provoke" not in team_roles:
+            warnings.append("Hydra senza ruolo Provoke esplicito nel team proposto.")
+    elif family.key == "iron_twins":
+        if "decrease_speed" not in team_roles:
+            warnings.append("Iron Twins senza ruolo Decrease SPD esplicito nel team proposto.")
+        if effective_affinity != "void":
+            warnings.append(f"Affinity Iron Twins selezionata: {effective_affinity}. Controlla i weak hits.")
+    warnings.extend(list(team_fit.get("warnings") or []))
 
     return {
         "target": {
@@ -348,16 +595,23 @@ def build_team_optimizer_report(
         "candidates": candidates,
         "coverage": coverage,
         "valuable_role_coverage": valuable_coverage,
+        "team_fit": team_fit,
         "missing_required_roles": missing_required,
         "warnings": warnings,
         "notes": [
             "Scheletro euristico: usa hint statici, role inference da skill/effect e stats correnti del roster.",
-            "I punteggi non sono ancora un simulatore turn-order e non sostituiscono uno speed tune trusted.",
+            "I punteggi ora pesano anche sustain, strati difensivi, debuff chiave e sinergia di squadra, ma non sono ancora un simulatore turn-order trusted.",
         ],
     }
 
 
-def _select_team(candidates: Sequence[Dict[str, Any]], profile: OptimizerBossProfile) -> List[Dict[str, Any]]:
+def _select_team(
+    candidates: Sequence[Dict[str, Any]],
+    profile: OptimizerBossProfile,
+    target_key: str,
+    thresholds: Mapping[str, float],
+    boss_affinity: str,
+) -> List[Dict[str, Any]]:
     selected: List[Dict[str, Any]] = []
     selected_names: Set[str] = set()
     covered_roles: Set[str] = set()
@@ -371,7 +625,21 @@ def _select_team(candidates: Sequence[Dict[str, Any]], profile: OptimizerBossPro
         ]
         if not options:
             continue
-        chosen = max(options, key=lambda item: (_selection_score(item, covered_roles, profile), item["score"]))
+        chosen = max(
+            options,
+            key=lambda item: (
+                _selection_score(
+                    item,
+                    selected_team=selected,
+                    covered_roles=covered_roles,
+                    profile=profile,
+                    target_key=target_key,
+                    thresholds=thresholds,
+                    boss_affinity=boss_affinity,
+                ),
+                item["score"],
+            ),
+        )
         selected.append(chosen)
         selected_names.add(str(chosen["champion_name"]))
         covered_roles.update(list(chosen.get("roles") or []))
@@ -380,15 +648,44 @@ def _select_team(candidates: Sequence[Dict[str, Any]], profile: OptimizerBossPro
         options = [candidate for candidate in candidates if candidate["champion_name"] not in selected_names]
         if not options:
             break
-        chosen = max(options, key=lambda item: (_selection_score(item, covered_roles, profile), item["score"]))
+        chosen = max(
+            options,
+            key=lambda item: (
+                _selection_score(
+                    item,
+                    selected_team=selected,
+                    covered_roles=covered_roles,
+                    profile=profile,
+                    target_key=target_key,
+                    thresholds=thresholds,
+                    boss_affinity=boss_affinity,
+                ),
+                item["score"],
+            ),
+        )
         selected.append(chosen)
         selected_names.add(str(chosen["champion_name"]))
         covered_roles.update(list(chosen.get("roles") or []))
 
-    return selected
+    return _refine_team_selection(
+        selected,
+        candidates,
+        profile=profile,
+        target_key=target_key,
+        thresholds=thresholds,
+        boss_affinity=boss_affinity,
+    )
 
 
-def _selection_score(candidate: Mapping[str, Any], covered_roles: Set[str], profile: OptimizerBossProfile) -> float:
+def _selection_score(
+    candidate: Mapping[str, Any],
+    selected_team: Sequence[Mapping[str, Any]],
+    covered_roles: Set[str],
+    profile: OptimizerBossProfile,
+    target_key: str,
+    thresholds: Mapping[str, float],
+    boss_affinity: str,
+) -> float:
     candidate_roles = set(str(role) for role in list(candidate.get("roles") or []))
     new_valuable_roles = sum(1 for role in profile.valuable_roles if role in candidate_roles and role not in covered_roles)
     new_required_roles = 0
@@ -397,7 +694,20 @@ def _selection_score(candidate: Mapping[str, Any], covered_roles: Set[str], prof
             role in requirement.acceptable_roles for role in covered_roles
         ):
             new_required_roles += 1
-    return float(candidate.get("score") or 0.0) + (new_required_roles * 8.0) + (new_valuable_roles * 2.0)
+    team_before = _evaluate_team_fit(
+        selected_team,
+        target_key=target_key,
+        thresholds=thresholds,
+        boss_affinity=boss_affinity,
+    )
+    team_after = _evaluate_team_fit(
+        [*selected_team, candidate],
+        target_key=target_key,
+        thresholds=thresholds,
+        boss_affinity=boss_affinity,
+    )
+    team_delta = float(team_after.get("score") or 0.0) - float(team_before.get("score") or 0.0)
+    return float(candidate.get("score") or 0.0) + (new_required_roles * 8.0) + (new_valuable_roles * 2.0) + team_delta
 
 
 def _build_candidate(
@@ -406,6 +716,7 @@ def _build_candidate(
     stat_model: Mapping[str, Any],
     account_roles: Set[str],
     effect_texts: Sequence[str],
+    skills: Sequence[Mapping[str, Any]],
     evidence: Mapping[str, Any],
     target_key: str,
     boss_affinity: str,
@@ -419,6 +730,8 @@ def _build_candidate(
     mapped_account_roles = _map_account_roles(account_roles)
     inferred_roles = infer_roles_from_texts(effect_texts)
     roles = sorted(hint_roles | mapped_account_roles | inferred_roles)
+    capability_tags = sorted(infer_capabilities_from_texts(effect_texts, roles=roles, champion_name=champion_name))
+    skill_windows = _summarize_skill_windows(skills=skills, booked=bool(roster_row["booked"]))
     default_build = hint.default_build if hint else _infer_default_build(roles)
 
     stat_signals = _compute_stat_signals(stats, thresholds)
@@ -468,7 +781,7 @@ def _build_candidate(
         score += evidence_bonus
         score_breakdown.append({"label": "Run evidence", "value": round(evidence_bonus, 2)})
 
-    risks = _build_risk_flags(target_key, roles, weighted_stat_signals, affinity_state, thresholds)
+    risks = _build_risk_flags(target_key, champion_name, roles, capability_tags, weighted_stat_signals, affinity_state, thresholds)
     risks.extend(stat_reliability["warnings"])
     reasons = _build_reasons(roles, weighted_stat_signals, evidence, hint, affinity_state, boss_affinity, stat_reliability)
 
@@ -484,6 +797,9 @@ def _build_candidate(
         "booked": bool(roster_row["booked"]),
         "roles": roles,
         "default_build": default_build,
+        "capability_tags": capability_tags,
+        "skills": [dict(skill) for skill in skills],
+        "skill_windows": skill_windows,
         "score": round(score, 2),
         "score_breakdown": score_breakdown,
         "stats": dict(stats),
@@ -516,6 +832,837 @@ def infer_roles_from_texts(texts: Iterable[str]) -> Set[str]:
         if any(keyword in normalized_text for keyword in keywords):
             roles.update(inferred_roles)
     return roles
+
+
+def infer_capabilities_from_texts(texts: Iterable[str], roles: Iterable[str] = (), champion_name: str = "") -> Set[str]:
+    normalized_text = " ".join(_normalize_token(text) for text in texts if str(text or "").strip())
+    capabilities: Set[str] = set()
+    for keywords, inferred_capabilities in CAPABILITY_INFERENCE_RULES:
+        if any(keyword in normalized_text for keyword in keywords):
+            capabilities.update(inferred_capabilities)
+
+    role_set = {_normalize_token(role) for role in roles if str(role or "").strip()}
+    if "allyprotect" in role_set:
+        capabilities.update({"ally_protect", "sustain", "defense_core"})
+    if "counterattack" in role_set:
+        capabilities.update({"counterattack", "defense_core"})
+    if "cleanse" in role_set:
+        capabilities.update({"cleanse", "cleanse_support"})
+    if "unkillable" in role_set:
+        capabilities.update({"unkillable", "defense_core"})
+    if "decreaseattack" in role_set:
+        capabilities.update({"decrease_attack", "boss_debuff"})
+    if "decreasespeed" in role_set:
+        capabilities.update({"decrease_speed", "boss_control"})
+    if "blockbuffs" in role_set:
+        capabilities.update({"block_buffs", "boss_control"})
+    if "provoke" in role_set:
+        capabilities.update({"provoke", "boss_control"})
+    if "hexer" in role_set:
+        capabilities.update({"hex", "boss_pressure"})
+    if "mischieftank" in role_set:
+        capabilities.update({"perfect_veil", "mischief_tank"})
+    if "reviveondeath" in role_set:
+        capabilities.update({"revive_on_death", "defense_core"})
+    if "poisoner" in role_set:
+        capabilities.update({"poison", "boss_pressure"})
+    if "burner" in role_set:
+        capabilities.update({"hp_burn", "boss_pressure"})
+    if "cooldown" in role_set:
+        capabilities.add("cooldown_reset")
+    if _normalize_token(champion_name) == "maneater":
+        capabilities.add("unkillable")
+    return capabilities
+
+
+def _speed_value(member: Mapping[str, Any]) -> float:
+    return _to_float(dict(member.get("stats") or {}).get("spd"))
+
+
+def _in_speed_range(speed: float, minimum: float, maximum: float) -> bool:
+    return minimum <= speed <= maximum
+
+
+def _evaluate_maneater_tune(team: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    members = {str(member.get("champion_name") or ""): member for member in team}
+    maneater = members.get("Maneater")
+    if maneater is None:
+        return {"ready": False, "label": "", "warnings": [], "build_requirements": []}
+
+    partner = members.get("Pain Keeper")
+    if partner is None:
+        return {
+            "ready": False,
+            "label": "",
+            "warnings": ["Maneater richiede un partner tipo Pain Keeper o altro cooldown/tune engine."],
+            "build_requirements": ["Per un asse Maneater serve almeno un partner reale di tune, non solo buoni campioni di contorno."],
+        }
+
+    speeds = {name: _speed_value(member) for name, member in members.items()}
+    maneater_booked = bool(maneater.get("booked"))
+    partner_booked = bool(partner.get("booked"))
+    dps_members = [(name, speed) for name, speed in speeds.items() if name not in {"Maneater", "Pain Keeper"}]
+    build_requirements = [
+        "Maneater/Pain Keeper vanno trattati come progetto speed-tune dedicato, non come pick generici.",
+    ]
+    warnings: List[str] = []
+
+    def has_range(excluded: Set[str], minimum: float, maximum: float) -> bool:
+        return any(_in_speed_range(speed, minimum, maximum) for name, speed in dps_members if name not in excluded)
+
+    def count_range(excluded: Set[str], minimum: float, maximum: float) -> int:
+        return sum(1 for name, speed in dps_members if name not in excluded and _in_speed_range(speed, minimum, maximum))
+
+    ninja_present = "Ninja" in members
+    ninja_speed = speeds.get("Ninja", 0.0)
+    standard_ready = (
+        maneater_booked
+        and partner_booked
+        and _in_speed_range(speeds.get("Maneater", 0.0), 240.0, 241.0)
+        and _in_speed_range(speeds.get("Pain Keeper", 0.0), 218.0, 222.0)
+        and count_range(set(), 175.0, 178.0) >= 2
+        and has_range(set(), 111.0, 121.0)
+    )
+    ninja_ready = (
+        maneater_booked
+        and partner_booked
+        and ninja_present
+        and bool(members["Ninja"].get("booked"))
+        and _in_speed_range(speeds.get("Maneater", 0.0), 240.0, 241.0)
+        and _in_speed_range(speeds.get("Pain Keeper", 0.0), 218.0, 222.0)
+        and _in_speed_range(ninja_speed, 161.0, 165.0)
+        and has_range({"Ninja"}, 175.0, 178.0)
+        and has_range({"Ninja"}, 111.0, 121.0)
+    )
+    ultimate_ready = (
+        maneater_booked
+        and partner_booked
+        and _in_speed_range(speeds.get("Maneater", 0.0), 256.0, 257.0)
+        and _in_speed_range(speeds.get("Pain Keeper", 0.0), 222.0, 226.0)
+        and has_range(set(), 187.0, 189.0)
+        and has_range(set(), 179.0, 185.0)
+        and has_range(set(), 129.0, 129.0)
+    )
+
+    if ninja_ready:
+        return {
+            "ready": True,
+            "label": "Budget Unkillable Ninja",
+            "warnings": [],
+            "build_requirements": [
+                "Tune centrata: ME 240-241, PK 218-222, Ninja 161-165, DPS 175-178, slowboi 111-121.",
+                "Ninja deve restare dentro una tune dedicata: fuori finestra rompe facilmente il ciclo.",
+            ],
+        }
+    if ultimate_ready:
+        return {
+            "ready": True,
+            "label": "Ultimate Budget Unkillable",
+            "warnings": [],
+            "build_requirements": [
+                "Tune centrata: ME 256-257, PK 222-226, DPS 187-189, DPS 179-185, slow 129.",
+            ],
+        }
+    if standard_ready:
+        return {
+            "ready": True,
+            "label": "Budget Unkillable",
+            "warnings": [],
+            "build_requirements": [
+                "Tune centrata: ME 240-241, PK 218-222, 2 DPS 175-178, slowboi 111-121.",
+            ],
+        }
+
+    if not maneater_booked:
+        warnings.append("Maneater senza libri sull'A3: cosi la tune Unkillable non e affidabile.")
+    if not partner_booked:
+        warnings.append("Pain Keeper senza libri: il reset cooldown non e ancora in stato da tune seria.")
+
+    warnings.append(
+        f"Speed attuali ME/PK fuori tune reale ({speeds.get('Maneater', 0.0):.0f}/{speeds.get('Pain Keeper', 0.0):.0f})."
+    )
+    build_requirements.extend(
+        [
+            "Per Budget/Ninja: ME 240-241 e PK 218-222 con slot lenti e DPS nelle finestre giuste.",
+            "Per Ultimate Budget: ME 256-257 e PK 222-226 con un lento fisso a 129.",
+        ]
+    )
+    return {
+        "ready": False,
+        "label": "",
+        "warnings": warnings[:3],
+        "build_requirements": build_requirements[:4],
+    }
+
+
+def _sim_priority_for_slot(slot: str) -> int:
+    return {"A1": 100, "A2": 240, "A3": 320, "A4": 160}.get(str(slot or "").upper(), 100)
+
+
+def _default_sim_target(effect_type: str) -> str:
+    if effect_type in {"decrease_attack", "decrease_defense", "weaken", "poison", "hp_burn"}:
+        return "boss"
+    if effect_type == "cleanse":
+        return "all_allies"
+    return "all_allies"
+
+
+def _normalize_sim_target(raw_target: Any, effect_type: str) -> str:
+    normalized = _normalize_token(raw_target)
+    if normalized in {"self", "self ally"}:
+        return "self"
+    if normalized in {"boss", "enemy", "enemies", "target enemy"}:
+        return "boss"
+    if normalized in {"all allies", "all ally", "ally team", "team"}:
+        return "all_allies"
+    if normalized == "ally":
+        return "boss" if effect_type in {"decrease_attack", "decrease_defense", "weaken", "poison", "hp_burn"} else "all_allies"
+    return _default_sim_target(effect_type)
+
+
+def _infer_fallback_sim_skill(candidate: Mapping[str, Any]) -> Dict[str, Any] | None:
+    capability_tags = {str(tag) for tag in list(candidate.get("capability_tags") or [])}
+    roles = {str(role) for role in list(candidate.get("roles") or [])}
+    if "unkillable" in capability_tags:
+        return {"slot": "A3", "skill_name": "Unkillable window", "cooldown": 5, "priority": 320, "use_as_opener": True, "enabled": True, "effects": [{"effect_type": "unkillable", "target": "all_allies", "duration": 2, "chance": 100.0}]}
+    if "block_debuffs" in capability_tags:
+        return {"slot": "A3", "skill_name": "Block Debuffs window", "cooldown": 3, "priority": 320, "use_as_opener": True, "enabled": True, "effects": [{"effect_type": "block_debuffs", "target": "all_allies", "duration": 2, "chance": 100.0}]}
+    if "ally_protect" in capability_tags:
+        return {"slot": "A2", "skill_name": "Ally Protect window", "cooldown": 3, "priority": 240, "use_as_opener": True, "enabled": True, "effects": [{"effect_type": "ally_protect", "target": "all_allies", "duration": 2, "chance": 100.0}]}
+    if "counterattack" in capability_tags:
+        return {"slot": "A2", "skill_name": "Counterattack window", "cooldown": 3, "priority": 240, "use_as_opener": True, "enabled": True, "effects": [{"effect_type": "counterattack", "target": "all_allies", "duration": 2, "chance": 100.0}]}
+    if "decrease_attack" in capability_tags or "decrease_attack" in roles:
+        return {"slot": "A1", "skill_name": "Decrease ATK", "cooldown": 0, "priority": 100, "use_as_opener": False, "enabled": True, "effects": [{"effect_type": "decrease_attack", "target": "boss", "duration": 2, "chance": 100.0}]}
+    if "hp_burn" in capability_tags or "burner" in roles:
+        return {"slot": "A2", "skill_name": "HP Burn", "cooldown": 3, "priority": 240, "use_as_opener": True, "enabled": True, "effects": [{"effect_type": "hp_burn", "target": "boss", "duration": 3, "chance": 100.0}]}
+    if "poison" in capability_tags or "poisoner" in roles:
+        return {"slot": "A1", "skill_name": "Poison", "cooldown": 0, "priority": 100, "use_as_opener": False, "enabled": True, "effects": [{"effect_type": "poison", "target": "boss", "duration": 2, "chance": 100.0}]}
+    if "cleanse" in capability_tags or "cleanse" in roles:
+        return {"slot": "A2", "skill_name": "Cleanse", "cooldown": 3, "priority": 240, "use_as_opener": True, "enabled": True, "effects": [{"effect_type": "cleanse", "target": "all_allies", "duration": 0, "chance": 100.0}]}
+    return None
+
+
+def _sim_effects_for_skill(candidate: Mapping[str, Any], skill: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    effects: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for effect in list(skill.get("effects") or []):
+        effect_type = _normalize_effect_type(effect.get("effect_type"))
+        if not effect_type:
+            continue
+        seen.add(effect_type)
+        duration = max(0, int(effect.get("duration") or WINDOW_DEFAULT_DURATIONS.get(effect_type, 0)))
+        chance = _to_float(effect.get("chance") or 100.0) or 100.0
+        effects.append(
+            {
+                "effect_type": effect_type,
+                "target": _normalize_sim_target(effect.get("target"), effect_type),
+                "duration": duration,
+                "chance": chance,
+                "stacks": max(1, int(effect.get("stacks") or 1)),
+            }
+        )
+
+    slot = str(skill.get("slot") or "")
+    for effect_type, window in dict(candidate.get("skill_windows") or {}).items():
+        normalized_effect = _normalize_effect_type(effect_type)
+        if normalized_effect in seen or str(window.get("slot") or "") != slot:
+            continue
+        seen.add(normalized_effect)
+        effects.append(
+            {
+                "effect_type": normalized_effect,
+                "target": _default_sim_target(normalized_effect),
+                "duration": max(0, int(window.get("duration") or WINDOW_DEFAULT_DURATIONS.get(normalized_effect, 0))),
+                "chance": _to_float(window.get("chance") or 100.0) or 100.0,
+                "stacks": 1,
+            }
+        )
+    return effects
+
+
+def build_candidate_clan_boss_member_row(candidate: Mapping[str, Any], slot_index: int) -> Dict[str, Any]:
+    member_row = default_clan_boss_member_row(slot_index)
+    member_row["champ_id"] = str(candidate.get("champ_id") or "").strip()
+    member_row["champion_name"] = str(candidate.get("champion_name") or "").strip()
+    member_row["speed"] = _to_float(dict(candidate.get("stats") or {}).get("spd")) or 170.0
+    note_bits: List[str] = []
+    if candidate.get("default_build"):
+        note_bits.append(f"build {candidate['default_build']}")
+    if candidate.get("score") is not None:
+        note_bits.append(f"optimizer {_to_float(candidate.get('score')):.1f}")
+    member_row["notes"] = " | ".join(note_bits)
+
+    default_skills = list(member_row.get("skills") or [])
+    for skill_row in default_skills:
+        skill_row["enabled"] = False
+    built_any = False
+    for skill in list(candidate.get("skills") or []):
+        slot = str(skill.get("slot") or "").upper()
+        if slot not in {"A1", "A2", "A3", "A4"}:
+            continue
+        effects = _sim_effects_for_skill(candidate, skill)
+        if not effects:
+            continue
+        built_any = True
+        default_skills[{"A1": 0, "A2": 1, "A3": 2, "A4": 3}[slot]] = {
+            "slot": slot,
+            "skill_name": str(skill.get("skill_name") or slot),
+            "cooldown": _effective_skill_cooldown(skill, booked=bool(candidate.get("booked"))),
+            "priority": _sim_priority_for_slot(slot),
+            "use_as_opener": slot in {"A2", "A3"} and _effective_skill_cooldown(skill, booked=bool(candidate.get("booked"))) > 0,
+            "enabled": True,
+            "effects": effects,
+        }
+
+    if not built_any:
+        fallback_skill = _infer_fallback_sim_skill(candidate)
+        if fallback_skill:
+            default_skills[{"A1": 0, "A2": 1, "A3": 2, "A4": 3}[str(fallback_skill["slot"])] ] = fallback_skill
+            built_any = True
+
+    if not built_any and default_skills:
+        default_skills[0]["enabled"] = True
+
+    member_row["skills"] = default_skills
+    return member_row
+
+
+def _difficulty_from_target_key(target_key: str) -> str:
+    normalized = str(target_key or "").lower()
+    if normalized.endswith("_ultra_nightmare") or normalized.endswith("_unm"):
+        return "ultra_nightmare"
+    if normalized.endswith("_nightmare") or normalized.endswith("_nm"):
+        return "nightmare"
+    if normalized.endswith("_brutal"):
+        return "brutal"
+    if normalized.endswith("_hard"):
+        return "hard"
+    if normalized.endswith("_normal"):
+        return "normal"
+    return "ultra_nightmare"
+
+
+def simulate_candidate_team(
+    team: Sequence[Mapping[str, Any]],
+    difficulty: str = "ultra_nightmare",
+    affinity: str = "void",
+    max_boss_turns: int = 6,
+) -> Dict[str, Any]:
+    members = [build_candidate_clan_boss_member_row(candidate, index) for index, candidate in enumerate(team, start=1)]
+    if not members:
+        return {"ok": False, "errors": ["Inserisci almeno un campione nel team."], "team": []}
+    stun_target_slot = min(members, key=lambda row: (_to_float(row.get("speed") or 0.0), int(row.get("slot_index") or 99))).get("slot_index") or len(members)
+    return simulate_clan_boss_battle(
+        {
+            "settings": {
+                "difficulty": difficulty,
+                "affinity": affinity,
+                "max_boss_turns": max_boss_turns,
+                "stun_target_slot": int(stun_target_slot),
+            },
+            "team": members,
+        }
+    )
+
+
+def _evaluate_team_fit(
+    team: Sequence[Mapping[str, Any]],
+    target_key: str,
+    thresholds: Mapping[str, float],
+    boss_affinity: str,
+) -> Dict[str, Any]:
+    members = list(team or [])
+    names = [str(member.get("champion_name") or "") for member in members]
+    capability_sets = {
+        str(member.get("champion_name") or ""): {str(tag) for tag in list(member.get("capability_tags") or [])}
+        for member in members
+    }
+    roles_by_name = {
+        str(member.get("champion_name") or ""): {str(role) for role in list(member.get("roles") or [])}
+        for member in members
+    }
+    skill_windows_by_name = {
+        str(member.get("champion_name") or ""): {
+            _normalize_effect_type(effect_type): dict(window)
+            for effect_type, window in dict(member.get("skill_windows") or {}).items()
+        }
+        for member in members
+    }
+    union_capabilities = {tag for tags in capability_sets.values() for tag in tags}
+
+    sustain_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if tags & {"healing", "sustain", "shield", "ally_protect"}
+        or any(effect in skill_windows_by_name.get(name, {}) for effect in {"shield", "ally_protect", "increase_defense"})
+    )
+    defense_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if tags & {"shield", "ally_protect", "increase_defense", "counterattack", "unkillable", "defense_core"}
+        or any(effect in skill_windows_by_name.get(name, {}) for effect in {"shield", "ally_protect", "increase_defense", "counterattack", "block_debuffs", "unkillable"})
+    )
+    attack_down_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if "decrease_attack" in tags or "decrease_attack" in skill_windows_by_name.get(name, {})
+    )
+    defense_down_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if tags & {"decrease_defense", "weaken"} or any(effect in skill_windows_by_name.get(name, {}) for effect in {"decrease_defense", "weaken"})
+    )
+    pressure_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if tags & {"poison", "hp_burn", "boss_pressure"} or any(effect in skill_windows_by_name.get(name, {}) for effect in {"poison", "hp_burn"})
+    )
+    cleanse_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if tags & {"cleanse", "block_debuffs", "cleanse_support", "unkillable"} or any(effect in skill_windows_by_name.get(name, {}) for effect in {"cleanse", "block_debuffs", "unkillable"})
+    )
+    speed_members = sorted(
+        str(member.get("champion_name") or "")
+        for member in members
+        if "speed" in list(member.get("roles") or []) or "speed_boost" in capability_sets.get(str(member.get("champion_name") or ""), set())
+    )
+    weak_affinity_members = sorted(str(member.get("champion_name") or "") for member in members if str(member.get("affinity_matchup") or "") == "weak")
+
+    def best_window(effect_type: str) -> Dict[str, Any]:
+        best: Dict[str, Any] = {}
+        for member in members:
+            name = str(member.get("champion_name") or "")
+            window = dict(skill_windows_by_name.get(name, {}).get(effect_type) or {})
+            if not window:
+                continue
+            quality = float(window.get("quality") or 0.0)
+            if quality > float(best.get("quality") or 0.0):
+                best = {"champion_name": name, **window}
+        return best
+
+    attack_down_window = best_window("decrease_attack")
+    defense_down_window = best_window("decrease_defense")
+    weaken_window = best_window("weaken")
+    block_debuffs_window = best_window("block_debuffs")
+    increase_def_window = best_window("increase_defense")
+    ally_protect_window = best_window("ally_protect")
+    counterattack_window = best_window("counterattack")
+    unkillable_window = best_window("unkillable")
+    hp_burn_window = best_window("hp_burn")
+    poison_window = best_window("poison")
+    cleanse_window = best_window("cleanse")
+    block_buffs_window = best_window("block_buffs")
+    provoke_window = best_window("provoke")
+    hex_window = best_window("hex")
+    decrease_speed_window = best_window("decrease_speed")
+    perfect_veil_window = best_window("perfect_veil")
+    revive_on_death_window = best_window("revive_on_death")
+
+    score = 0.0
+    warnings: List[str] = []
+    notes: List[str] = []
+    build_requirements: List[str] = []
+    simulation: Dict[str, Any] = {}
+    maneater_tune: Dict[str, Any] = {"ready": False, "label": "", "build_requirements": []}
+
+    if target_key.startswith("demon_lord_"):
+        if len(sustain_members) >= 2:
+            score += 18.0
+            notes.append("Sustain presente su piu slot.")
+        elif len(sustain_members) == 1:
+            score += 6.0
+            warnings.append(f"Sustain corto: solo {sustain_members[0]} copre cure/scudi/protezione in modo esplicito.")
+        else:
+            score -= 24.0
+            warnings.append("Mancano cure o sustain affidabile: il team rischia di collassare presto.")
+
+        if len(defense_members) >= 2:
+            score += 16.0
+            notes.append("Difesa di squadra con almeno due strati.")
+        elif len(defense_members) == 1:
+            score += 4.0
+            warnings.append(f"Difesa di squadra leggera: solo {defense_members[0]} porta uno strato difensivo chiaro.")
+        else:
+            score -= 18.0
+            warnings.append("Mancano strati difensivi stabili: serve piu protezione su tutto il team.")
+
+        if float(attack_down_window.get("quality") or 0.0) >= 0.85:
+            score += 18.0
+            notes.append(f"Decrease ATK affidabile da {attack_down_window.get('champion_name')}.")
+        elif float(attack_down_window.get("quality") or 0.0) >= 0.58:
+            score += 8.0
+            warnings.append(f"Decrease ATK affidato a una sola finestra fragile: {attack_down_window.get('champion_name')}.")
+        elif len(attack_down_members) >= 2:
+            score += 18.0
+        elif len(attack_down_members) == 1:
+            score += 8.0
+            warnings.append(f"Decrease ATK affidato a una sola fonte: {attack_down_members[0]}.")
+        else:
+            score -= 32.0
+            warnings.append("Manca Decrease ATK stabile sul boss: cosi il Clan Boss picchia troppo.")
+
+        if float(defense_down_window.get("quality") or 0.0) >= 0.75 or float(weaken_window.get("quality") or 0.0) >= 0.7:
+            score += 10.0 if len(defense_down_members) >= 2 else 6.0
+            if defense_down_window:
+                notes.append(f"Decrease DEF/Weaken con finestra utile da {defense_down_window.get('champion_name') or weaken_window.get('champion_name')}.")
+        elif defense_down_members:
+            score += 4.0
+            warnings.append("Decrease DEF o Weaken presenti ma con finestra non chiarissima.")
+        else:
+            score -= 12.0
+            warnings.append("Manca una copertura chiara di Decrease DEF o Weaken sul boss.")
+
+        if "Geomancer" in names:
+            extra_burners = sorted(
+                name for name in pressure_members if name != "Geomancer" and "hp_burn" in skill_windows_by_name.get(name, {})
+            )
+            if extra_burners:
+                score -= 16.0
+                warnings.append(f"Geomancer rischia di perdere valore se un altro burner sovrascrive il suo HP Burn: {', '.join(extra_burners[:3])}.")
+
+        if float(hp_burn_window.get("quality") or 0.0) >= 0.7 or float(poison_window.get("quality") or 0.0) >= 0.7:
+            score += 8.0 if len(pressure_members) >= 2 else 4.0
+            if hp_burn_window or poison_window:
+                notes.append(
+                    f"Pressione danno appoggiata su {hp_burn_window.get('champion_name') or poison_window.get('champion_name')}."
+                )
+        else:
+            warnings.append("Manca una fonte chiara di Poison o HP Burn per tenere alta la pressione danno.")
+
+        if float(block_debuffs_window.get("quality") or 0.0) >= 0.75 or float(cleanse_window.get("quality") or 0.0) >= 0.75 or float(unkillable_window.get("quality") or 0.0) >= 0.7:
+            score += 8.0
+            if block_debuffs_window:
+                notes.append(f"Risposta a stun/debuff con {block_debuffs_window.get('champion_name')}.")
+        else:
+            score -= 10.0
+            warnings.append("Manca una risposta affidabile a stun/debuff del Clan Boss.")
+
+        if speed_members:
+            score += 6.0 if len(speed_members) >= 2 else 3.0
+        else:
+            score -= 4.0
+            warnings.append("Il team non ha un motore speed davvero evidente.")
+
+        has_maneater = "Maneater" in names
+        has_maneater_partner = any(
+            name in MANEATER_TUNE_PARTNERS or "cooldown_reset" in capability_sets.get(name, set())
+            for name in names
+            if name != "Maneater"
+        )
+        maneater_tune = _evaluate_maneater_tune(members)
+        build_requirements.extend(list(maneater_tune.get("build_requirements") or []))
+        if has_maneater and bool(maneater_tune.get("ready")):
+            score += 24.0
+            notes.append(f"Maneater pronto per tune reale: {maneater_tune.get('label')}.")
+        elif has_maneater and has_maneater_partner:
+            score -= 12.0
+            notes.append("Maneater ha un partner reale, ma la tune non e pronta con speed/book attuali.")
+            warnings.extend(list(maneater_tune.get("warnings") or [])[:2])
+        elif has_maneater:
+            score -= 45.0
+            warnings.append("Maneater senza partner/tune compatibile: cosi l'Unkillable non regge e il pick va penalizzato forte.")
+        else:
+            has_maneater_partner = False
+
+        defense_window_quality = max(
+            float(increase_def_window.get("quality") or 0.0),
+            float(ally_protect_window.get("quality") or 0.0),
+            float(counterattack_window.get("quality") or 0.0),
+            float(unkillable_window.get("quality") or 0.0),
+        )
+        if defense_window_quality >= 0.78:
+            score += 8.0
+            notes.append("Il team ha almeno una finestra difensiva ben cadenzata.")
+        elif defense_members:
+            warnings.append("I layer difensivi ci sono, ma la rotazione non sembra ancora abbastanza stretta.")
+
+        if boss_affinity != "void" and len(weak_affinity_members) >= 2:
+            score -= 12.0
+            warnings.append(f"Troppi campioni in weak affinity per {boss_affinity}: {', '.join(weak_affinity_members[:3])}.")
+
+        if len(members) == 5:
+            simulation = simulate_candidate_team(
+                members,
+                difficulty=_difficulty_from_target_key(target_key),
+                affinity=boss_affinity,
+                max_boss_turns=6,
+            )
+            if simulation.get("ok"):
+                sim_summary = dict(simulation.get("summary") or {})
+                dec_atk_uptime = _to_float(sim_summary.get("decrease_attack_uptime_pct"))
+                block_stuns = _to_float(sim_summary.get("blocked_stuns_pct"))
+                def_uptime = max(
+                    _to_float(sim_summary.get("increase_def_uptime_pct")),
+                    _to_float(sim_summary.get("ally_protect_uptime_pct")),
+                    _to_float(sim_summary.get("counterattack_uptime_pct")),
+                )
+                if dec_atk_uptime >= 90.0:
+                    score += 12.0
+                    notes.append(f"Sim: Decrease ATK regge bene ({dec_atk_uptime:.0f}%).")
+                elif dec_atk_uptime >= 65.0:
+                    score += 3.0
+                    warnings.append(f"Sim: Decrease ATK coperto solo a tratti ({dec_atk_uptime:.0f}%).")
+                else:
+                    score -= 20.0
+                    warnings.append(f"Sim: Decrease ATK crolla nella rotazione ({dec_atk_uptime:.0f}%).")
+
+                if block_stuns >= 80.0:
+                    score += 6.0
+                    notes.append(f"Sim: stun gestito bene ({block_stuns:.0f}% bloccati).")
+                elif block_stuns <= 20.0:
+                    score -= 8.0
+                    warnings.append("Sim: lo stun passa quasi sempre, quindi la rotazione e fragile.")
+
+                if def_uptime >= 80.0:
+                    score += 6.0
+                elif def_uptime < 45.0:
+                    score -= 8.0
+                    warnings.append("Sim: layer difensivi troppo intermittenti sulle AOE.")
+
+                warnings.extend(list(sim_summary.get("warnings") or [])[:3])
+            else:
+                warnings.append("Simulazione Clan Boss non riuscita sulla squadra completa proposta.")
+    elif target_key.startswith("hydra_"):
+        hydra_rotation = HYDRA_ROTATION_RULES.get(str(boss_affinity or "").strip().lower()) or HYDRA_ROTATION_RULES["rotation_1"]
+        block_buffs_members = sorted(
+            name
+            for name, tags in capability_sets.items()
+            if "block_buffs" in tags or "block_buffs" in skill_windows_by_name.get(name, {})
+        )
+        provoke_members = sorted(
+            name
+            for name, tags in capability_sets.items()
+            if "provoke" in tags or "provoke" in skill_windows_by_name.get(name, {})
+        )
+        hex_members = sorted(
+            name
+            for name, tags in capability_sets.items()
+            if "hex" in tags or "hex" in skill_windows_by_name.get(name, {})
+        )
+        revive_members = sorted(
+            name
+            for name, tags in capability_sets.items()
+            if "revive" in roles_by_name.get(name, set()) or "revive_on_death" in tags
+        )
+        mischief_members = sorted(
+            name
+            for name, tags in capability_sets.items()
+            if "mischief_tank" in tags or "perfect_veil" in tags or "perfect_veil" in skill_windows_by_name.get(name, {})
+        )
+
+        if len(sustain_members) >= 3:
+            score += 16.0
+            notes.append("Hydra con sustain distribuito su piu slot.")
+        elif len(sustain_members) >= 2:
+            score += 8.0
+        else:
+            score -= 20.0
+            warnings.append("Hydra senza sustain reale su almeno due slot: team troppo fragile.")
+
+        if float(block_buffs_window.get("quality") or 0.0) >= 0.72:
+            score += 18.0
+            notes.append(f"Block Buffs affidabile da {block_buffs_window.get('champion_name')}.")
+        elif block_buffs_members:
+            score += 6.0
+            warnings.append(f"Block Buffs presente ma non ancora molto solido: {block_buffs_members[0]}.")
+        else:
+            score -= 26.0
+            warnings.append("Manca Block Buffs: Hydra rischia di andare fuori controllo.")
+
+        if float(provoke_window.get("quality") or 0.0) >= 0.58:
+            score += 12.0
+            notes.append(f"Provoke riconosciuto su {provoke_window.get('champion_name')}.")
+        elif provoke_members:
+            score += 4.0
+            warnings.append("Provoke c'e, ma la finestra non e ancora chiarissima.")
+        else:
+            score -= 18.0
+            warnings.append("Manca Provoke: una testa chiave puo rompere il fight.")
+
+        if float(hex_window.get("quality") or 0.0) >= 0.6:
+            score += 10.0
+            notes.append(f"Hex disponibile con {hex_window.get('champion_name')}.")
+        elif hex_members:
+            score += 4.0
+        else:
+            score -= 10.0
+            warnings.append("Manca Hex: liberare il divorato e spingere il danno sara piu difficile.")
+
+        if revive_members:
+            score += 8.0
+        else:
+            warnings.append("Nessun revive esplicito: recover piu fragile nei run lunghi.")
+
+        if mischief_members:
+            score += 7.0
+            if perfect_veil_window:
+                notes.append(f"Gestione Mischief supportata da {perfect_veil_window.get('champion_name')}.")
+        else:
+            warnings.append("Manca una risposta evidente a Mischief tank / Perfect Veil.")
+
+        if float(decrease_speed_window.get("quality") or 0.0) >= 0.58:
+            score += 4.0
+        if speed_members:
+            score += 4.0 if len(speed_members) >= 2 else 2.0
+        else:
+            warnings.append("Hydra senza motore speed evidente: rotazione piu rigida.")
+
+        if "Decay" in hydra_rotation["starter_heads"] and not provoke_members:
+            score -= 14.0
+            warnings.append(f"{hydra_rotation['label']}: Decay parte subito e manca un Provoke affidabile.")
+        if "Mischief" in hydra_rotation["starter_heads"] and not mischief_members and not block_buffs_members:
+            score -= 12.0
+            warnings.append(f"{hydra_rotation['label']}: Mischief in apertura senza tank dedicato o Block Buffs stabile.")
+        if hydra_rotation.get("needs_perfect_veil") and not (
+            perfect_veil_window
+            or any("perfect_veil" in capability_sets.get(name, set()) for name in capability_sets)
+            or cleanse_members
+        ):
+            score -= 10.0
+            warnings.append(f"{hydra_rotation['label']}: Torment in apertura, ma non vedo Perfect Veil o una risposta pulita.")
+        if hydra_rotation.get("needs_wrath_mitigation") and not (
+            attack_down_members
+            or defense_members
+            or float(ally_protect_window.get('quality') or 0.0) >= 0.58
+        ):
+            score -= 10.0
+            warnings.append(f"{hydra_rotation['label']}: Wrath in apertura senza mitigazione danni abbastanza chiara.")
+        notes.append(f"{hydra_rotation['label']} starter: {', '.join(hydra_rotation['starter_heads'])}.")
+    elif target_key.startswith("iron_twins_"):
+        decrease_speed_members = sorted(
+            name
+            for name, tags in capability_sets.items()
+            if "decrease_speed" in tags or "decrease_speed" in skill_windows_by_name.get(name, {})
+        )
+        revive_on_death_members = sorted(
+            name
+            for name, tags in capability_sets.items()
+            if "revive_on_death" in tags or "revive_on_death" in skill_windows_by_name.get(name, {})
+        )
+
+        if len(sustain_members) >= 2:
+            score += 14.0
+            notes.append("Iron Twins con sustain su piu slot.")
+        elif len(sustain_members) == 1:
+            score += 4.0
+            warnings.append(f"Sustain leggero per Iron Twins: solo {sustain_members[0]}.")
+        else:
+            score -= 18.0
+            warnings.append("Manca sustain chiaro per Iron Twins.")
+
+        if float(decrease_speed_window.get("quality") or 0.0) >= 0.58:
+            score += 14.0
+            notes.append(f"Decrease SPD affidabile da {decrease_speed_window.get('champion_name')}.")
+        elif decrease_speed_members:
+            score += 5.0
+            warnings.append("Decrease SPD presente ma non ancora molto stabile.")
+        else:
+            score -= 20.0
+            warnings.append("Manca Decrease SPD: Iron Twins perde molto controllo.")
+
+        if float(block_debuffs_window.get("quality") or 0.0) >= 0.72 or float(cleanse_window.get("quality") or 0.0) >= 0.72:
+            score += 10.0
+        else:
+            score -= 8.0
+            warnings.append("Manca una risposta affidabile a debuff e finestre punitive di Iron Twins.")
+
+        if float(hp_burn_window.get("quality") or 0.0) >= 0.7 or "Geomancer" in names:
+            score += 8.0
+        else:
+            warnings.append("Manca una fonte chiara di pressione single-target utile per Iron Twins.")
+
+        if revive_on_death_members or float(revive_on_death_window.get("quality") or 0.0) >= 0.5:
+            score += 6.0
+            notes.append("Archetipo revive-on-death disponibile come piano difensivo.")
+
+        if boss_affinity != "void" and len(weak_affinity_members) >= 2:
+            score -= 10.0
+            warnings.append(f"Troppi campioni in weak affinity per Iron Twins {boss_affinity}: {', '.join(weak_affinity_members[:3])}.")
+    return {
+        "score": round(score, 2),
+        "sustain_members": sustain_members,
+        "defense_members": defense_members,
+        "attack_down_members": attack_down_members,
+        "defense_down_members": defense_down_members,
+        "pressure_members": pressure_members,
+        "cleanse_members": cleanse_members,
+        "speed_members": speed_members,
+        "weak_affinity_members": weak_affinity_members,
+        "has_maneater_tune": bool(maneater_tune.get("ready")) if target_key.startswith("demon_lord_") else False,
+        "maneater_tune_label": str(maneater_tune.get("label") or ""),
+        "build_requirements": build_requirements[:6],
+        "simulation": simulation,
+        "warnings": warnings[:8],
+        "notes": notes[:6],
+        "capability_coverage": sorted(union_capabilities),
+    }
+
+
+def _evaluate_team_total_score(
+    team: Sequence[Mapping[str, Any]],
+    profile: OptimizerBossProfile,
+    target_key: str,
+    thresholds: Mapping[str, float],
+    boss_affinity: str,
+) -> float:
+    covered_roles = {str(role) for member in team for role in list(member.get("roles") or [])}
+    required_coverage = sum(
+        1 for requirement in profile.required_role_groups if any(role in requirement.acceptable_roles for role in covered_roles)
+    )
+    valuable_coverage = sum(1 for role in profile.valuable_roles if role in covered_roles)
+    base_score = sum(float(member.get("score") or 0.0) for member in team)
+    team_fit = _evaluate_team_fit(team, target_key=target_key, thresholds=thresholds, boss_affinity=boss_affinity)
+    return base_score + (required_coverage * 10.0) + (valuable_coverage * 2.0) + float(team_fit.get("score") or 0.0)
+
+
+def _refine_team_selection(
+    selected: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]],
+    profile: OptimizerBossProfile,
+    target_key: str,
+    thresholds: Mapping[str, float],
+    boss_affinity: str,
+) -> List[Dict[str, Any]]:
+    best_team = [dict(member) for member in selected]
+    if not best_team:
+        return []
+
+    best_score = _evaluate_team_total_score(
+        best_team,
+        profile=profile,
+        target_key=target_key,
+        thresholds=thresholds,
+        boss_affinity=boss_affinity,
+    )
+
+    for _ in range(2):
+        improved = False
+        best_names = {str(member.get("champion_name") or "") for member in best_team}
+        for index, outgoing in enumerate(list(best_team)):
+            outgoing_name = str(outgoing.get("champion_name") or "")
+            for candidate in candidates:
+                candidate_name = str(candidate.get("champion_name") or "")
+                if candidate_name in best_names and candidate_name != outgoing_name:
+                    continue
+                proposal = list(best_team)
+                proposal[index] = dict(candidate)
+                proposal_score = _evaluate_team_total_score(
+                    proposal,
+                    profile=profile,
+                    target_key=target_key,
+                    thresholds=thresholds,
+                    boss_affinity=boss_affinity,
+                )
+                if proposal_score > (best_score + 0.5):
+                    best_team = proposal
+                    best_score = proposal_score
+                    best_names = {str(member.get("champion_name") or "") for member in best_team}
+                    improved = True
+        if not improved:
+            break
+
+    return sorted(best_team, key=lambda item: (-float(item.get("score") or 0.0), str(item.get("champion_name") or "").lower()))
 
 
 def _build_reasons(
@@ -551,23 +1698,47 @@ def _build_reasons(
 
 def _build_risk_flags(
     target_key: str,
+    champion_name: str,
     roles: Sequence[str],
+    capability_tags: Sequence[str],
     stat_signals: Mapping[str, float],
     affinity_state: str,
     thresholds: Mapping[str, float],
 ) -> List[str]:
     risks: List[str] = []
+    role_set = set(roles)
     required_speed = _to_float(thresholds.get("required_speed"))
     required_accuracy = _to_float(thresholds.get("required_accuracy"))
+    required_resistance = _to_float(thresholds.get("required_resistance"))
     survival_floor = _to_float(thresholds.get("survival_floor"))
 
     if target_key.startswith("demon_lord_"):
         if stat_signals.get("speed_raw", 0.0) < required_speed:
             risks.append(f"SPD ancora bassa per il livello scelto ({int(required_speed)}+ consigliata).")
-        if any(role in {"debuffer", "poisoner", "burner", "decrease_attack"} for role in roles) and stat_signals.get("accuracy_raw", 0.0) < required_accuracy:
+        if any(role in {"debuffer", "poisoner", "burner", "decrease_attack"} for role in role_set) and stat_signals.get("accuracy_raw", 0.0) < required_accuracy:
             risks.append(f"ACC probabilmente corta per tenere i debuff ({int(required_accuracy)}+ consigliata).")
-        if any(role in {"survival", "ally_protect", "support", "cleanse"} for role in roles) and stat_signals.get("survival", 0.0) < survival_floor:
+        if any(role in {"survival", "ally_protect", "support", "cleanse"} for role in role_set) and stat_signals.get("survival", 0.0) < survival_floor:
             risks.append("Tenuta ancora fragile per fight lunghi.")
+        if champion_name == "Maneater" and "unkillable" in capability_tags:
+            risks.append("Maneater vale davvero solo dentro una tune con partner compatibile: fuori comp va ridimensionato.")
+    elif target_key.startswith("hydra_"):
+        if stat_signals.get("speed_raw", 0.0) < required_speed:
+            risks.append(f"SPD corta per Hydra {target_key.split('_', 1)[1]} ({int(required_speed)}+ euristica).")
+        if any(role in {"debuffer", "block_buffs", "provoke", "hexer", "decrease_speed"} for role in role_set) and stat_signals.get("accuracy_raw", 0.0) < required_accuracy:
+            risks.append(f"ACC corta per utility Hydra ({int(required_accuracy)}+ euristica).")
+        if any(role in {"support", "survival", "cleanse", "revive", "mischief_tank"} for role in role_set) and stat_signals.get("survival", 0.0) < survival_floor:
+            risks.append("Tenuta bassa per un fight Hydra lungo e sporco.")
+        if "mischief_tank" in role_set and required_resistance > 0 and _to_float(stat_signals.get("res_raw")) < required_resistance:
+            risks.append(f"RES corta per ruolo Mischief tank ({int(required_resistance)}+ euristica).")
+    elif target_key.startswith("iron_twins_"):
+        if stat_signals.get("speed_raw", 0.0) < required_speed:
+            risks.append(f"SPD corta per Iron Twins ({int(required_speed)}+ euristica).")
+        if any(role in {"debuffer", "decrease_speed", "block_buffs", "burner"} for role in role_set) and stat_signals.get("accuracy_raw", 0.0) < required_accuracy:
+            risks.append(f"ACC corta per Iron Twins ({int(required_accuracy)}+ euristica).")
+        if any(role in {"support", "survival", "cleanse", "ally_protect", "revive_on_death"} for role in role_set) and stat_signals.get("survival", 0.0) < survival_floor:
+            risks.append("Tenuta ancora corta per le finestre punitive di Iron Twins.")
+        if required_resistance > 0 and any(role in {"support", "survival", "revive_on_death"} for role in role_set) and _to_float(stat_signals.get("res_raw")) < required_resistance:
+            risks.append(f"RES corta per stage alta Iron Twins ({int(required_resistance)}+ euristica).")
     if affinity_state == "weak":
         risks.append("Weak affinity contro il boss: possibile calo consistenza su debuff e danno.")
     return risks
@@ -600,11 +1771,11 @@ def _compute_role_bonus(roles: Sequence[str], stat_signals: Mapping[str, float])
     bonus = 0.0
     if "speed" in role_set:
         bonus += 8.0 * speed
-    if role_set & {"debuffer", "poisoner", "burner", "decrease_attack"}:
+    if role_set & {"debuffer", "poisoner", "burner", "decrease_attack", "block_buffs", "provoke", "hexer", "decrease_speed"}:
         bonus += 9.0 * ((speed + accuracy) / 2.0)
-    if role_set & {"support", "survival", "cleanse", "ally_protect", "unkillable"}:
+    if role_set & {"support", "survival", "cleanse", "ally_protect", "unkillable", "mischief_tank", "revive", "revive_on_death"}:
         bonus += 10.0 * ((survival * 0.7) + (speed * 0.3))
-    if role_set & {"damage", "poisoner", "burner", "counterattack"}:
+    if role_set & {"damage", "poisoner", "burner", "counterattack", "hexer"}:
         bonus += 12.0 * ((damage * 0.65) + (speed * 0.2) + (accuracy * 0.15))
     return bonus
 
@@ -672,6 +1843,7 @@ def _apply_reliability_to_signals(
         "damage": round(_to_float(stat_signals.get("damage")) * _to_float(weights.get("damage", 1.0)), 3),
         "speed_raw": round(_to_float(stat_signals.get("speed_raw")), 2),
         "accuracy_raw": round(_to_float(stat_signals.get("accuracy_raw")), 2),
+        "res_raw": round(_to_float(stat_signals.get("res_raw")), 2),
     }
 
 
@@ -701,11 +1873,16 @@ def _compute_stat_signals(stats: Mapping[str, float], thresholds: Mapping[str, f
         "damage": round(damage_signal, 3),
         "speed_raw": round(spd, 2),
         "accuracy_raw": round(acc, 2),
+        "res_raw": round(res, 2),
     }
 
 
 def _infer_default_build(roles: Sequence[str]) -> str:
     role_set = set(roles)
+    if role_set & {"block_buffs", "provoke", "hexer", "decrease_speed"}:
+        return "debuffer_acc_spd"
+    if role_set & {"revive", "revive_on_death", "mischief_tank"}:
+        return "support_tank"
     if "poisoner" in role_set:
         return "poisoner"
     if "burner" in role_set:
@@ -718,7 +1895,16 @@ def _infer_default_build(roles: Sequence[str]) -> str:
         return "speed_tuned_support"
     if "damage" in role_set:
         return "clan_boss_dps"
-    return "support_general"
+    return "support_tank"
+
+
+def optimizer_area_region_for_boss(boss_key: str) -> str:
+    normalized = str(boss_key or "").strip().lower()
+    if normalized == "hydra":
+        return "hydra"
+    if normalized == "iron_twins":
+        return "iron_twins"
+    return "clan_boss"
 
 
 def resolve_optimizer_context(
@@ -740,6 +1926,18 @@ def resolve_optimizer_context(
         encounter_key = DEMON_LORD_ENCOUNTER_KEYS.get(effective_level, "demon_lord_unm")
         profile = BOSS_PROFILES["demon_lord_unm"]
         thresholds = dict(LEVEL_THRESHOLDS.get(effective_level, LEVEL_THRESHOLDS["ultra_nightmare"]))
+        return family, profile, effective_level, effective_affinity, encounter_key, thresholds
+
+    if family.key == "hydra":
+        encounter_key = f"hydra_{effective_level}"
+        profile = BOSS_PROFILES["hydra"]
+        thresholds = dict(HYDRA_LEVEL_THRESHOLDS.get(effective_level, HYDRA_LEVEL_THRESHOLDS["hard"]))
+        return family, profile, effective_level, effective_affinity, encounter_key, thresholds
+
+    if family.key == "iron_twins":
+        encounter_key = f"iron_twins_{effective_level}"
+        profile = BOSS_PROFILES["iron_twins"]
+        thresholds = dict(IRON_TWINS_LEVEL_THRESHOLDS.get(effective_level, IRON_TWINS_LEVEL_THRESHOLDS["stage_15"]))
         return family, profile, effective_level, effective_affinity, encounter_key, thresholds
 
     encounter_key = family.key
@@ -783,6 +1981,10 @@ def _resolve_hint_score(hint: ChampionHint | None, target_key: str) -> float:
         return score
     if target_key.startswith("demon_lord_"):
         return float(hint.boss_scores.get("demon_lord_unm") or 0.0)
+    if target_key.startswith("hydra_"):
+        return float(hint.boss_scores.get("hydra_hard") or hint.boss_scores.get("hydra") or 0.0)
+    if target_key.startswith("iron_twins_"):
+        return float(hint.boss_scores.get("iron_twins_stage_15") or hint.boss_scores.get("iron_twins") or 0.0)
     return 0.0
 
 
@@ -830,6 +2032,179 @@ def _group_effect_texts_by_name(skill_rows: Iterable[sqlite3.Row], effect_rows: 
     return grouped
 
 
+def _group_skills_by_name(skill_rows: Iterable[sqlite3.Row], effect_rows: Iterable[sqlite3.Row]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for row in skill_rows:
+        champion_name = str(row["champion_name"] or "")
+        slot = str(row["slot"] or "")
+        champion_skills = grouped.setdefault(champion_name, {})
+        champion_skills[slot] = {
+            "slot": slot,
+            "skill_order": int(row["skill_order"] or 0),
+            "skill_id": str(row["skill_id"] or ""),
+            "skill_name": str(row["skill_name"] or ""),
+            "cooldown": row["cooldown"],
+            "booked_cooldown": row["booked_cooldown"],
+            "skill_type": str(row["skill_type"] or ""),
+            "description": str(row["description"] or ""),
+            "description_clean": str(row["description_clean"] or ""),
+            "effects": [],
+        }
+    for row in effect_rows:
+        champion_name = str(row["champion_name"] or "")
+        slot = str(row["slot"] or "")
+        champion_skills = grouped.setdefault(champion_name, {})
+        skill = champion_skills.setdefault(
+            slot,
+            {
+                "slot": slot,
+                "skill_order": _slot_sort_key(slot),
+                "skill_id": "",
+                "skill_name": slot,
+                "cooldown": None,
+                "booked_cooldown": None,
+                "skill_type": "",
+                "description": "",
+                "description_clean": "",
+                "effects": [],
+            },
+        )
+        skill["effects"].append(
+            {
+                "effect_order": int(row["effect_order"] or 0),
+                "effect_type": str(row["effect_type"] or ""),
+                "target": str(row["target"] or ""),
+                "effect_value": _to_float(row["effect_value"]),
+                "duration": int(row["duration"] or 0),
+                "chance": _to_float(row["chance"] or 0.0),
+                "condition_text": str(row["condition_text"] or ""),
+            }
+        )
+    return {
+        champion_name: sorted(
+            (
+                {
+                    **skill,
+                    "effects": sorted(
+                        list(skill.get("effects") or []),
+                        key=lambda item: (int(item.get("effect_order") or 0), str(item.get("effect_type") or "")),
+                    ),
+                }
+                for skill in champion_skills.values()
+            ),
+            key=lambda item: (_slot_sort_key(str(item.get("slot") or "")), int(item.get("skill_order") or 0)),
+        )
+        for champion_name, champion_skills in grouped.items()
+    }
+
+
+def _normalize_effect_type(effect_type: Any) -> str:
+    normalized = _normalize_token(effect_type)
+    return EFFECT_TYPE_ALIASES.get(normalized, normalized)
+
+
+def _effective_skill_cooldown(skill: Mapping[str, Any], booked: bool) -> int:
+    if booked and skill.get("booked_cooldown") is not None:
+        return max(0, int(skill.get("booked_cooldown") or 0))
+    return max(0, int(skill.get("cooldown") or 0))
+
+
+def _estimate_window_quality(
+    effect_type: str,
+    slot: str,
+    cooldown: int,
+    duration: int,
+    chance: float,
+) -> float:
+    normalized_slot = str(slot or "").upper()
+    if normalized_slot.startswith("P"):
+        base = 0.95
+    elif cooldown <= 0 or normalized_slot == "A1":
+        base = 0.88
+    elif cooldown <= 3:
+        base = 0.82
+    elif cooldown == 4:
+        base = 0.68
+    elif cooldown == 5:
+        base = 0.54
+    else:
+        base = 0.4
+
+    if duration >= 2 and effect_type not in {"cleanse", "cooldown_reset"}:
+        base += 0.1
+    elif duration == 1 and effect_type in {"decrease_attack", "block_debuffs", "increase_defense", "ally_protect", "counterattack", "unkillable"}:
+        base -= 0.08
+
+    normalized_chance = chance if chance > 0 else 100.0
+    return _clamp(base * (normalized_chance / 100.0), 0.0, 1.15)
+
+
+def _infer_skill_effects_from_text(skill: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    text = " ".join(
+        [
+            _normalize_token(skill.get("skill_name")),
+            _normalize_token(skill.get("description_clean")),
+            _normalize_token(skill.get("description")),
+        ]
+    )
+    inferred: List[Dict[str, Any]] = []
+    for keywords, effect_type in (
+        (("decrease attack", "decrease atk"), "decrease_attack"),
+        (("decrease def", "decrease defense"), "decrease_defense"),
+        (("weaken",), "weaken"),
+        (("poison",), "poison"),
+        (("hp burn", "burn"), "hp_burn"),
+        (("block debuffs",), "block_debuffs"),
+        (("increase def", "increase defense"), "increase_defense"),
+        (("ally protect",), "ally_protect"),
+        (("counterattack", "counter attack"), "counterattack"),
+        (("unkillable",), "unkillable"),
+        (("shield",), "shield"),
+        (("remove debuff", "remove all debuffs", "cleanse"), "cleanse"),
+        (("decrease cooldown", "cooldown"), "cooldown_reset"),
+        (("increase speed", "turn meter", "fill turn meter"), "speed_boost"),
+    ):
+        if any(keyword in text for keyword in keywords):
+            inferred.append({"effect_type": effect_type})
+    return inferred
+
+
+def _summarize_skill_windows(skills: Sequence[Mapping[str, Any]], booked: bool) -> Dict[str, Dict[str, Any]]:
+    windows: Dict[str, Dict[str, Any]] = {}
+    for skill in skills:
+        slot = str(skill.get("slot") or "")
+        cooldown = _effective_skill_cooldown(skill, booked=booked)
+        skill_name = str(skill.get("skill_name") or slot)
+        raw_effects = list(skill.get("effects") or [])
+        if not raw_effects:
+            raw_effects = _infer_skill_effects_from_text(skill)
+        for effect in raw_effects:
+            effect_type = _normalize_effect_type(effect.get("effect_type"))
+            if not effect_type:
+                continue
+            duration = max(0, int(effect.get("duration") or WINDOW_DEFAULT_DURATIONS.get(effect_type, 0)))
+            chance = _to_float(effect.get("chance") or 0.0)
+            quality = _estimate_window_quality(
+                effect_type=effect_type,
+                slot=slot,
+                cooldown=cooldown,
+                duration=duration,
+                chance=chance,
+            )
+            current = windows.get(effect_type)
+            candidate = {
+                "slot": slot,
+                "skill_name": skill_name,
+                "cooldown": cooldown,
+                "duration": duration,
+                "chance": 100.0 if chance <= 0 else chance,
+                "quality": round(quality, 3),
+            }
+            if current is None or float(candidate["quality"]) > float(current.get("quality") or 0.0):
+                windows[effect_type] = candidate
+    return windows
+
+
 def _map_account_roles(account_roles: Iterable[str]) -> Set[str]:
     roles: Set[str] = set()
     for account_role in account_roles:
@@ -860,6 +2235,17 @@ def _roster_sort_key(row: sqlite3.Row) -> tuple[int, int, int, int, int]:
         int(row["awakening_level"] or 0),
         int(row["relic_count"] or 0),
     )
+
+
+def _slot_sort_key(slot: str) -> int:
+    normalized = str(slot or "").upper()
+    if normalized.startswith("A"):
+        suffix = normalized[1:]
+        return int(suffix) if suffix.isdigit() else 50
+    if normalized.startswith("P"):
+        suffix = normalized[1:]
+        return 100 + (int(suffix) if suffix.isdigit() else 0)
+    return 999
 
 
 def _normalize_token(value: Any) -> str:
