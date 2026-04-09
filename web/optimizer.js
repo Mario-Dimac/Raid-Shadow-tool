@@ -3,6 +3,7 @@ const state = {
   selectedBoss: "demon_lord",
   selectedAffinity: "void",
   selectedLevel: "ultra_nightmare",
+  selectedSource: "optimizer",
   report: null,
   bossIntel: null,
   trainingOverview: null,
@@ -17,6 +18,10 @@ const state = {
   equipInGameLoading: false,
   equipInGameResult: null,
   equipQueueIndex: 0,
+  refreshGameLoading: false,
+  optimizerSimulation: null,
+  optimizerSimulationLoading: false,
+  memberOpenerPrefs: {},
   snapshotStatus: null,
   saveSnapshotLoading: false,
   saveSnapshotResult: null,
@@ -31,6 +36,7 @@ const statusEl = document.getElementById("optimizerStatus");
 const bossEl = document.getElementById("optimizerBoss");
 const affinityEl = document.getElementById("optimizerAffinity");
 const levelEl = document.getElementById("optimizerLevel");
+const sourceEl = document.getElementById("optimizerSource");
 const reloadBtn = document.getElementById("optimizerReloadBtn");
 const SET_LABELS = {
   "Attack Speed": "Speed",
@@ -95,8 +101,27 @@ const SLOT_LABELS = {
   banner: "Stendardo",
 };
 
-async function fetchJson(url, options) {
-  const response = await fetch(url, options);
+async function fetchJson(url, options = {}) {
+  const { timeoutMs = 0, ...fetchOptions } = options || {};
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  let timeoutHandle = null;
+  if (controller) {
+    timeoutHandle = window.setTimeout(() => controller.abort(), timeoutMs);
+    fetchOptions.signal = controller.signal;
+  }
+  let response;
+  try {
+    response = await fetch(url, fetchOptions);
+  } catch (error) {
+    if (controller && error?.name === "AbortError") {
+      throw new Error("Richiesta scaduta: il bridge HH sta rispondendo troppo lentamente. Controlla in game e riprova.");
+    }
+    throw error;
+  } finally {
+    if (timeoutHandle !== null) {
+      window.clearTimeout(timeoutHandle);
+    }
+  }
   const text = await response.text();
   let payload = {};
   try {
@@ -152,6 +177,132 @@ function formatDurationMs(value) {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = Math.round(seconds % 60);
   return `${minutes}m ${remainingSeconds}s`;
+}
+
+async function refreshGearAndReloadOptimizer() {
+  state.refreshGameLoading = true;
+  renderDetails();
+  setStatus("Riallineamento equip dal game in corso...");
+  try {
+    const payload = await fetchJson("/api/refresh-gear", {
+      method: "POST",
+      timeoutMs: 180000,
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    await loadReport();
+    const imported = Number(payload?.summary?.gear_items || 0);
+    setStatus(`Equip riallineato dal game. Pezzi nel DB: ${formatNumber(imported, 0)}.`);
+  } catch (error) {
+    setStatus(error.message || "Impossibile riallineare l'equip dal game.", true);
+  } finally {
+    state.refreshGameLoading = false;
+    renderDetails();
+  }
+}
+
+function openerPreferenceStorageKey() {
+  return [
+    "cbforge",
+    "optimizer",
+    "openers",
+    state.selectedBoss || "demon_lord",
+    state.selectedLevel || "ultra_nightmare",
+    state.selectedAffinity || "void",
+    state.selectedSource || "optimizer",
+  ].join("::");
+}
+
+function loadSavedOpenerPreferences() {
+  try {
+    const raw = window.localStorage.getItem(openerPreferenceStorageKey());
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function persistOpenerPreferences() {
+  try {
+    window.localStorage.setItem(openerPreferenceStorageKey(), JSON.stringify(state.memberOpenerPrefs || {}));
+  } catch (_error) {
+    // Ignore localStorage failures: the page should remain usable even in private mode.
+  }
+}
+
+function syncMemberOpenerPreferences() {
+  const stored = loadSavedOpenerPreferences();
+  const allowed = new Set(["AUTO", "A1", "A2", "A3", "A4", "NONE"]);
+  const next = {};
+  (state.report?.selected_team || []).forEach((member) => {
+    const championName = String(member?.champion_name || "").trim();
+    const requested = String(stored?.[championName] || "AUTO").trim().toUpperCase();
+    next[championName] = allowed.has(requested) ? requested : "AUTO";
+  });
+  state.memberOpenerPrefs = next;
+}
+
+function getMemberOpenerPreference(championName) {
+  return String((state.memberOpenerPrefs || {})[championName] || "AUTO").toUpperCase();
+}
+
+function setMemberOpenerPreference(championName, openerSlot) {
+  const normalizedName = String(championName || "").trim();
+  if (!normalizedName) return;
+  const normalizedSlot = String(openerSlot || "AUTO").trim().toUpperCase() || "AUTO";
+  state.memberOpenerPrefs = {
+    ...(state.memberOpenerPrefs || {}),
+    [normalizedName]: normalizedSlot,
+  };
+  persistOpenerPreferences();
+}
+
+function getSelectedTeamCandidate(championName) {
+  return (state.report?.selected_team || []).find((member) => member.champion_name === championName) || null;
+}
+
+function getTeamLoadoutMember(championName) {
+  return (state.teamLoadout?.team || []).find((member) => member.champion_name === championName) || null;
+}
+
+async function refreshOptimizerSimulation(options = {}) {
+  const { silent = false } = options || {};
+  const team = state.report?.selected_team || [];
+  if (state.selectedBoss !== "demon_lord" || !team.length) {
+    state.optimizerSimulation = null;
+    state.optimizerSimulationLoading = false;
+    return;
+  }
+  state.optimizerSimulationLoading = true;
+  renderDetails();
+  if (!silent) {
+    setStatus("Simulazione optimizer con opener personalizzato in corso...");
+  }
+  try {
+    state.optimizerSimulation = await fetchJson("/api/team-optimizer-simulate", {
+      method: "POST",
+      timeoutMs: 30000,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        boss: state.selectedBoss,
+        level: state.selectedLevel,
+        affinity: state.selectedAffinity,
+        source: state.selectedSource,
+        max_boss_turns: 6,
+        opener_preferences: state.memberOpenerPrefs || {},
+      }),
+    });
+    if (!silent) {
+      setStatus("Simulazione opener aggiornata sull'attuale team selezionato.");
+    }
+  } catch (error) {
+    state.optimizerSimulation = null;
+    setStatus(error.message || "Impossibile aggiornare la simulazione opener.", true);
+  } finally {
+    state.optimizerSimulationLoading = false;
+    renderDetails();
+  }
 }
 
 function getMemberChangeSummary(member) {
@@ -272,6 +423,25 @@ function renderLevelSelect() {
   levelEl.value = current;
 }
 
+function renderSourceSelect() {
+  const options = state.selectedBoss === "demon_lord"
+    ? [
+      { key: "optimizer", label: "Optimizer stabile" },
+      { key: "optimizer_push", label: "Optimizer push 70M" },
+      { key: "ai", label: "AI stabile" },
+      { key: "ai_push", label: "AI push 70M" },
+    ]
+    : [{ key: "optimizer", label: "Optimizer" }];
+  sourceEl.innerHTML = options.map((item) => (
+    `<option value="${escapeHtml(item.key)}">${escapeHtml(item.label)}</option>`
+  )).join("");
+  const current = options.some((item) => item.key === state.selectedSource)
+    ? state.selectedSource
+    : options[0].key;
+  state.selectedSource = current;
+  sourceEl.value = current;
+}
+
 function buildCandidatePills(candidate) {
   const pills = [];
   if (candidate.default_build) pills.push(`<span class="pill gold">${escapeHtml(candidate.default_build)}</span>`);
@@ -289,19 +459,19 @@ function isSelectedTeamChampion(name) {
 }
 
 function renderRoster() {
-  const candidates = state.report?.candidates || [];
-  if (!candidates.length) {
-    rosterEl.innerHTML = '<div class="empty">Nessun candidato disponibile nel roster corrente.</div>';
+  const selectedTeam = state.report?.selected_team || [];
+  if (!selectedTeam.length) {
+    rosterEl.innerHTML = '<div class="empty">Nessun team proposto disponibile.</div>';
     return;
   }
-  rosterEl.innerHTML = candidates.map((candidate) => `
+  rosterEl.innerHTML = selectedTeam.map((candidate, index) => `
     <button class="champ-row ${state.selectedChampion === candidate.champion_name ? "active" : ""}" data-name="${escapeHtml(candidate.champion_name)}">
       <div class="champ-topline">
-        <div class="champ-name">${escapeHtml(candidate.champion_name)}</div>
-        <div class="pill ${isSelectedTeamChampion(candidate.champion_name) ? "ok" : ""}">${formatNumber(candidate.score, 1)}</div>
+        <div class="champ-name">${escapeHtml(`${index + 1}. ${candidate.champion_name}`)}</div>
+        <div class="pill ok">${formatNumber(candidate.score, 1)}</div>
       </div>
       <div class="pillbar">
-        ${isSelectedTeamChampion(candidate.champion_name) ? '<span class="pill ok">Team Proposto</span>' : ""}
+        <span class="pill ok">Team Proposto</span>
         ${buildCandidatePills(candidate)}
       </div>
     </button>
@@ -319,21 +489,49 @@ function renderSummary() {
   if (!state.report) {
     summaryEl.innerHTML = [
       metricCard("Target", "-", "In attesa del report"),
-      metricCard("Team", "-", "Proposta non disponibile"),
-      metricCard("Coverage", "-", "Ruoli chiave"),
-      metricCard("Rischi", "-", "Alert principali"),
+      metricCard("Modalita", "-", "Ranking non disponibile"),
+      metricCard("Storico", "-", "Nessuna shell"),
+      metricCard("Alert", "-", "Warning principali"),
     ].join("");
     return;
   }
   const team = state.report.selected_team || [];
-  const covered = (state.report.coverage || []).filter((item) => item.covered).length;
-  const total = (state.report.coverage || []).length;
+  const history = state.report.historical_team_evidence || {};
+  const warningCount = (state.report.warnings || []).length;
+  const historyLabel = Number(history.run_count || 0) > 0
+    ? `${formatNumber(history.avg_total_damage || 0, 0)} avg`
+    : "n/d";
+  const historyNote = Number(history.run_count || 0) > 0
+    ? `${formatNumber(history.run_count || 0, 0)} run | max ${formatNumber(history.max_total_damage || 0, 0)}`
+    : "Nessuna run forte trovata";
   summaryEl.innerHTML = [
     metricCard("Boss", state.report.target?.boss_label || "-", `${state.report.target?.level_label || "-"} / ${state.report.target?.affinity_label || "-"}`),
-    metricCard("Team", `${team.length}/${state.report.target?.team_size || 5}`, team.map((item) => item.champion_name).join(", ")),
-    metricCard("Coverage", `${covered}/${total}`, (state.report.missing_required_roles || []).length ? `Manca: ${(state.report.missing_required_roles || []).join(", ")}` : "Ruoli chiave coperti"),
-    metricCard("Soglie", `${formatNumber(state.report.target?.thresholds?.required_speed, 0)} SPD / ${formatNumber(state.report.target?.thresholds?.required_accuracy, 0)} ACC`, state.report.target?.description || ""),
+    metricCard("Modalita", state.report.target?.recommendation_label || "Optimizer", `${team.length}/${state.report.target?.team_size || 5} campioni scelti`),
+    metricCard("Storico", historyLabel, historyNote),
+    metricCard("Alert", formatNumber(warningCount, 0), warningCount ? "Da leggere sotto" : "Nessun warning forte"),
   ].join("");
+}
+
+function renderDecisionCard() {
+  const report = state.report || {};
+  const notes = (report.notes || []).slice(0, 4);
+  const history = report.historical_team_evidence || {};
+  const missing = report.missing_required_roles || [];
+  return `
+    <div class="card">
+      <h3>Perche Questo Team</h3>
+      <div class="kv single-column">
+        <div class="kv-row"><span>Modalita</span><span>${escapeHtml(report.target?.objective_label || report.target?.recommendation_label || "-")}</span></div>
+        <div class="kv-row"><span>Storico</span><span>${Number(history.run_count || 0) > 0 ? `${formatNumber(history.run_count || 0, 0)} run` : "n/d"}</span></div>
+        <div class="kv-row"><span>Media danni</span><span>${Number(history.run_count || 0) > 0 ? formatNumber(history.avg_total_damage || 0, 0) : "-"}</span></div>
+        <div class="kv-row"><span>Gap target</span><span>${report.target?.target_damage ? `${formatNumber((report.target.target_damage || 0) - (history.max_total_damage || 0), 0)}` : "-"}</span></div>
+        <div class="kv-row"><span>Ruoli mancanti</span><span>${escapeHtml(missing.join(", ") || "nessuno")}</span></div>
+      </div>
+      <div class="list-block">
+        ${notes.map((item) => `<div class="list-row">${escapeHtml(item)}</div>`).join("") || '<div class="list-row">Nessuna nota disponibile.</div>'}
+      </div>
+    </div>
+  `;
 }
 
 function renderCoverageCard() {
@@ -352,16 +550,14 @@ function renderCoverageCard() {
 }
 
 function renderWarningsCard() {
-  const warnings = state.report?.warnings || [];
-  const notes = state.report?.notes || [];
+  const warnings = (state.report?.warnings || []).slice(0, 8);
   return `
     <div class="card">
-      <h3>Rischi E Note</h3>
+      <h3>Warning Principali</h3>
       <div class="list-block">
         ${(warnings.length ? warnings : ["Nessun rischio rilevato da questa euristica."]).map((item) => `
           <div class="list-row">${escapeHtml(item)}</div>
         `).join("")}
-        ${notes.map((item) => `<div class="list-row">${escapeHtml(item)}</div>`).join("")}
       </div>
     </div>
   `;
@@ -406,6 +602,85 @@ function renderBenchCard() {
             </div>
           </button>
         `).join("") || '<div class="empty">Nessuna panchina disponibile.</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderQuickBenchCard() {
+  const bench = (state.report?.bench || []).slice(0, 3);
+  return `
+    <div class="card">
+      <h3>Alternative Rapide</h3>
+      <div class="list-block">
+        ${bench.map((member) => `
+          <div class="list-row">
+            <strong>${escapeHtml(member.champion_name)}</strong>
+            <div class="subtext">${escapeHtml(member.default_build || "build")} | score ${escapeHtml(formatNumber(member.score, 1))}</div>
+          </div>
+        `).join("") || '<div class="empty">Nessuna alternativa immediata.</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderCompactGearCard() {
+  if (state.teamLoadoutError) {
+    return `
+      <div class="card">
+        <h3>Cambio Equip</h3>
+        <div class="empty">${escapeHtml(state.teamLoadoutError)}</div>
+      </div>
+    `;
+  }
+  const selectedName = state.selectedChampion
+    || state.report?.selected_team?.[0]?.champion_name
+    || "";
+  const selectedMember = getTeamLoadoutMember(selectedName);
+  const summary = state.teamLoadout?.summary || {};
+  const snapshotStatus = state.snapshotStatus || {};
+  const teamSnapshot = snapshotStatus.team_snapshot || {};
+  const lastRestore = snapshotStatus.last_restore || {};
+  if (!state.teamLoadout || !selectedMember) {
+    return `
+      <div class="card">
+        <h3>Cambio Equip</h3>
+        <div class="subtext">Sto preparando il piano equip del team scelto.</div>
+        <div class="empty">Attendi qualche secondo dopo il calcolo optimizer.</div>
+      </div>
+    `;
+  }
+  const changeSummary = getMemberChangeSummary(selectedMember);
+  const hasChanges = changeSummary.changedItems.length > 0;
+  const hasConflicts = !!selectedMember.conflict_item_ids?.length;
+  return `
+    <div class="card">
+      <h3>Cambio Equip</h3>
+      <div class="summary compact-summary">
+        ${metricCard("Selezionato", selectedMember.champion_name || "-", hasChanges ? `${formatNumber(changeSummary.changedItems.length, 0)} cambi` : "Gia pronto")}
+        ${metricCard("Swap team", formatNumber(summary.total_swap_count || 0, 0), `${formatNumber(summary.conflict_count || 0, 0)} conflitti`)}
+        ${metricCard("Snapshot", teamSnapshot.available ? "pronto" : "assente", lastRestore.available ? "restore pronto" : "restore assente")}
+      </div>
+      <div class="action-row">
+        <button id="optimizerEquipSelectedMemberBtn" class="primary" ${state.equipInGameLoading || !hasChanges || hasConflicts ? "disabled" : ""}>${state.equipInGameLoading ? "Invio In Corso..." : "Equipaggia Campione"}</button>
+        <button id="optimizerSaveSnapshotBtn" class="secondary" ${state.saveSnapshotLoading ? "disabled" : ""}>${state.saveSnapshotLoading ? "Salvataggio..." : "Salva Snapshot"}</button>
+        <button id="optimizerRestoreSnapshotBtn" class="secondary" ${state.restoreLoading || !teamSnapshot.available ? "disabled" : ""}>${state.restoreLoading ? "Ripristino..." : "Ripristina Team"}</button>
+        <button id="optimizerRestoreInGameBtn" class="secondary" ${state.restoreLoading || !lastRestore.available ? "disabled" : ""}>${state.restoreLoading ? "Ripristino..." : "Ripristina Ultimo Equip"}</button>
+        <button id="optimizerRefreshGameBtn" class="secondary" ${state.refreshGameLoading ? "disabled" : ""}>${state.refreshGameLoading ? "Riallineamento..." : "Riallinea Dal Game"}</button>
+      </div>
+      <div class="list-block">
+        <div class="list-row">
+          <strong>${escapeHtml(selectedMember.champion_name || "-")}</strong>
+          <div class="subtext">
+            swap ${escapeHtml(String(selectedMember.swap_count || 0))}
+            | inventario ${escapeHtml(String(selectedMember.inventory_items || 0))}
+            | borrowed ${escapeHtml(String(selectedMember.borrowed_items || 0))}
+            | conflitti ${escapeHtml(String(selectedMember.conflict_item_ids?.length || 0))}
+          </div>
+        </div>
+        ${hasConflicts ? `<div class="list-row">Pezzi in conflitto: ${escapeHtml((selectedMember.conflict_item_ids || []).join(", "))}.</div>` : ""}
+        ${changeSummary.donorNames.length ? `<div class="list-row">Donor toccati: ${escapeHtml(changeSummary.donorNames.join(", "))}.</div>` : ""}
+        <div class="list-row">${hasChanges ? `Invio diretto pronto per ${escapeHtml(selectedMember.champion_name || "-")}.` : `${escapeHtml(selectedMember.champion_name || "-")} risulta gia allineato alla build proposta.`}</div>
       </div>
     </div>
   `;
@@ -684,6 +959,7 @@ function renderLocalBridgeCard() {
   const previewSteps = (plan.steps || []).slice(0, 12);
   const teamMembers = state.teamLoadout?.team || [];
   const selectedTeamMember = teamMembers.find((member) => member.champion_name === state.selectedChampion) || null;
+  const selectedMemberHasConflicts = !!selectedTeamMember && !!selectedTeamMember.conflict_item_ids?.length;
   const selectedMemberHasChanges = !!selectedTeamMember && (selectedTeamMember.items || []).some((item) => String(item?.source_kind || "").toLowerCase() !== "current");
   const selectedMemberChanges = selectedTeamMember ? getMemberChangeSummary(selectedTeamMember) : null;
   const snapshotStatus = state.snapshotStatus || {};
@@ -698,13 +974,14 @@ function renderLocalBridgeCard() {
     <div class="card">
       <h3>Bridge Locale</h3>
       <div class="action-row">
-        <button id="optimizerEquipInGameBtn" class="primary" ${state.equipInGameLoading || !selectedMemberHasChanges ? "disabled" : ""}>${state.equipInGameLoading ? "Invio In Corso..." : "Equipaggia Campione Selezionato"}</button>
+        <button id="optimizerEquipInGameBtn" class="primary" ${state.equipInGameLoading || !selectedMemberHasChanges || selectedMemberHasConflicts ? "disabled" : ""}>${state.equipInGameLoading ? "Invio In Corso..." : "Equipaggia Campione Selezionato"}</button>
         <button id="optimizerSaveSnapshotBtn" class="secondary" ${state.saveSnapshotLoading ? "disabled" : ""}>${state.saveSnapshotLoading ? "Salvataggio..." : (teamSnapshot.available ? "Aggiorna Snapshot Team" : "Salva Snapshot Team")}</button>
         <button id="optimizerRestoreSnapshotBtn" class="secondary" ${state.restoreLoading || !teamSnapshot.available ? "disabled" : ""}>${state.restoreLoading ? "Ripristino In Corso..." : "Ripristina Snapshot Team"}</button>
         <button id="optimizerRestoreInGameBtn" class="secondary" ${state.restoreLoading || !lastRestore.available ? "disabled" : ""}>${state.restoreLoading ? "Ripristino In Corso..." : "Ripristina Ultimo Equip"}</button>
+        <button id="optimizerRefreshGameBtn" class="secondary" ${state.refreshGameLoading ? "disabled" : ""}>${state.refreshGameLoading ? "Riallineamento..." : "Confermato In Game -> Riallinea"}</button>
         <span class="pill ok">Bridge attivo</span>
       </div>
-      <div class="subtext">Il bridge locale invia al gioco solo il campione che hai selezionato nella pagina. Se il campione e gia pronto, il bottone resta disattivato.</div>
+      <div class="subtext">Il bridge locale invia al gioco solo il campione che hai selezionato nella pagina. Dopo la conferma in RAID usa il riallineamento dal game per aggiornare davvero DB e optimizer.</div>
       <div class="summary compact-summary">
         ${metricCard("Azioni", formatNumber(plan.action_count || 0, 0), "Cambio equip manuale guidato")}
         ${metricCard("Swap", formatNumber(plan.swap_count || 0, 0), "Pezzi presi da altri campioni")}
@@ -722,9 +999,11 @@ function renderLocalBridgeCard() {
         ${(plan.notes || []).map((note) => `<div class="list-row">${escapeHtml(note)}</div>`).join("") || '<div class="list-row">Nessuna nota disponibile.</div>'}
         ${selectedTeamMember ? `<div class="list-row">Invio diretto pronto per ${escapeHtml(selectedTeamMember.champion_name || "-")} (#${escapeHtml(selectedTeamMember.champ_id || "-")}).</div>` : '<div class="list-row">Seleziona un campione del team per inviare il suo equip al gioco.</div>'}
         ${selectedTeamMember && !selectedMemberHasChanges ? `<div class="list-row">${escapeHtml(selectedTeamMember.champion_name || "-")} risulta gia allineato alla build proposta: nessun cambio da inviare.</div>` : ""}
+        ${selectedTeamMember && selectedMemberHasConflicts ? `<div class="list-row">Equip singolo bloccato: ${escapeHtml(selectedTeamMember.champion_name || "-")} ha pezzi in conflitto con altri membri del team (${escapeHtml((selectedTeamMember.conflict_item_ids || []).join(", "))}).</div>` : ""}
         ${selectedMemberChanges?.donorNames?.length ? `<div class="list-row">Donor toccati per ${escapeHtml(selectedTeamMember.champion_name || "-")}: ${escapeHtml(selectedMemberChanges.donorNames.join(", "))}.</div>` : ""}
         ${teamSnapshot.available ? `<div class="list-row">Snapshot team nel DB dal ${escapeHtml(teamSnapshot.saved_at || "-")} per ${escapeHtml(String(teamSnapshotSummary.champions || 0))} campioni.</div>` : '<div class="list-row">Il bottone Snapshot Team salva nel DB la configurazione corrente dei campioni toccati dal piano.</div>'}
         ${lastRestore.available ? `<div class="list-row">Ultimo equip salvato automaticamente dal ${escapeHtml(lastRestore.saved_at || "-")}.</div>` : '<div class="list-row">Prima di ogni equip salvo automaticamente i campioni toccati per poterli ripristinare.</div>'}
+        <div class="list-row">Flusso consigliato: invio da web, conferma nel gioco, poi bottone "Confermato In Game -> Riallinea".</div>
         ${state.saveSnapshotResult ? `<div class="list-row">Snapshot team aggiornato: ${escapeHtml(String(saveSnapshotSummary.champions || 0))} campioni e ${escapeHtml(String(saveSnapshotSummary.artifacts || 0))} pezzi.</div>` : ""}
       </div>
       <div class="build-section">
@@ -792,21 +1071,220 @@ function renderBridgeExecutionCard(title, payload) {
   `;
 }
 
+async function equipTeamMemberInGame(championName) {
+  const member = getTeamLoadoutMember(championName);
+  if (!member) {
+    setStatus("Il campione scelto non fa parte del team optimizer corrente.", true);
+    return;
+  }
+  const hasChanges = (member.items || []).some((item) => String(item?.source_kind || "").toLowerCase() !== "current");
+  if (!hasChanges) {
+    setStatus(`${member.champion_name} e gia pronto: nessun pezzo da cambiare in game.`, true);
+    return;
+  }
+  state.selectedChampion = member.champion_name;
+  state.equipInGameLoading = true;
+  state.equipInGameResult = null;
+  renderRoster();
+  renderDetails();
+  setStatus(`Invio equip a RAID per ${member.champion_name}...`);
+  try {
+    const payload = await fetchJson("/api/team-optimizer-equip-member", {
+      method: "POST",
+      timeoutMs: 30000,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        boss: state.selectedBoss,
+        level: state.selectedLevel,
+        affinity: state.selectedAffinity,
+        source: state.selectedSource,
+        champion_name: member.champion_name,
+        champ_id: member.champ_id,
+      }),
+    });
+    state.equipInGameResult = payload;
+    if (payload.restore_snapshot) {
+      state.snapshotStatus = state.snapshotStatus || {};
+      state.snapshotStatus.last_restore = {
+        available: true,
+        ...payload.restore_snapshot,
+      };
+    }
+    setStatus(`Richiesta equip inviata per ${member.champion_name}. Conferma in RAID e poi usa il riallineamento dal game.`);
+  } catch (error) {
+    setStatus(error.message || "Impossibile equipaggiare il campione selezionato.", true);
+  } finally {
+    state.equipInGameLoading = false;
+    renderDetails();
+  }
+}
+
+function renderTeamOptimizerSimulationCard() {
+  if (state.selectedBoss !== "demon_lord") return "";
+  if (state.optimizerSimulationLoading) {
+    return `
+      <div class="card">
+        <h3>Simulazione Opening</h3>
+        <div class="empty">Aggiornamento simulazione in corso...</div>
+      </div>
+    `;
+  }
+  if (!state.optimizerSimulation?.simulation) {
+    return `
+      <div class="card">
+        <h3>Simulazione Opening</h3>
+        <div class="empty">Nessuna simulazione disponibile per il team corrente.</div>
+      </div>
+    `;
+  }
+  const simulation = state.optimizerSimulation.simulation || {};
+  const summary = simulation.summary || {};
+  const preferences = state.optimizerSimulation.preferences || {};
+  const defenseUptime = Math.max(
+    Number(summary.increase_def_uptime_pct || 0),
+    Number(summary.ally_protect_uptime_pct || 0),
+    Number(summary.counterattack_uptime_pct || 0),
+  );
+  return `
+    <div class="card">
+      <h3>Simulazione Opening</h3>
+      <div class="summary compact-summary">
+        ${metricCard("Dec ATK", `${formatNumber(summary.decrease_attack_uptime_pct || 0, 0)}%`, "Copertura sui primi turni boss")}
+        ${metricCard("Stun Bloccati", `${formatNumber(summary.blocked_stuns_pct || 0, 0)}%`, `${formatNumber(summary.stun_turns || 0, 0)} stun letti`)}
+        ${metricCard("Difesa", `${formatNumber(defenseUptime, 0)}%`, "Best di Increase DEF / Ally Protect / CA")}
+        ${metricCard("Poison", formatNumber(summary.avg_poison_stacks || 0, 1), `${formatNumber(summary.boss_turns || 0, 0)} turni boss`)}
+      </div>
+      <div class="list-block">
+        ${(state.report?.selected_team || []).map((member) => `
+          <div class="list-row">
+            <strong>${escapeHtml(member.champion_name || "-")}</strong>
+            <div class="subtext">Opening: ${escapeHtml(preferences[member.champion_name] || "AUTO")}</div>
+          </div>
+        `).join("")}
+        ${(summary.warnings || []).map((warning) => `<div class="list-row">${escapeHtml(warning)}</div>`).join("") || '<div class="list-row">Nessuna rottura evidente nella finestra breve simulata.</div>'}
+        <div class="list-row">Nota: questa preview aiuta su opener e coverage, ma non modella ancora HP reali, cure effettive e danno completo della fight.</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTeamMemberWorkspaceCard(candidate, index) {
+  const member = getTeamLoadoutMember(candidate?.champion_name);
+  const changeSummary = member ? getMemberChangeSummary(member) : { changedItems: [], borrowedItems: [], inventoryItems: [], donorNames: [] };
+  const hasChanges = changeSummary.changedItems.length > 0;
+  const hasConflicts = !!member?.conflict_item_ids?.length;
+  const isFocused = state.selectedChampion === candidate?.champion_name;
+  const openerPreference = getMemberOpenerPreference(candidate?.champion_name);
+  const selectedOpenerLabel = openerPreference === "AUTO"
+    ? "Auto"
+    : (openerPreference === "NONE" ? "Nessun opener forzato" : openerPreference);
+  return `
+    <div class="card optimizer-member-workspace ${isFocused ? "optimizer-member-workspace-active" : ""}">
+      <div class="detail-hero">
+        <div>
+          <h3>${escapeHtml(`${index + 1}. ${candidate?.champion_name || "-"}`)}</h3>
+          <div class="detail-meta">
+            <span class="pill gold">Score ${formatNumber(candidate?.score, 1)}</span>
+            <span class="pill">${escapeHtml(candidate?.default_build || "n/d")}</span>
+            <span class="pill ${hasConflicts ? "warn" : (hasChanges ? "ok" : "")}">${hasConflicts ? "Conflitti" : (hasChanges ? `${changeSummary.changedItems.length} cambi` : "Gia pronto")}</span>
+            ${renderStatReliabilityPill(candidate)}
+            ${(candidate?.roles || []).slice(0, 4).map((role) => `<span class="pill">${escapeHtml(role)}</span>`).join("")}
+          </div>
+        </div>
+        <div class="action-row">
+          <button class="secondary optimizer-member-focus-btn" data-name="${escapeHtml(candidate?.champion_name || "")}">${isFocused ? "Dettaglio Aperto" : "Apri Dettaglio"}</button>
+          <button class="primary optimizer-member-equip-btn" data-name="${escapeHtml(candidate?.champion_name || "")}" ${state.equipInGameLoading || !hasChanges || hasConflicts ? "disabled" : ""}>${state.equipInGameLoading && isFocused ? "Invio In Corso..." : "Equipaggia"}</button>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <h3>Gear</h3>
+          <div class="kv single-column">
+            <div class="kv-row"><span>Swap</span><span>${formatNumber(member?.swap_count || 0, 0)}</span></div>
+            <div class="kv-row"><span>Inventario</span><span>${formatNumber(member?.inventory_items || 0, 0)}</span></div>
+            <div class="kv-row"><span>Borrowed</span><span>${formatNumber(member?.borrowed_items || 0, 0)}</span></div>
+            <div class="kv-row"><span>Conflitti</span><span>${formatNumber(member?.conflict_item_ids?.length || 0, 0)}</span></div>
+          </div>
+          <div class="list-block">
+            ${hasChanges ? changeSummary.changedItems.map((item) => `
+              <div class="list-row">
+                <strong>${escapeHtml(displaySlotName(item.slot || "slot"))}</strong>
+                <div class="subtext">#${escapeHtml(item.item_id || "-")} | ${escapeHtml(displaySetName(item.set_name || "No Set"))} | ${escapeHtml(displayItemSourceLabel(item))}</div>
+              </div>
+            `).join("") : '<div class="list-row">Nessun pezzo da cambiare per questa proposta.</div>'}
+            ${changeSummary.donorNames.length ? `<div class="list-row">Donor toccati: ${escapeHtml(changeSummary.donorNames.join(", "))}.</div>` : ""}
+            ${hasConflicts ? `<div class="list-row">Pezzi in conflitto: ${escapeHtml((member?.conflict_item_ids || []).join(", "))}.</div>` : ""}
+          </div>
+        </div>
+        <div class="card">
+          <h3>Skill E Opening</h3>
+          ${state.selectedBoss === "demon_lord" ? `
+            <div class="field">
+              <label>Opening iniziale</label>
+              <select class="optimizer-opener-select" data-name="${escapeHtml(candidate?.champion_name || "")}">
+                <option value="AUTO" ${openerPreference === "AUTO" ? "selected" : ""}>Auto</option>
+                <option value="A1" ${openerPreference === "A1" ? "selected" : ""}>Apri con A1</option>
+                <option value="A2" ${openerPreference === "A2" ? "selected" : ""}>Apri con A2</option>
+                <option value="A3" ${openerPreference === "A3" ? "selected" : ""}>Apri con A3</option>
+                <option value="A4" ${openerPreference === "A4" ? "selected" : ""}>Apri con A4</option>
+                <option value="NONE" ${openerPreference === "NONE" ? "selected" : ""}>Non forzare opener</option>
+              </select>
+            </div>
+            <div class="subtext">Preferenza attiva: ${escapeHtml(selectedOpenerLabel)}. Serve per sfasare la rotazione iniziale del team.</div>
+          ` : `<div class="subtext">Le preferenze opener sono attive solo per Clan Boss.</div>`}
+          <div class="list-block">
+            ${(candidate?.skills || []).map((skill) => `
+              <div class="list-row">
+                <strong>${escapeHtml(skill.slot || "?")} | ${escapeHtml(skill.skill_name || skill.name || skill.slot || "Skill")}</strong>
+                <div class="subtext">CD ${escapeHtml(String(skill.booked_cooldown ?? skill.cooldown ?? "-"))}${openerPreference === String(skill.slot || "").toUpperCase() ? " | opener scelto" : ""}</div>
+              </div>
+            `).join("") || '<div class="list-row">Nessuna skill strutturata disponibile nei dati correnti.</div>'}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTeamWorkspaceCard() {
+  const team = state.report?.selected_team || [];
+  if (!team.length) {
+    return '<div class="card"><h3>Workspace Team</h3><div class="empty">Nessun team selezionato.</div></div>';
+  }
+  return `
+    <div class="card">
+      <h3>Workspace Team</h3>
+      <div class="subtext">Ogni campione ha il suo blocco operativo: gear da montare, donor toccati e preferenza opener per la rotazione iniziale.</div>
+      <div class="stack optimizer-team-workspace">
+        ${team.map((candidate, index) => renderTeamMemberWorkspaceCard(candidate, index)).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderSelectedMemberActionCard(candidate) {
   const member = (state.teamLoadout?.team || []).find((item) => item.champion_name === candidate?.champion_name);
   if (!member) return "";
   const changeSummary = getMemberChangeSummary(member);
   const hasChanges = changeSummary.changedItems.length > 0;
+  const hasConflicts = !!member.conflict_item_ids?.length;
   return `
     <div class="card">
       <h3>Azioni In Game</h3>
       <div class="action-row">
-        <button id="optimizerEquipSelectedMemberBtn" class="secondary" ${state.equipInGameLoading || !hasChanges ? "disabled" : ""}>${state.equipInGameLoading ? "Invio In Corso..." : "Equipaggia Solo Questo Campione"}</button>
-        <span class="pill ${hasChanges ? "ok" : ""}">${hasChanges ? "Da cambiare" : "Gia pronto"}</span>
+        <button id="optimizerEquipSelectedMemberBtn" class="secondary" ${state.equipInGameLoading || !hasChanges || hasConflicts ? "disabled" : ""}>${state.equipInGameLoading ? "Invio In Corso..." : "Equipaggia Solo Questo Campione"}</button>
+        <span class="pill ${hasConflicts ? "warn" : (hasChanges ? "ok" : "")}">${hasConflicts ? "Conflitto" : (hasChanges ? "Da cambiare" : "Gia pronto")}</span>
       </div>
-      <div class="subtext">${hasChanges
+      <div class="subtext">${hasConflicts
+        ? `${escapeHtml(candidate.champion_name || "-")} condivide pezzi con altri membri del team proposto. Risolvi prima i conflitti nel loadout, altrimenti finisci per spogliare un altro campione.`
+        : (hasChanges
         ? `Questo invia solo ${escapeHtml(candidate.champion_name || "-")} al bridge locale. Prima dell'invio vedi donor e pezzi coinvolti.`
-        : `${escapeHtml(candidate.champion_name || "-")} risulta gia allineato alla build proposta, quindi non parte nessun cambio in game.`}</div>
+        : `${escapeHtml(candidate.champion_name || "-")} risulta gia allineato alla build proposta, quindi non parte nessun cambio in game.`)}</div>
+      ${hasConflicts ? `
+        <div class="list-block">
+          <div class="list-row">Pezzi in conflitto: ${escapeHtml((member.conflict_item_ids || []).join(", "))}.</div>
+        </div>
+      ` : ""}
       ${hasChanges ? `
         <div class="list-block">
           <div class="list-row">${escapeHtml(candidate.champion_name || "-")} richiede ${escapeHtml(String(changeSummary.changedItems.length))} cambi: ${escapeHtml(String(changeSummary.borrowedItems.length))} swap e ${escapeHtml(String(changeSummary.inventoryItems.length))} pezzi da magazzino.</div>
@@ -1091,7 +1569,6 @@ function renderCandidateDetail() {
   state.selectedChampion = candidate.champion_name;
   const evidence = candidate.evidence || {};
   const stats = candidate.stats || {};
-  const statSignals = candidate.stat_signals || {};
   return `
     <div class="stack">
       <div class="detail-hero">
@@ -1124,57 +1601,24 @@ function renderCandidateDetail() {
 
       <div class="grid">
         <div class="card">
-          <h3>${candidate.stat_reliability?.source === "raw" ? "Stats Chiave" : "Stats Chiave Stimate"}</h3>
-          <div class="subtext">${candidate.stat_reliability?.source === "raw" ? "Lette da total stats importate." : "Valori derivati: utili per lo scheletro, ma non ancora trusted come il pannello in-game."}</div>
+          <h3>Stats Chiave</h3>
           <div class="kv single-column">
             <div class="kv-row"><span>SPD</span><span>${candidate.stat_reliability?.source === "raw" ? "" : "~"}${formatNumber(stats.spd, 0)}</span></div>
             <div class="kv-row"><span>ACC</span><span>${candidate.stat_reliability?.source === "raw" ? "" : "~"}${formatNumber(stats.acc, 0)}</span></div>
             <div class="kv-row"><span>HP</span><span>${candidate.stat_reliability?.source === "raw" ? "" : "~"}${formatNumber(stats.hp, 0)}</span></div>
             <div class="kv-row"><span>DEF</span><span>${candidate.stat_reliability?.source === "raw" ? "" : "~"}${formatNumber(stats.def, 0)}</span></div>
-            <div class="kv-row"><span>C.RATE</span><span>${candidate.stat_reliability?.source === "raw" ? "" : "~"}${formatNumber(stats.crit_rate, 0)}</span></div>
-            <div class="kv-row"><span>C.DMG</span><span>${candidate.stat_reliability?.source === "raw" ? "" : "~"}${formatNumber(stats.crit_dmg, 0)}</span></div>
           </div>
         </div>
         <div class="card">
-          <h3>Segnali Build</h3>
-          <div class="subtext">${candidate.stat_reliability?.source === "raw" ? "Pesi pieni." : "Speed pesa quasi piena, le altre colonne sono ridotte se il dato non e trusted."}</div>
-          <div class="kv single-column">
-            <div class="kv-row"><span>Speed fit</span><span>${formatNumber((candidate.weighted_stat_signals || {}).speed ?? statSignals.speed, 2)}</span></div>
-            <div class="kv-row"><span>Accuracy fit</span><span>${formatNumber((candidate.weighted_stat_signals || {}).accuracy ?? statSignals.accuracy, 2)}</span></div>
-            <div class="kv-row"><span>Survival fit</span><span>${formatNumber((candidate.weighted_stat_signals || {}).survival ?? statSignals.survival, 2)}</span></div>
-            <div class="kv-row"><span>Damage fit</span><span>${formatNumber((candidate.weighted_stat_signals || {}).damage ?? statSignals.damage, 2)}</span></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Affidabilita Stats</h3>
-        <div class="kv single-column">
-          <div class="kv-row"><span>Source</span><span>${escapeHtml(candidate.stat_reliability?.source || "n/d")}</span></div>
-          <div class="kv-row"><span>Completeness</span><span>${escapeHtml(candidate.stat_reliability?.completeness || "n/d")}</span></div>
-          <div class="kv-row"><span>Confidence</span><span>${formatNumber(candidate.stat_reliability?.confidence || 0, 2)}</span></div>
-          <div class="kv-row"><span>Sorgenti mancanti</span><span>${escapeHtml((candidate.stat_reliability?.missing_sources || []).join(", ") || "nessuna")}</span></div>
-        </div>
-        <div class="list-block">
-          ${(candidate.stat_reliability?.warnings || []).map((warning) => `<div class="list-row">${escapeHtml(warning)}</div>`).join("") || '<div class="list-row">Nessun warning specifico.</div>'}
-        </div>
-      </div>
-
-      <div class="grid">
-        ${renderSelectedMemberActionCard(candidate)}
-        <div class="card">
-          <h3>Run Evidence</h3>
+          <h3>Storico Campione</h3>
           <div class="kv single-column">
             <div class="kv-row"><span>Run viste</span><span>${formatNumber(evidence.run_count, 0)}</span></div>
             <div class="kv-row"><span>Avg damage</span><span>${formatNumber(evidence.avg_damage_done, 0)}</span></div>
-            <div class="kv-row"><span>Avg damage taken</span><span>${formatNumber(evidence.avg_damage_taken, 0)}</span></div>
             <div class="kv-row"><span>Avg healing</span><span>${formatNumber(evidence.avg_healing_done, 0)}</span></div>
+            <div class="kv-row"><span>Stats</span><span>${escapeHtml(candidate.stat_reliability?.source === "raw" ? "raw" : "stimate")}</span></div>
           </div>
         </div>
-        ${renderRoleSourceCard(candidate)}
       </div>
-
-      ${renderBuildPlanCard(candidate)}
     </div>
   `;
 }
@@ -1187,22 +1631,13 @@ function renderDetails() {
   detailsEl.innerHTML = `
     <div class="grid">
       ${renderTeamCard()}
-      ${renderCoverageCard()}
+      ${renderDecisionCard()}
     </div>
     <div class="grid">
-      ${renderTeamLoadoutCard()}
       ${renderWarningsCard()}
+      ${renderQuickBenchCard()}
     </div>
-    <div class="grid">
-      ${renderLocalBridgeCard()}
-      ${renderBenchCard()}
-    </div>
-    <div class="grid">
-      ${renderBossIntelCard()}
-    </div>
-    <div class="grid">
-      ${renderTrainingOverviewCard()}
-    </div>
+    ${renderCompactGearCard()}
     ${renderCandidateDetail()}
   `;
   detailsEl.querySelectorAll(".optimizer-member-btn").forEach((button) => {
@@ -1215,97 +1650,43 @@ function renderDetails() {
   const equipBtn = detailsEl.querySelector("#optimizerEquipInGameBtn");
   if (equipBtn && !equipBtn.disabled) {
     equipBtn.addEventListener("click", async () => {
-      const member = (state.teamLoadout?.team || []).find((item) => item.champion_name === state.selectedChampion);
-      if (!member) {
+      if (!state.selectedChampion) {
         setStatus("Seleziona un campione del team prima di inviare l'equip.", true);
         return;
       }
-      const hasChanges = (member.items || []).some((item) => String(item?.source_kind || "").toLowerCase() !== "current");
-      if (!hasChanges) {
-        setStatus(`${member.champion_name} e gia pronto: nessun pezzo da cambiare in game.`, true);
-        return;
-      }
-      state.equipInGameLoading = true;
-      state.equipInGameResult = null;
-      renderDetails();
-      setStatus(`Invio equip a RAID per ${member.champion_name}...`);
-      try {
-        const payload = await fetchJson("/api/team-optimizer-equip-member", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            boss: state.selectedBoss,
-            level: state.selectedLevel,
-            affinity: state.selectedAffinity,
-            champion_name: member.champion_name,
-            champ_id: member.champ_id,
-          }),
-        });
-        state.equipInGameResult = payload;
-        if (payload.restore_snapshot) {
-          state.snapshotStatus = state.snapshotStatus || {};
-          state.snapshotStatus.last_restore = {
-            available: true,
-            ...payload.restore_snapshot,
-          };
-        }
-        const summary = payload.summary || {};
-        setStatus(`Equip inviato per ${member.champion_name} in ${formatDurationMs(summary.duration_ms)}.`);
-      } catch (error) {
-        setStatus(error.message || "Impossibile equipaggiare il campione selezionato.", true);
-      } finally {
-        state.equipInGameLoading = false;
-        renderDetails();
-      }
+      await equipTeamMemberInGame(state.selectedChampion);
     });
   }
   const equipSelectedBtn = detailsEl.querySelector("#optimizerEquipSelectedMemberBtn");
   if (equipSelectedBtn && !equipSelectedBtn.disabled) {
     equipSelectedBtn.addEventListener("click", async () => {
-      const member = (state.teamLoadout?.team || []).find((item) => item.champion_name === state.selectedChampion);
-      if (!member) {
+      if (!state.selectedChampion) {
         setStatus("Il campione selezionato non fa parte del team optimizer corrente.", true);
         return;
       }
-      const hasChanges = (member.items || []).some((item) => String(item?.source_kind || "").toLowerCase() !== "current");
-      if (!hasChanges) {
-        setStatus(`${member.champion_name} e gia pronto: nessun pezzo da cambiare in game.`, true);
-        return;
-      }
-      state.equipInGameLoading = true;
-      state.equipInGameResult = null;
-      renderDetails();
-      setStatus(`Invio equip singolo a RAID per ${member.champion_name}...`);
-      try {
-        const payload = await fetchJson("/api/team-optimizer-equip-member", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            boss: state.selectedBoss,
-            level: state.selectedLevel,
-            affinity: state.selectedAffinity,
-            champion_name: member.champion_name,
-            champ_id: member.champ_id,
-          }),
-        });
-        state.equipInGameResult = payload;
-        if (payload.restore_snapshot) {
-          state.snapshotStatus = state.snapshotStatus || {};
-          state.snapshotStatus.last_restore = {
-            available: true,
-            ...payload.restore_snapshot,
-          };
-        }
-        const summary = payload.summary || {};
-        setStatus(`Equip singolo inviato: ${member.champion_name} completato in ${formatDurationMs(summary.duration_ms)}.`);
-      } catch (error) {
-        setStatus(error.message || "Impossibile equipaggiare il campione selezionato.", true);
-      } finally {
-        state.equipInGameLoading = false;
-        renderDetails();
-      }
+      await equipTeamMemberInGame(state.selectedChampion);
     });
   }
+  detailsEl.querySelectorAll(".optimizer-member-focus-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedChampion = button.dataset.name || null;
+      renderRoster();
+      renderDetails();
+    });
+  });
+  detailsEl.querySelectorAll(".optimizer-member-equip-btn").forEach((button) => {
+    if (button.disabled) return;
+    button.addEventListener("click", async () => {
+      await equipTeamMemberInGame(button.dataset.name || "");
+    });
+  });
+  detailsEl.querySelectorAll(".optimizer-opener-select").forEach((selectEl) => {
+    selectEl.addEventListener("change", async () => {
+      const championName = selectEl.dataset.name || "";
+      setMemberOpenerPreference(championName, selectEl.value || "AUTO");
+      await refreshOptimizerSimulation();
+    });
+  });
   const saveSnapshotBtn = detailsEl.querySelector("#optimizerSaveSnapshotBtn");
   if (saveSnapshotBtn && !saveSnapshotBtn.disabled) {
     saveSnapshotBtn.addEventListener("click", async () => {
@@ -1321,6 +1702,7 @@ function renderDetails() {
             boss: state.selectedBoss,
             level: state.selectedLevel,
             affinity: state.selectedAffinity,
+            source: state.selectedSource,
           }),
         });
         state.saveSnapshotResult = payload.snapshot || null;
@@ -1334,6 +1716,12 @@ function renderDetails() {
         state.saveSnapshotLoading = false;
         renderDetails();
       }
+    });
+  }
+  const refreshGameBtn = detailsEl.querySelector("#optimizerRefreshGameBtn");
+  if (refreshGameBtn && !refreshGameBtn.disabled) {
+    refreshGameBtn.addEventListener("click", async () => {
+      await refreshGearAndReloadOptimizer();
     });
   }
   const restoreSnapshotBtn = detailsEl.querySelector("#optimizerRestoreSnapshotBtn");
@@ -1351,6 +1739,7 @@ function renderDetails() {
             boss: state.selectedBoss,
             level: state.selectedLevel,
             affinity: state.selectedAffinity,
+            source: state.selectedSource,
           }),
         });
         state.restoreResult = payload;
@@ -1421,7 +1810,7 @@ async function ensureBuildPlan(candidate) {
 async function loadReport() {
   setStatus("Calcolo optimizer in corso...");
   try {
-    const query = `boss=${encodeURIComponent(state.selectedBoss)}&level=${encodeURIComponent(state.selectedLevel)}&affinity=${encodeURIComponent(state.selectedAffinity)}`;
+    const query = `boss=${encodeURIComponent(state.selectedBoss)}&level=${encodeURIComponent(state.selectedLevel)}&affinity=${encodeURIComponent(state.selectedAffinity)}&source=${encodeURIComponent(state.selectedSource)}`;
     const reportPromise = fetchJson(`/api/team-optimizer?${query}`);
     const loadoutPromise = fetchJson(`/api/team-optimizer-loadout?${query}`);
     const restorePromise = fetchJson(`/api/team-optimizer-restore-status?${query}`);
@@ -1434,6 +1823,10 @@ async function loadReport() {
     state.equipInGameLoading = false;
     state.equipInGameResult = null;
     state.equipQueueIndex = 0;
+    state.refreshGameLoading = false;
+    state.optimizerSimulation = null;
+    state.optimizerSimulationLoading = false;
+    state.memberOpenerPrefs = {};
     state.snapshotStatus = null;
     state.saveSnapshotLoading = false;
     state.saveSnapshotResult = null;
@@ -1445,15 +1838,19 @@ async function loadReport() {
     state.selectedBoss = payload.selection?.boss_key || state.selectedBoss;
     state.selectedLevel = payload.selection?.level_key || state.selectedLevel;
     state.selectedAffinity = payload.selection?.affinity || state.selectedAffinity;
+    state.selectedSource = payload.selection?.recommendation_source || state.selectedSource;
     state.bossIntel = payload.boss_intel || null;
     state.report = payload.report || null;
     state.trainingOverview = payload.training_overview || null;
     renderBossSelect();
     renderAffinitySelect();
     renderLevelSelect();
-    if (!state.selectedChampion && state.report?.selected_team?.length) {
+    renderSourceSelect();
+    const selectedStillVisible = (state.report?.candidates || []).some((item) => item.champion_name === state.selectedChampion);
+    if (!selectedStillVisible && state.report?.selected_team?.length) {
       state.selectedChampion = state.report.selected_team[0].champion_name;
     }
+    syncMemberOpenerPreferences();
     renderSummary();
     renderRoster();
     renderDetails();
@@ -1475,6 +1872,9 @@ async function loadReport() {
       setStatus(state.teamLoadoutError, true);
     }
     renderDetails();
+    if (state.selectedBoss === "demon_lord" && (state.report?.selected_team || []).length) {
+      await refreshOptimizerSimulation({ silent: true });
+    }
   } catch (error) {
     state.report = null;
     state.bossIntel = null;
@@ -1486,6 +1886,10 @@ async function loadReport() {
     state.equipInGameLoading = false;
     state.equipInGameResult = null;
     state.equipQueueIndex = 0;
+    state.refreshGameLoading = false;
+    state.optimizerSimulation = null;
+    state.optimizerSimulationLoading = false;
+    state.memberOpenerPrefs = {};
     state.snapshotStatus = null;
     state.saveSnapshotLoading = false;
     state.saveSnapshotResult = null;
@@ -1502,6 +1906,7 @@ bossEl.addEventListener("change", async () => {
   state.selectedBoss = bossEl.value || "demon_lord";
   renderAffinitySelect();
   renderLevelSelect();
+  renderSourceSelect();
   await loadReport();
 });
 
@@ -1512,6 +1917,11 @@ affinityEl.addEventListener("change", async () => {
 
 levelEl.addEventListener("change", async () => {
   state.selectedLevel = levelEl.value || "ultra_nightmare";
+  await loadReport();
+});
+
+sourceEl.addEventListener("change", async () => {
+  state.selectedSource = sourceEl.value || "optimizer";
   await loadReport();
 });
 

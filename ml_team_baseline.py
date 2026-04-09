@@ -15,6 +15,16 @@ from forge_db import DB_PATH, ensure_schema
 MODEL_VERSION = "team_baseline_v1"
 CORE_STATS = ("hp", "atk", "def", "spd", "acc", "res", "crit_rate", "crit_dmg")
 DEFAULT_MODEL_DIR = Path("models")
+ENCOUNTER_STAT_FLOORS: Dict[str, Dict[str, float]] = {
+    "demon_lord_easy": {"required_speed": 140.0, "required_accuracy": 100.0, "survival_floor": 0.48},
+    "demon_lord_normal": {"required_speed": 150.0, "required_accuracy": 140.0, "survival_floor": 0.54},
+    "demon_lord_hard": {"required_speed": 160.0, "required_accuracy": 180.0, "survival_floor": 0.58},
+    "demon_lord_brutal": {"required_speed": 170.0, "required_accuracy": 210.0, "survival_floor": 0.62},
+    "demon_lord_nm": {"required_speed": 176.0, "required_accuracy": 230.0, "survival_floor": 0.66},
+    "demon_lord_nightmare": {"required_speed": 176.0, "required_accuracy": 230.0, "survival_floor": 0.66},
+    "demon_lord_unm": {"required_speed": 190.0, "required_accuracy": 250.0, "survival_floor": 0.70},
+    "demon_lord_ultra_nightmare": {"required_speed": 190.0, "required_accuracy": 250.0, "survival_floor": 0.70},
+}
 
 
 def string_value(value: Any) -> str:
@@ -52,6 +62,37 @@ def parse_json_text(value: Any, default: Any) -> Any:
     except json.JSONDecodeError:
         return default
     return parsed
+
+
+def _normalize_token(value: Any) -> str:
+    return string_value(value).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _resolve_stat_floors(encounter_key: str, difficulty: str) -> Dict[str, float]:
+    normalized_encounter = string_value(encounter_key).strip().lower()
+    normalized_difficulty = _normalize_token(difficulty)
+    if normalized_encounter in ENCOUNTER_STAT_FLOORS:
+        return dict(ENCOUNTER_STAT_FLOORS[normalized_encounter])
+    if normalized_encounter.startswith("demon_lord_"):
+        fallback = {
+            "ultra_nightmare": "demon_lord_ultra_nightmare",
+            "nightmare": "demon_lord_nightmare",
+            "nm": "demon_lord_nm",
+            "brutal": "demon_lord_brutal",
+            "hard": "demon_lord_hard",
+            "normal": "demon_lord_normal",
+            "easy": "demon_lord_easy",
+        }.get(normalized_difficulty)
+        if fallback:
+            return dict(ENCOUNTER_STAT_FLOORS.get(fallback, {}))
+    return {}
+
+
+def _survival_signal(stats: Dict[str, Any]) -> float:
+    hp = float_value(stats.get("hp"))
+    defense = float_value(stats.get("def"))
+    resistance = float_value(stats.get("res"))
+    return max(0.0, min((((hp / 70_000.0) + (defense / 4_500.0) + (resistance / 350.0)) / 3.0), 1.25))
 
 
 def ai_dependency_status() -> Dict[str, Any]:
@@ -223,6 +264,10 @@ def load_training_rows(
 
 def summarize_team_features(run_row: Dict[str, Any]) -> Dict[str, float | int | str]:
     members = list_value(run_row.get("members"))
+    stat_floors = _resolve_stat_floors(
+        string_value(run_row.get("encounter_key")),
+        string_value(run_row.get("difficulty")),
+    )
     features: Dict[str, float | int | str] = {
         "encounter_key": string_value(run_row.get("encounter_key")),
         "difficulty": string_value(run_row.get("difficulty")),
@@ -240,6 +285,18 @@ def summarize_team_features(run_row: Dict[str, Any]) -> Dict[str, float | int | 
     total_level = 0
     total_awakening = 0
     total_empowerment = 0
+    sustain_members = 0
+    healing_members = 0
+    shield_members = 0
+    cleanse_members = 0
+    unkillable_members = 0
+    attack_down_members = 0
+    pressure_members = 0
+    speed_floor_hits = 0
+    accuracy_floor_hits = 0
+    survival_floor_hits = 0
+    speed_floor_gap_sum = 0.0
+    accuracy_floor_gap_sum = 0.0
 
     for member in members:
         member_map = dict_value(member)
@@ -257,7 +314,12 @@ def summarize_team_features(run_row: Dict[str, Any]) -> Dict[str, float | int | 
         role_hint = string_value(member_map.get("role_hint")).strip()
         if role_hint:
             role_counts[role_hint] = role_counts.get(role_hint, 0) + 1
-        for tag in list_value(member_map.get("tags")):
+        member_tags = {
+            _normalize_token(role_hint),
+            *[_normalize_token(tag) for tag in list_value(member_map.get("tags"))],
+        }
+        member_tags.discard("")
+        for tag in member_tags:
             normalized_tag = string_value(tag).strip()
             if normalized_tag:
                 role_counts[normalized_tag] = role_counts.get(normalized_tag, 0) + 1
@@ -268,6 +330,36 @@ def summarize_team_features(run_row: Dict[str, Any]) -> Dict[str, float | int | 
                 set_counts[set_name] = set_counts.get(set_name, 0) + max(1, int_value(set_map.get("completed_sets")) or 1)
 
         stats = dict_value(member_map.get("stats"))
+        if member_tags & {"sustain", "healing", "shield", "ally_protect"}:
+            sustain_members += 1
+        if member_tags & {"healing", "heal"}:
+            healing_members += 1
+        if "shield" in member_tags:
+            shield_members += 1
+        if member_tags & {"cleanse", "block_debuffs"}:
+            cleanse_members += 1
+        if "unkillable" in member_tags:
+            unkillable_members += 1
+        if "decrease_attack" in member_tags:
+            attack_down_members += 1
+        if member_tags & {"boss_pressure", "poison", "hp_burn", "burner", "poisoner", "damage"}:
+            pressure_members += 1
+        required_speed = float_value(stat_floors.get("required_speed"))
+        required_accuracy = float_value(stat_floors.get("required_accuracy"))
+        required_survival = float_value(stat_floors.get("survival_floor"))
+        speed_value = float_value(stats.get("spd"))
+        accuracy_value = float_value(stats.get("acc"))
+        survival_value = _survival_signal(stats)
+        if required_speed > 0:
+            if speed_value >= required_speed:
+                speed_floor_hits += 1
+            speed_floor_gap_sum += max(0.0, required_speed - speed_value)
+        if required_accuracy > 0:
+            if accuracy_value >= required_accuracy:
+                accuracy_floor_hits += 1
+            accuracy_floor_gap_sum += max(0.0, required_accuracy - accuracy_value)
+        if required_survival > 0 and survival_value >= required_survival:
+            survival_floor_hits += 1
         for stat_name in CORE_STATS:
             value = float_value(stats.get(stat_name))
             if value > 0:
@@ -281,6 +373,21 @@ def summarize_team_features(run_row: Dict[str, Any]) -> Dict[str, float | int | 
     features["avg_awakening"] = round(total_awakening / team_size, 3)
     features["avg_empowerment"] = round(total_empowerment / team_size, 3)
     features["team_signature"] = "|".join(sorted(champion_names))
+    features["sustain_members"] = sustain_members
+    features["healing_members"] = healing_members
+    features["shield_members"] = shield_members
+    features["cleanse_members"] = cleanse_members
+    features["unkillable_members"] = unkillable_members
+    features["attack_down_members"] = attack_down_members
+    features["pressure_members"] = pressure_members
+    features["speed_floor_hits"] = speed_floor_hits
+    features["accuracy_floor_hits"] = accuracy_floor_hits
+    features["survival_floor_hits"] = survival_floor_hits
+    features["speed_floor_ratio"] = round(speed_floor_hits / team_size, 4)
+    features["accuracy_floor_ratio"] = round(accuracy_floor_hits / team_size, 4)
+    features["survival_floor_ratio"] = round(survival_floor_hits / team_size, 4)
+    features["speed_floor_gap_sum"] = round(speed_floor_gap_sum, 3)
+    features["accuracy_floor_gap_sum"] = round(accuracy_floor_gap_sum, 3)
 
     for stat_name, values in values_by_stat.items():
         if not values:
@@ -424,6 +531,51 @@ def build_feature_row_for_candidate_team(
     return summarize_team_features(pseudo_run)
 
 
+def _team_satisfies_hard_rules(team: List[Dict[str, Any]], hard_rules: Dict[str, Any]) -> bool:
+    if not hard_rules:
+        return True
+    team_names = {string_value(candidate.get("champion_name")).strip() for candidate in team}
+    union_tags = {
+        _normalize_token(tag)
+        for candidate in team
+        for tag in [*list_value(candidate.get("roles")), *list_value(candidate.get("capability_tags"))]
+        if _normalize_token(tag)
+    }
+    required_names = {
+        string_value(name).strip()
+        for name in list_value(hard_rules.get("required_champion_names"))
+        if string_value(name).strip()
+    }
+    if required_names and not required_names.issubset(team_names):
+        return False
+    required_tags = {
+        _normalize_token(tag)
+        for tag in list_value(hard_rules.get("required_tags"))
+        if _normalize_token(tag)
+    }
+    if required_tags and not required_tags.issubset(union_tags):
+        return False
+
+    minimum_speed = float_value(hard_rules.get("minimum_speed"))
+    minimum_accuracy = float_value(hard_rules.get("minimum_accuracy"))
+    minimum_speed_hits = int_value(hard_rules.get("minimum_speed_hits"))
+    minimum_accuracy_hits = int_value(hard_rules.get("minimum_accuracy_hits"))
+
+    speed_hits = 0
+    accuracy_hits = 0
+    for candidate in team:
+        stats = dict_value(candidate.get("stats"))
+        if minimum_speed > 0 and float_value(stats.get("spd")) >= minimum_speed:
+            speed_hits += 1
+        if minimum_accuracy > 0 and float_value(stats.get("acc")) >= minimum_accuracy:
+            accuracy_hits += 1
+    if minimum_speed_hits > 0 and speed_hits < minimum_speed_hits:
+        return False
+    if minimum_accuracy_hits > 0 and accuracy_hits < minimum_accuracy_hits:
+        return False
+    return True
+
+
 def recommend_best_team_from_candidates(
     candidates: List[Dict[str, Any]],
     encounter_key: str,
@@ -432,6 +584,7 @@ def recommend_best_team_from_candidates(
     model_path: Path,
     team_size: int = 5,
     pool_size: int = 10,
+    hard_rules: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if not model_path.exists():
         raise FileNotFoundError(f"Modello baseline non trovato: {model_path}")
@@ -445,7 +598,13 @@ def recommend_best_team_from_candidates(
     )
     search_pool = ordered_candidates[: max(team_size, pool_size)]
 
-    combinations = list(itertools.combinations(search_pool, team_size))
+    combinations = [
+        combo
+        for combo in itertools.combinations(search_pool, team_size)
+        if _team_satisfies_hard_rules(list(combo), dict_value(hard_rules))
+    ]
+    if not combinations:
+        raise ValueError("Nessuna combinazione AI soddisfa i vincoli richiesti.")
     feature_rows = [
         build_feature_row_for_candidate_team(
             list(team),
@@ -483,6 +642,7 @@ def recommend_best_team_from_candidates(
         "model_path": str(model_path),
         "pool_size": len(search_pool),
         "evaluated_combinations": len(ranked_rows),
+        "hard_rules": dict(dict_value(hard_rules)),
         "best_team": list(best.get("team") or []),
         "predicted_total_damage": round(float_value(best.get("predicted_total_damage")), 3),
         "predicted_success_probability": (

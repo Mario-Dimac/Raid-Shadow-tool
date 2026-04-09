@@ -34,6 +34,13 @@ def int_value(value: Any) -> int:
         return 0
 
 
+def parse_float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def list_value(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
 
@@ -98,6 +105,35 @@ def is_rich_battle_results_event(event: Dict[str, Any]) -> bool:
     saved = dict_value(event.get("saved"))
     marker = dict_value(saved.get("marker"))
     return int_value(marker.get("size")) > 11
+
+
+def _battle_results_priority(event: Dict[str, Any]) -> tuple[int, str, str]:
+    saved = dict_value(event.get("saved"))
+    marker = dict_value(saved.get("marker"))
+    return (
+        int_value(marker.get("size")),
+        string_value(event.get("captured_at")),
+        string_value(saved.get("raw_path")),
+    )
+
+
+def select_best_rich_battle_result_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ordered_battle_ids: List[str] = []
+    selected_by_battle_id: Dict[str, Dict[str, Any]] = {}
+
+    for event in events:
+        battle_id = event_battle_id(event)
+        if not battle_id:
+            continue
+        current = selected_by_battle_id.get(battle_id)
+        if current is None:
+            ordered_battle_ids.append(battle_id)
+            selected_by_battle_id[battle_id] = event
+            continue
+        if _battle_results_priority(event) > _battle_results_priority(current):
+            selected_by_battle_id[battle_id] = event
+
+    return [selected_by_battle_id[battle_id] for battle_id in ordered_battle_ids]
 
 
 def existing_run_id(source: str, source_run_uid: str, db_path: Path) -> Optional[int]:
@@ -418,6 +454,15 @@ def build_run_payload(
         int_value(row.get("member_order")): dict_value(row)
         for row in list_value(damage_summary.get("members"))
     }
+    total_damage_value = damage_summary.get("total_damage")
+    total_damage_available = total_damage_value is not None and parse_float_value(total_damage_value) > 0
+    member_damage_status = string_value(damage_summary.get("member_damage_status")) or "not_available"
+    if bool(damage_summary.get("damage_trusted")) and total_damage_available:
+        damage_status = "imported_trusted_decoder"
+    elif total_damage_available or member_damage_status != "not_available":
+        damage_status = "imported_candidate_decoder"
+    else:
+        damage_status = "not_available"
     members = build_members(battle_context)
     member_enrichment_by_name = load_account_member_enrichment(db_path=db_path)
     for member in members:
@@ -472,7 +517,7 @@ def build_run_payload(
         "success": True,
         "completed": True,
         "elapsed_seconds": elapsed_seconds(started_at, finished_at),
-        "total_damage": damage_summary.get("total_damage"),
+        "total_damage": total_damage_value,
         "notes": "Imported from probe session. success is inferred from a completed battleResults capture.",
         "labels": {
             "mapping_confidence": string_value(mapping.get("mapping_confidence")),
@@ -483,9 +528,9 @@ def build_run_payload(
             "finished_at": finished_at,
             "mapping_sources": list_value(mapping.get("mapping_sources")),
             "difficulty_source": string_value(mapping.get("difficulty_source")),
-            "damage_status": "not_imported_untrusted_decoder",
+            "damage_status": damage_status,
             "total_damage_status": string_value(damage_summary.get("total_damage_status")) or "not_available",
-            "member_damage_status": string_value(damage_summary.get("member_damage_status")) or "not_available",
+            "member_damage_status": member_damage_status,
             "skill_usage_status": "imported_from_raw_events" if skill_usage_by_slot else "not_available",
             "effect_timeline_status": string_value(effect_timeline.get("status_timeline_status")) or "not_available",
             "effect_timeline_rows": int_value(effect_timeline.get("status_timeline_count")),
@@ -512,7 +557,9 @@ def import_probe_session(
 
     client_events = read_jsonl(client_session_dir / "events.jsonl")
     live_events = read_jsonl((live_root / session_slug) / "events.jsonl")
-    battle_result_events = [event for event in client_events if is_rich_battle_results_event(event)]
+    battle_result_events = select_best_rich_battle_result_events(
+        [event for event in client_events if is_rich_battle_results_event(event)]
+    )
 
     summaries: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []

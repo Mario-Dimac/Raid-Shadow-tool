@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from urllib.parse import parse_qs, quote, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 try:
@@ -19,6 +20,7 @@ except ModuleNotFoundError:
 RECORD_SEPARATOR = "\x1e"
 DEFAULT_BASE_URL = "https://raidoptimiser.hellhades.com"
 EDGE_LEVELDB_DIR = Path.home() / "AppData" / "Local" / "Microsoft" / "Edge" / "User Data" / "Default" / "Local Storage" / "leveldb"
+CHROME_LEVELDB_DIR = Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default" / "Local Storage" / "leveldb"
 JWT_PATTERN = re.compile(r"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)")
 
 
@@ -45,18 +47,84 @@ def normalize_access_token(value: str) -> str:
 
 
 def discover_access_token_from_edge(leveldb_dir: Path = EDGE_LEVELDB_DIR) -> str:
-    if not leveldb_dir.exists():
+    tokens = discover_access_token_candidates([leveldb_dir])
+    return tokens[0] if tokens else ""
+
+
+def iter_browser_leveldb_dirs() -> List[Path]:
+    roots = [
+        Path.home() / "AppData" / "Local" / "Microsoft" / "Edge" / "User Data",
+        Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data",
+    ]
+    directories: List[Path] = []
+    seen: set[str] = set()
+
+    def _remember(path: Path) -> None:
+        normalized = str(path)
+        if normalized in seen or not path.exists():
+            return
+        seen.add(normalized)
+        directories.append(path)
+
+    _remember(EDGE_LEVELDB_DIR)
+    _remember(CHROME_LEVELDB_DIR)
+    for root in roots:
+        if not root.exists():
+            continue
+        for profile_dir in sorted(root.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
+            leveldb_dir = profile_dir / "Local Storage" / "leveldb"
+            _remember(leveldb_dir)
+    return directories
+
+
+def discover_access_token_candidates(leveldb_dirs: Optional[Sequence[Path]] = None) -> List[str]:
+    seen: set[str] = set()
+    tokens: List[str] = []
+    for leveldb_dir in leveldb_dirs or iter_browser_leveldb_dirs():
+        for token in _extract_access_token_candidates_from_leveldb_dir(leveldb_dir):
+            if token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+    return tokens
+
+
+def discover_valid_access_token(
+    base_url: str = DEFAULT_BASE_URL,
+    timeout_seconds: float = 10.0,
+    leveldb_dirs: Optional[Sequence[Path]] = None,
+) -> str:
+    candidates = discover_access_token_candidates(leveldb_dirs)
+    if not candidates:
         return ""
+    for token in candidates:
+        try:
+            _negotiate_connection(base_url=base_url, access_token=token, timeout_seconds=timeout_seconds)
+            return token
+        except HellHadesLiveError:
+            continue
+    raise HellHadesLiveError(
+        "Nessuna sessione HellHades valida trovata nei browser locali. "
+        "Apri raidoptimiser.hellhades.com, fai login e riprova."
+    )
+
+
+def _extract_access_token_candidates_from_leveldb_dir(leveldb_dir: Path) -> List[str]:
+    if not leveldb_dir.exists():
+        return []
     candidates = sorted(
         [path for path in leveldb_dir.iterdir() if path.suffix.lower() in {".ldb", ".log"}],
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
+    seen: set[str] = set()
+    tokens: List[str] = []
     for path in candidates[:8]:
         token = _extract_access_token_from_leveldb_file(path)
-        if token:
-            return token
-    return ""
+        if token and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    return tokens
 
 
 def _extract_access_token_from_leveldb_file(path: Path) -> str:
@@ -130,7 +198,7 @@ def invoke_live_request(
 ) -> Dict[str, Any]:
     token = normalize_access_token(access_token or os.getenv("HELLHADES_ACCESS_TOKEN") or "")
     if not token:
-        token = discover_access_token_from_edge()
+        token = discover_valid_access_token(base_url=base_url, timeout_seconds=timeout_seconds)
     normalized_target = str(target or "").strip()
     if not token:
         raise ValueError("token HellHades mancante")
@@ -299,6 +367,13 @@ def _negotiate_connection(base_url: str, access_token: str, timeout_seconds: flo
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise HellHadesLiveError(
+                "sessione HellHades non valida o scaduta. "
+                "Apri raidoptimiser.hellhades.com nel browser, fai login di nuovo e riprova."
+            ) from exc
+        raise HellHadesLiveError(f"negoziazione HellHades fallita: HTTP {exc.code}") from exc
     except Exception as exc:
         raise HellHadesLiveError(f"negoziazione HellHades fallita: {exc}") from exc
     connection_token = str(payload.get("connectionToken") or payload.get("connectionId") or "").strip()

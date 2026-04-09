@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from concurrent.futures import ThreadPoolExecutor
+import itertools
 import json
 import re
 import shutil
@@ -15,7 +17,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from account_stats import materialize_base_totals
@@ -24,14 +26,13 @@ from boss_modules import build_boss_intel
 from build_planner import build_champion_plan, list_area_bonus_regions, list_build_profiles
 from clan_boss_simulator import AFFINITY_OPTIONS as CLAN_BOSS_SIM_AFFINITY_OPTIONS, BOSS_DIFFICULTIES as CLAN_BOSS_SIM_DIFFICULTIES, DEFAULT_TEAM_PRESETS as CLAN_BOSS_SIM_PRESETS, EFFECT_LIBRARY as CLAN_BOSS_SIM_EFFECT_LIBRARY, default_member_row as default_clan_boss_member_row, simulate_clan_boss_battle
 import deep_battle_probe
-from forge_db import DB_PATH, NORMALIZED_SOURCE_PATH, bootstrap_database, ensure_schema, refresh_account_stats_from_source
+from forge_db import DB_PATH, NORMALIZED_SOURCE_PATH, bootstrap_database, cleanup_duplicate_run_history_runs, ensure_schema, load_app_state, refresh_account_stats_from_source, save_app_state
 from gear_advisor import evaluate_gear_item, summarize_gear_verdicts
-import hellhades_live
 from hellhades_enrich import enrich_registry_from_source
 from local_game_bridge import build_team_equip_plan
 from registry_report import build_registry_report
 from run_mapper import HH_HERO_TYPES_PATH, derive_run_mapping
-from run_damage_decoder import extract_member_result_rows
+from run_damage_decoder import extract_damage_summary, extract_member_result_rows
 from run_effect_timeline import extract_effect_timeline
 from run_history_importer import LIVE_STORAGE_ROOT, import_probe_session, import_probe_sessions
 from set_curation import load_local_set_entries, save_local_set_entry
@@ -50,8 +51,16 @@ LEGACY_DIR = BASE_DIR / "old" / "legacy_20260318"
 LEGACY_INPUT_DIR = LEGACY_DIR / "input"
 LOCAL_HH_BRIDGE_PROJECT = BASE_DIR / "tools" / "hh_local_bridge" / "hh_local_bridge.csproj"
 LOCAL_HH_BRIDGE_DLL = BASE_DIR / "tools" / "hh_local_bridge" / "bin" / "Release" / "net9.0" / "hh_local_bridge.dll"
+LOCAL_HH_BRIDGE_SOURCES = [
+    LOCAL_HH_BRIDGE_PROJECT,
+    BASE_DIR / "tools" / "hh_local_bridge" / "Program.cs",
+]
 TEAM_OPTIMIZER_SNAPSHOT_SCOPE = "team_optimizer"
 TEAM_OPTIMIZER_LAST_RESTORE_KEY = "team_optimizer:last_restore"
+TEAM_OPTIMIZER_CACHE_TTL_SECONDS = 12.0
+TEAM_OPTIMIZER_CACHE_LOCK = threading.Lock()
+TEAM_OPTIMIZER_REPORT_CACHE: Dict[tuple[str, str, str, str, str, int], Dict[str, Any]] = {}
+TEAM_OPTIMIZER_LOADOUT_CACHE: Dict[tuple[str, str, str, str, str, int], Dict[str, Any]] = {}
 GEAR_SLOT_ORDER = {
     "weapon": 1,
     "helmet": 2,
@@ -69,6 +78,7 @@ SELL_QUEUE_PAGES = {
 }
 SELL_QUEUE_VERDICTS = {"sell_now", "sell_after_12"}
 SELL_QUEUE_MAIN_TIER_ORDER = {"weak": 0, "medium": 1, "strong": 2}
+SELL_QUEUE_LOCAL_STATE_KEY = "gear:sell_queue_local"
 SET_DISPLAY_NAMES = {
     "Attack Speed": "Speed",
     "Accuracy And Speed": "Perception",
@@ -219,6 +229,12 @@ def build_web_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
     return report
 
 
+def clear_team_optimizer_caches() -> None:
+    with TEAM_OPTIMIZER_CACHE_LOCK:
+        TEAM_OPTIMIZER_REPORT_CACHE.clear()
+        TEAM_OPTIMIZER_LOADOUT_CACHE.clear()
+
+
 def refresh_gear_from_game(
     db_path: Path = DB_PATH,
     source_path: Path = NORMALIZED_SOURCE_PATH,
@@ -232,6 +248,8 @@ def refresh_gear_from_game(
             db_path=db_path,
             rebuild=False,
         )
+        clear_team_optimizer_caches()
+        clear_local_sell_queue_state(db_path)
         return {
             "ok": True,
             "mode": "local_only",
@@ -245,9 +263,10 @@ def refresh_gear_from_game(
     if not LEGACY_DIR.exists():
         raise FileNotFoundError(f"Pipeline legacy non trovata: {LEGACY_DIR}")
 
+    python_executable = sys.executable or "python"
     commands = [
-        ["python", "extract_local.py"],
-        ["python", "normalize.py"],
+        [python_executable, "extract_local.py"],
+        [python_executable, "normalize.py"],
     ]
     results: List[Dict[str, Any]] = []
     combined_output: List[str] = []
@@ -291,6 +310,8 @@ def refresh_gear_from_game(
         db_path=db_path,
         rebuild=False,
     )
+    clear_team_optimizer_caches()
+    clear_local_sell_queue_state(db_path)
     return {
         "ok": True,
         "mode": "legacy_bridge",
@@ -1123,6 +1144,8 @@ def summarize_probe_runs(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "encounter_name": "",
                 "damage_trusted": False,
                 "damage_note": "battleResults catturato, ma decoder danno non ancora trusted",
+                "total_damage_status": "not_available",
+                "member_damage_status": "not_available",
             }
             runs_by_id[battle_id] = run
             run_order.append(battle_id)
@@ -1197,6 +1220,34 @@ def summarize_probe_runs(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         )
 
     runs = [runs_by_id[battle_id] for battle_id in run_order]
+    for run in runs:
+        raw_path = Path(str(run.get("best_battle_results_path") or "").strip())
+        if not raw_path.exists() or not raw_path.is_file():
+            continue
+        try:
+            damage_summary = dict_value(extract_damage_summary(raw_path))
+        except Exception:
+            continue
+        total_damage = parse_float_value(damage_summary.get("total_damage"))
+        meaningful_member_damage = [
+            dict_value(row)
+            for row in list_value(damage_summary.get("members"))
+            if dict_value(row).get("damage_done") is not None
+        ]
+        if total_damage > 0:
+            run["total_damage"] = total_damage
+        run["member_damage"] = meaningful_member_damage
+        run["damage_trusted"] = bool(damage_summary.get("damage_trusted"))
+        run["total_damage_status"] = str(damage_summary.get("total_damage_status") or "not_available")
+        run["member_damage_status"] = str(damage_summary.get("member_damage_status") or "not_available")
+        if run["damage_trusted"] and total_damage > 0:
+            run["damage_note"] = "Danno team disponibile dal raw battleResults."
+        elif total_damage > 0 and meaningful_member_damage:
+            run["damage_note"] = "Total damage disponibile; danno per campione ancora candidato dal raw battleResults."
+        elif total_damage > 0:
+            run["damage_note"] = "Total damage disponibile dal raw battleResults come candidato forte."
+        elif meaningful_member_damage:
+            run["damage_note"] = "Danno per campione disponibile solo come candidato dal raw battleResults."
     runs.sort(key=lambda row: (str(row.get("first_seen_at") or ""), str(row.get("battle_id") or "")), reverse=True)
     return runs
 
@@ -1752,8 +1803,14 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
             }
         )
 
+    member_damage_done_total = round(sum(parse_float_value(dict_value(member.get("metrics")).get("damage_done")) for member in members), 2)
+    run_total_damage = parse_float_value(run_row["total_damage"])
+    effective_damage_done_total = member_damage_done_total if member_damage_done_total > 0 else run_total_damage
+
     derived_totals = {
-        "damage_done": round(sum(parse_float_value(dict_value(member.get("metrics")).get("damage_done")) for member in members), 2),
+        "damage_done": effective_damage_done_total,
+        "damage_done_members_total": member_damage_done_total,
+        "damage_done_run_total": run_total_damage,
         "damage_taken": round(sum(parse_float_value(dict_value(member.get("pressure")).get("effective_damage_taken")) for member in members), 2),
         "healing_done": round(sum(parse_float_value(dict_value(member.get("metrics")).get("healing_done")) for member in members), 2),
         "incoming_target_events": sum(int(dict_value(member.get("pressure")).get("incoming_target_events") or 0) for member in members),
@@ -2241,6 +2298,252 @@ def build_clan_boss_recommendations(
     return response
 
 
+def _run_identity(row: Dict[str, Any] | sqlite3.Row) -> str:
+    source_run_uid = str(row["source_run_uid"] or "").strip() if "source_run_uid" in row.keys() else ""
+    if source_run_uid:
+        return source_run_uid
+    battle_id = str(row["battle_id"] or "").strip() if "battle_id" in row.keys() else ""
+    if battle_id:
+        return battle_id
+    return f"run:{int(row['run_id'])}"
+
+
+def build_ai_training_advisor(
+    encounters: List[Dict[str, Any]],
+    categories: List[Dict[str, Any]],
+    db_path: Path = DB_PATH,
+) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    duplicate_groups = 0
+    duplicate_rows = 0
+    unique_damage_runs: List[Dict[str, Any]] = []
+    members_by_run_id: Dict[int, List[str]] = {}
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        duplicate_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS duplicate_groups,
+                COALESCE(SUM(duplicate_count - 1), 0) AS duplicate_rows
+            FROM (
+                SELECT COUNT(*) AS duplicate_count
+                FROM run_history_runs
+                WHERE NULLIF(TRIM(COALESCE(source_run_uid, '')), '') IS NOT NULL
+                GROUP BY source, source_run_uid
+                HAVING COUNT(*) > 1
+            )
+            """
+        ).fetchone()
+        if duplicate_row is not None:
+            duplicate_groups = int(duplicate_row["duplicate_groups"] or 0)
+            duplicate_rows = int(duplicate_row["duplicate_rows"] or 0)
+
+        damage_rows = conn.execute(
+            """
+            SELECT
+                run_id,
+                source_run_uid,
+                battle_id,
+                encounter_key,
+                encounter_name,
+                stage_id,
+                game_mode,
+                area_region,
+                boss_affinity,
+                total_damage,
+                saved_at
+            FROM run_history_runs
+            WHERE total_damage IS NOT NULL
+            ORDER BY saved_at ASC, run_id ASC
+            """
+        ).fetchall()
+
+        seen_identities: set[str] = set()
+        unique_run_ids: List[int] = []
+        for row in damage_rows:
+            identity = _run_identity(row)
+            if identity in seen_identities:
+                continue
+            seen_identities.add(identity)
+            unique_damage_runs.append(
+                {
+                    "run_id": int(row["run_id"]),
+                    "encounter_key": str(row["encounter_key"] or ""),
+                    "encounter_name": str(row["encounter_name"] or ""),
+                    "stage_id": str(row["stage_id"] or ""),
+                    "game_mode": str(row["game_mode"] or ""),
+                    "area_region": str(row["area_region"] or ""),
+                    "boss_affinity": str(row["boss_affinity"] or ""),
+                    "total_damage": parse_float_value(row["total_damage"]),
+                    "category": categorize_run(
+                        encounter_name=str(row["encounter_name"] or ""),
+                        encounter_key=str(row["encounter_key"] or ""),
+                        stage_id=str(row["stage_id"] or ""),
+                        game_mode=str(row["game_mode"] or ""),
+                        area_region=str(row["area_region"] or ""),
+                    ),
+                }
+            )
+            unique_run_ids.append(int(row["run_id"]))
+
+        if unique_run_ids:
+            placeholders = ", ".join("?" for _ in unique_run_ids)
+            member_rows = conn.execute(
+                f"""
+                SELECT run_id, member_order, champion_name
+                FROM run_history_members
+                WHERE run_id IN ({placeholders})
+                ORDER BY run_id ASC, member_order ASC
+                """,
+                unique_run_ids,
+            ).fetchall()
+            for member_row in member_rows:
+                members_by_run_id.setdefault(int(member_row["run_id"]), []).append(str(member_row["champion_name"] or ""))
+
+    train_ready_encounters = [item for item in encounters if bool(item.get("train_ready"))]
+    best_train_ready = (
+        sorted(
+            train_ready_encounters,
+            key=lambda item: (
+                int(item.get("runs_with_damage") or 0),
+                int(item.get("run_count") or 0),
+                str(item.get("encounter_key") or ""),
+            ),
+            reverse=True,
+        )[0]
+        if train_ready_encounters
+        else {}
+    )
+
+    skill_category_keys = {"dungeon_boss", "stage_pve", "special_pve_unmapped"}
+    skill_capture_runs = sum(int(item.get("run_count") or 0) for item in categories if str(item.get("category_key") or "") in skill_category_keys)
+    clan_boss_runs = [row for row in unique_damage_runs if str(dict_value(row.get("category")).get("category_key")) == "clan_boss"]
+    clan_boss_team_counter: Counter[str] = Counter()
+    for row in clan_boss_runs:
+        team_signature = " / ".join(members_by_run_id.get(int(row["run_id"]), []))
+        if team_signature:
+            clan_boss_team_counter[team_signature] += 1
+    clan_boss_unique_teams = len(clan_boss_team_counter)
+    dominant_team_signature = ""
+    dominant_team_runs = 0
+    if clan_boss_team_counter:
+        dominant_team_signature, dominant_team_runs = clan_boss_team_counter.most_common(1)[0]
+    dominant_team_share = (dominant_team_runs / len(clan_boss_runs)) if clan_boss_runs else 0.0
+
+    headline = "Dataset ancora in raccolta: conviene usarlo per capire skill e rotazioni, non ancora per fidarsi di un optimizer forte."
+    if duplicate_groups > 0:
+        headline = "Prima pulisci i duplicati: i conteggi del dataset sono gonfiati e il training rischia di imparare due volte la stessa run."
+    elif train_ready_encounters and clan_boss_unique_teams >= 4 and len(clan_boss_runs) >= 12:
+        headline = "Hai abbastanza varieta' per iniziare un baseline mirato su target specifici, tenendo il consigliere euristico come rete di sicurezza."
+    elif train_ready_encounters:
+        headline = "Puoi gia' allenare un baseline leggero su target specifici, ma serve ancora piu' varieta' per consigli affidabili sui team."
+
+    next_actions: List[Dict[str, Any]] = []
+    if duplicate_groups > 0:
+        next_actions.append(
+            {
+                "priority": "adesso",
+                "title": "Ripulisci i duplicati importati",
+                "detail": f"Ho trovato {duplicate_groups} gruppi duplicati per un totale di {duplicate_rows} righe in eccesso. Pulisci prima di leggere i conteggi del dataset o allenare modelli.",
+            }
+        )
+    if skill_capture_runs < 12:
+        next_actions.append(
+            {
+                "priority": "adesso",
+                "title": "Raccogli run PvE per capire meglio le skill",
+                "detail": f"Hai {skill_capture_runs} run fuori dal Clan Boss nelle categorie piu' utili alla lettura delle skill. Punta a 10-15 run ripetibili tra dungeon boss, wave e contenuti con pattern chiari.",
+            }
+        )
+    if len(clan_boss_runs) > 0 and clan_boss_unique_teams < 4:
+        next_actions.append(
+            {
+                "priority": "adesso",
+                "title": "Aumenta la varieta' dei team Clan Boss",
+                "detail": f"Le run Clan Boss con damage coprono {clan_boss_unique_teams} team distinti. Prima del training serio prova almeno 4-5 team diversi o varianti con un solo cambio per volta.",
+            }
+        )
+    if dominant_team_share >= 0.65 and dominant_team_signature:
+        next_actions.append(
+            {
+                "priority": "presto",
+                "title": "Cambia una sola variabile per serie di test",
+                "detail": f"Il team piu' frequente copre il {dominant_team_share * 100:.0f}% delle run Clan Boss con damage. Fai mini-serie cambiando solo 1 membro, 1 set o 1 speed tune per dare segnali piu' utili all'AI.",
+            }
+        )
+    if best_train_ready:
+        next_actions.append(
+            {
+                "priority": "presto",
+                "title": "Allena prima il target piu' pronto",
+                "detail": f"Il target piu' maturo e' {best_train_ready.get('encounter_name') or best_train_ready.get('encounter_key')} con {int(best_train_ready.get('runs_with_damage') or 0)} run con total_damage.",
+            }
+        )
+    else:
+        next_actions.append(
+            {
+                "priority": "presto",
+                "title": "Concentra il farming su un target singolo",
+                "detail": "Per partire con il baseline serve almeno un encounter con 3 run o piu' dotate di total_damage e qualche variante di team reale.",
+            }
+        )
+
+    content_focus: List[Dict[str, Any]] = []
+    category_by_key = {str(item.get("category_key") or ""): item for item in categories}
+    for category_key, why_now in (
+        ("dungeon_boss", "Ideale per leggere rotazioni, opener, buff/debuff e pattern ripetibili."),
+        ("stage_pve", "Utile per targeting, AOE opener e velocita' di clear sulle wave."),
+        ("clan_boss", "Serve per misurare resa reale, stabilita' lunga, affinita' e speed tune."),
+    ):
+        category_row = dict(category_by_key.get(category_key) or {})
+        content_focus.append(
+            {
+                "category_key": category_key,
+                "category_label": str(category_row.get("category_label") or RUN_CATEGORY_LABELS.get(category_key, category_key)),
+                "run_count": int(category_row.get("run_count") or 0),
+                "runs_with_damage": int(category_row.get("runs_with_damage") or 0),
+                "why_now": why_now,
+            }
+        )
+
+    recommended_targets = sorted(
+        encounters,
+        key=lambda item: (
+            int(item.get("runs_with_damage") or 0),
+            int(item.get("run_count") or 0),
+            str(item.get("encounter_key") or ""),
+        ),
+        reverse=True,
+    )[:3]
+
+    return {
+        "headline": headline,
+        "health": {
+            "duplicate_groups": duplicate_groups,
+            "duplicate_rows": duplicate_rows,
+            "distinct_damage_runs": len(unique_damage_runs),
+            "clan_boss_damage_runs": len(clan_boss_runs),
+            "clan_boss_unique_teams": clan_boss_unique_teams,
+            "skill_capture_runs": skill_capture_runs,
+        },
+        "next_actions": next_actions[:5],
+        "content_focus": content_focus,
+        "recommended_targets": [
+            {
+                "encounter_key": str(item.get("encounter_key") or ""),
+                "encounter_name": str(item.get("encounter_name") or item.get("encounter_key") or ""),
+                "difficulty": str(item.get("difficulty") or ""),
+                "boss_affinity": str(item.get("boss_affinity") or ""),
+                "runs_with_damage": int(item.get("runs_with_damage") or 0),
+                "run_count": int(item.get("run_count") or 0),
+                "train_ready": bool(item.get("train_ready")),
+            }
+            for item in recommended_targets
+        ],
+    }
+
+
 def build_ai_training_overview(db_path: Path = DB_PATH) -> Dict[str, Any]:
     ensure_schema(db_path)
     try:
@@ -2369,6 +2672,11 @@ def build_ai_training_overview(db_path: Path = DB_PATH) -> Dict[str, Any]:
             "runs": total_runs,
             "runs_with_damage": total_runs_with_damage,
         },
+        "advisor": build_ai_training_advisor(
+            encounters=encounters,
+            categories=categories,
+            db_path=db_path,
+        ),
     }
 
 
@@ -2393,6 +2701,18 @@ def train_ai_baseline_model(
         "ok": True,
         "encounter_key": normalized_encounter_key,
         "training": summary,
+        "overview": build_ai_training_overview(db_path=db_path),
+    }
+
+
+def cleanup_ai_training_duplicates(
+    db_path: Path = DB_PATH,
+    source: str = "probe_import",
+) -> Dict[str, Any]:
+    cleanup = cleanup_duplicate_run_history_runs(db_path=db_path, source=source)
+    return {
+        "ok": True,
+        "cleanup": cleanup,
         "overview": build_ai_training_overview(db_path=db_path),
     }
 
@@ -2436,6 +2756,7 @@ def build_team_optimizer_view(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
     return {
@@ -2444,6 +2765,7 @@ def build_team_optimizer_view(
             "boss_key": boss_key,
             "level_key": level_key,
             "affinity": affinity,
+            "recommendation_source": recommendation_source,
         },
         "boss_intel": build_boss_intel(
             boss_key=boss_key,
@@ -2451,25 +2773,102 @@ def build_team_optimizer_view(
             affinity=affinity,
         ),
         "training_overview": build_ai_training_overview(db_path=db_path),
-        "report": build_team_optimizer_report(
+        "report": _cached_team_optimizer_report(
             boss_key=boss_key,
             level_key=level_key,
             affinity=affinity,
+            recommendation_source=recommendation_source,
             db_path=db_path,
         ),
     }
+
+
+def _optimizer_cache_key(
+    boss_key: str,
+    level_key: str,
+    affinity: str,
+    recommendation_source: str,
+    db_path: Path,
+) -> tuple[str, str, str, str, str, int]:
+    resolved = Path(db_path)
+    try:
+        mtime_ns = resolved.stat().st_mtime_ns
+    except FileNotFoundError:
+        mtime_ns = 0
+    return (
+        str(boss_key or "").strip(),
+        str(level_key or "").strip(),
+        str(affinity or "").strip(),
+        str(recommendation_source or "").strip().lower() or "optimizer",
+        str(resolved.resolve()),
+        int(mtime_ns),
+    )
+
+
+def _cache_fetch(cache: Dict[tuple[str, str, str, str, str, int], Dict[str, Any]], key: tuple[str, str, str, str, str, int]) -> Optional[Dict[str, Any]]:
+    now = time.monotonic()
+    with TEAM_OPTIMIZER_CACHE_LOCK:
+        cached = cache.get(key)
+        if not cached:
+            return None
+        expires_at = float(cached.get("expires_at") or 0.0)
+        if expires_at <= now:
+            cache.pop(key, None)
+            return None
+        return copy.deepcopy(dict(cached.get("payload") or {}))
+
+
+def _cache_store(
+    cache: Dict[tuple[str, str, str, str, str, int], Dict[str, Any]],
+    key: tuple[str, str, str, str, str, int],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    now = time.monotonic()
+    with TEAM_OPTIMIZER_CACHE_LOCK:
+        cache[key] = {
+            "expires_at": now + TEAM_OPTIMIZER_CACHE_TTL_SECONDS,
+            "payload": copy.deepcopy(payload),
+        }
+    return copy.deepcopy(payload)
+
+
+def _cached_team_optimizer_report(
+    boss_key: str,
+    level_key: str,
+    affinity: str,
+    recommendation_source: str,
+    db_path: Path,
+) -> Dict[str, Any]:
+    key = _optimizer_cache_key(boss_key, level_key, affinity, recommendation_source, db_path)
+    cached = _cache_fetch(TEAM_OPTIMIZER_REPORT_CACHE, key)
+    if cached is not None:
+        return cached
+    payload = build_team_optimizer_report(
+        boss_key=boss_key,
+        level_key=level_key,
+        affinity=affinity,
+        recommendation_source=recommendation_source,
+        db_path=db_path,
+    )
+    return _cache_store(TEAM_OPTIMIZER_REPORT_CACHE, key, payload)
 
 
 def build_team_optimizer_loadout(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
-    report = build_team_optimizer_report(
+    cache_key = _optimizer_cache_key(boss_key, level_key, affinity, recommendation_source, db_path)
+    cached_loadout = _cache_fetch(TEAM_OPTIMIZER_LOADOUT_CACHE, cache_key)
+    if cached_loadout is not None:
+        return cached_loadout
+    report = _cached_team_optimizer_report(
         boss_key=boss_key,
         level_key=level_key,
         affinity=affinity,
+        recommendation_source=recommendation_source,
         db_path=db_path,
     )
 
@@ -2482,13 +2881,13 @@ def build_team_optimizer_loadout(
     selected_team = list(report.get("selected_team") or [])
     area_region = optimizer_area_region_for_boss(boss_key)
 
-    def _resolve_member_loadout(member: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _resolve_member_loadout_candidates(member: Dict[str, Any]) -> List[Dict[str, Any]]:
         champion_name = str(member.get("champion_name") or "").strip()
         profile_key = str(member.get("default_build") or "support_general").strip() or "support_general"
         if profile_key == "support_general":
             profile_key = "support_tank"
         if not champion_name:
-            return None
+            return []
 
         plan = build_champion_plan(
             champion_name,
@@ -2496,55 +2895,99 @@ def build_team_optimizer_loadout(
             area_region=area_region,
             db_path=db_path,
         )
-        current_build = dict(plan.get("current_build") or {})
-        best_build = dict((plan.get("proposals") or [current_build])[0] or current_build)
-        items = list(best_build.get("items") or [])
-
-        summarized_items: List[Dict[str, Any]] = []
-        for item in items:
-            item_id = str(item.get("item_id") or "").strip()
-            slot_name = str(item.get("slot") or "").strip()
-            source_kind = str(item.get("source_kind") or "").strip()
-            summarized_item = {
-                "item_id": item_id,
-                "slot": slot_name,
-                "set_name": str(item.get("set_name") or ""),
-                "source_kind": source_kind,
-                "source_label": str(item.get("source_label") or ""),
-                "owner_name": str(item.get("owner_name") or ""),
-                "equipped_by": str(item.get("equipped_by") or ""),
-                "main_stat_type": str(item.get("main_stat_type") or ""),
-                "main_stat_value": item.get("main_stat_value"),
-                "rarity": str(item.get("rarity") or ""),
-                "rank": int(item.get("rank") or 0),
-                "level": int(item.get("level") or 0),
-            }
-            summarized_items.append(summarized_item)
-        return {
-            "champion_name": champion_name,
-            "champ_id": str(member.get("champ_id") or "").strip(),
-            "default_build": profile_key,
-            "optimizer_score": member.get("score"),
-            "build_label": str(best_build.get("label") or ""),
-            "build_score": best_build.get("score"),
-            "swap_count": int(best_build.get("swap_count") or 0),
-            "inventory_items": int(best_build.get("inventory_items") or 0),
-            "borrowed_items": int(best_build.get("borrowed_items") or 0),
-            "scope_label": str(best_build.get("scope_label") or ""),
-            "set_coherence": dict(best_build.get("set_coherence") or {}),
-            "items": summarized_items,
-        }
+        candidate_builds = [dict(plan.get("current_build") or {})] + [dict(row) for row in list(plan.get("proposals") or [])]
+        unique_candidates: List[Dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+        for build in candidate_builds:
+            items = list(build.get("items") or [])
+            item_signature = "|".join(sorted(str(item.get("item_id") or "").strip() for item in items if str(item.get("item_id") or "").strip()))
+            if item_signature in seen_signatures:
+                continue
+            seen_signatures.add(item_signature)
+            summarized_items: List[Dict[str, Any]] = []
+            for item in items:
+                item_id = str(item.get("item_id") or "").strip()
+                slot_name = str(item.get("slot") or "").strip()
+                source_kind = str(item.get("source_kind") or "").strip()
+                summarized_items.append(
+                    {
+                        "item_id": item_id,
+                        "slot": slot_name,
+                        "set_name": str(item.get("set_name") or ""),
+                        "source_kind": source_kind,
+                        "source_label": str(item.get("source_label") or ""),
+                        "owner_name": str(item.get("owner_name") or ""),
+                        "equipped_by": str(item.get("equipped_by") or ""),
+                        "main_stat_type": str(item.get("main_stat_type") or ""),
+                        "main_stat_value": item.get("main_stat_value"),
+                        "rarity": str(item.get("rarity") or ""),
+                        "rank": int(item.get("rank") or 0),
+                        "level": int(item.get("level") or 0),
+                    }
+                )
+            unique_candidates.append(
+                {
+                    "champion_name": champion_name,
+                    "champ_id": str(member.get("champ_id") or "").strip(),
+                    "default_build": profile_key,
+                    "optimizer_score": member.get("score"),
+                    "build_label": str(build.get("label") or ""),
+                    "build_score": float(build.get("score") or 0.0),
+                    "swap_count": int(build.get("swap_count") or 0),
+                    "inventory_items": int(build.get("inventory_items") or 0),
+                    "borrowed_items": int(build.get("borrowed_items") or 0),
+                    "scope_label": str(build.get("scope_label") or ""),
+                    "set_coherence": dict(build.get("set_coherence") or {}),
+                    "items": summarized_items,
+                }
+            )
+        unique_candidates.sort(
+            key=lambda row: (
+                -float(row.get("build_score") or 0.0),
+                int(row.get("swap_count") or 0),
+                int(row.get("borrowed_items") or 0),
+                str(row.get("build_label") or ""),
+            )
+        )
+        return unique_candidates
 
     max_workers = min(4, max(1, len(selected_team)))
     if len(selected_team) <= 1:
-        resolved_rows = [_resolve_member_loadout(member) for member in selected_team]
+        resolved_rows = [_resolve_member_loadout_candidates(member) for member in selected_team]
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            resolved_rows = list(executor.map(_resolve_member_loadout, selected_team))
+            resolved_rows = list(executor.map(_resolve_member_loadout_candidates, selected_team))
 
-    for row in resolved_rows:
-        if not row:
-            continue
+    member_candidate_rows = [rows for rows in resolved_rows if rows]
+    chosen_rows: List[Dict[str, Any]] = []
+    if member_candidate_rows:
+        best_choice: List[Dict[str, Any]] = []
+        best_signature: Optional[tuple[int, int, float, int, int]] = None
+        for combo in itertools.product(*member_candidate_rows):
+            usage_by_item: Dict[str, int] = {}
+            for row in combo:
+                for item in list(row.get("items") or []):
+                    item_id = str(item.get("item_id") or "").strip()
+                    if item_id:
+                        usage_by_item[item_id] = usage_by_item.get(item_id, 0) + 1
+            duplicate_overages = sum(max(0, count - 1) for count in usage_by_item.values())
+            duplicate_groups = sum(1 for count in usage_by_item.values() if count > 1)
+            total_build_score = round(sum(float(row.get("build_score") or 0.0) for row in combo), 4)
+            total_combo_swaps = sum(int(row.get("swap_count") or 0) for row in combo)
+            total_combo_borrowed = sum(int(row.get("borrowed_items") or 0) for row in combo)
+            signature = (
+                duplicate_overages,
+                duplicate_groups,
+                -total_build_score,
+                total_combo_swaps,
+                total_combo_borrowed,
+            )
+            if best_signature is None or signature < best_signature:
+                best_signature = signature
+                best_choice = [dict(row) for row in combo]
+        chosen_rows = best_choice
+
+    for row in chosen_rows:
         total_swap_count += int(row.get("swap_count") or 0)
         total_inventory_items += int(row.get("inventory_items") or 0)
         total_borrowed_items += int(row.get("borrowed_items") or 0)
@@ -2577,7 +3020,7 @@ def build_team_optimizer_loadout(
             if str(item.get("item_id") or "") in conflict_item_ids
         ]
 
-    return {
+    payload = {
         "target": dict(report.get("target") or {}),
         "team": team_loadout,
         "conflicts": conflicts,
@@ -2589,6 +3032,7 @@ def build_team_optimizer_loadout(
             "conflict_count": len(conflicts),
         },
     }
+    return _cache_store(TEAM_OPTIMIZER_LOADOUT_CACHE, cache_key, payload)
 
 
 def load_primary_champion_ids(champion_names: List[str], db_path: Path = DB_PATH) -> Dict[str, str]:
@@ -2617,9 +3061,71 @@ def load_primary_champion_ids(champion_names: List[str], db_path: Path = DB_PATH
     return name_to_id
 
 
+def simulate_team_optimizer_opening_preferences(
+    boss_key: str = "demon_lord",
+    level_key: str = "ultra_nightmare",
+    affinity: str = "void",
+    recommendation_source: str = "optimizer",
+    opener_preferences: Optional[Mapping[str, Any]] = None,
+    max_boss_turns: int = 6,
+    db_path: Path = DB_PATH,
+) -> Dict[str, Any]:
+    if str(boss_key or "").strip().lower() != "demon_lord":
+        raise ValueError("Le preferenze opener del simulatore optimizer sono disponibili solo per Clan Boss.")
+
+    report = _cached_team_optimizer_report(
+        boss_key=boss_key,
+        level_key=level_key,
+        affinity=affinity,
+        recommendation_source=recommendation_source,
+        db_path=db_path,
+    )
+    selected_team = [dict(row) for row in list(report.get("selected_team") or [])]
+    if not selected_team:
+        raise ValueError("Nessun team optimizer disponibile da simulare.")
+    valid_names = {str(row.get("champion_name") or "").strip() for row in selected_team if str(row.get("champion_name") or "").strip()}
+
+    normalized_preferences: Dict[str, str] = {}
+    for champion_name, raw_slot in dict(opener_preferences or {}).items():
+        normalized_name = str(champion_name or "").strip()
+        normalized_slot = str(raw_slot or "").strip().upper()
+        if not normalized_name or normalized_name not in valid_names or not normalized_slot:
+            continue
+        if normalized_slot == "AUTO":
+            continue
+        if normalized_slot not in {"A1", "A2", "A3", "A4", "NONE"}:
+            continue
+        normalized_preferences[normalized_name] = normalized_slot
+
+    member_rows = [
+        build_candidate_clan_boss_member_row(
+            candidate,
+            index,
+            opener_slot=normalized_preferences.get(str(candidate.get("champion_name") or "").strip()),
+        )
+        for index, candidate in enumerate(selected_team, start=1)
+    ]
+    simulation = simulate_candidate_team(
+        selected_team,
+        difficulty=str(level_key or "").strip() or "ultra_nightmare",
+        affinity=str(affinity or "").strip() or "void",
+        max_boss_turns=max(3, int(max_boss_turns or 6)),
+        opener_overrides=normalized_preferences,
+    )
+    return {
+        "ok": bool(simulation.get("ok")),
+        "target": dict(report.get("target") or {}),
+        "preferences": normalized_preferences,
+        "members": member_rows,
+        "simulation": simulation,
+    }
+
+
 def ensure_local_hh_bridge_built() -> Path:
     if LOCAL_HH_BRIDGE_DLL.exists():
-        return LOCAL_HH_BRIDGE_DLL
+        dll_mtime = LOCAL_HH_BRIDGE_DLL.stat().st_mtime
+        if all(path.exists() and path.stat().st_mtime <= dll_mtime for path in LOCAL_HH_BRIDGE_SOURCES):
+            return LOCAL_HH_BRIDGE_DLL
     if not LOCAL_HH_BRIDGE_PROJECT.exists():
         raise FileNotFoundError(f"Bridge locale non trovato: {LOCAL_HH_BRIDGE_PROJECT}")
     subprocess.run(
@@ -2650,6 +3156,39 @@ def invoke_local_hh_bridge(command: str, *arguments: str) -> Dict[str, Any]:
         return json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Output bridge locale non valido: {stdout}") from exc
+
+
+def ensure_local_hh_bridge_ready() -> Dict[str, Any]:
+    status = invoke_local_hh_bridge("status")
+    if not bool(status.get("ok")):
+        raise RuntimeError("Bridge locale HH non pronto.")
+    if not bool(status.get("raid_running")):
+        raise RuntimeError("RAID non risulta in esecuzione.")
+    if not bool(status.get("helper_capable")):
+        raise RuntimeError("Helper HH non compatibile con il processo RAID corrente.")
+    if bool(status.get("restart_required")):
+        raise RuntimeError("Helper HH richiede riavvio di RAID prima di usare equip/sell.")
+    return status
+
+
+def bridge_result_error_message(result: Dict[str, Any]) -> str:
+    payload = dict(result or {})
+    if not bool(payload.get("ok")):
+        return str(payload.get("error") or "Bridge locale HH ha restituito un errore.").strip()
+
+    published_events = list(payload.get("published_events") or [])
+    for event in published_events:
+        event_map = dict(event or {})
+        if event_map.get("IsSuccess") is False:
+            return str(event_map.get("Error") or "Helper HH ha rifiutato l'operazione richiesta.").strip()
+    return ""
+
+
+def assert_local_hh_bridge_command_succeeded(result: Dict[str, Any]) -> Dict[str, Any]:
+    message = bridge_result_error_message(result)
+    if message:
+        raise RuntimeError(message)
+    return result
 
 
 def collect_team_optimizer_touched_champions(loadout: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -2768,8 +3307,14 @@ def capture_equipped_items_snapshot(champions: List[Dict[str, str]], db_path: Pa
     }
 
 
-def build_team_optimizer_snapshot_key(boss_key: str, level_key: str, affinity: str) -> str:
-    return f"{TEAM_OPTIMIZER_SNAPSHOT_SCOPE}:{boss_key}:{level_key}:{affinity}"
+def build_team_optimizer_snapshot_key(
+    boss_key: str,
+    level_key: str,
+    affinity: str,
+    recommendation_source: str = "optimizer",
+) -> str:
+    normalized_source = str(recommendation_source or "").strip().lower() or "optimizer"
+    return f"{TEAM_OPTIMIZER_SNAPSHOT_SCOPE}:{boss_key}:{level_key}:{affinity}:{normalized_source}"
 
 
 def save_gear_snapshot_record(
@@ -2881,6 +3426,7 @@ def save_team_optimizer_snapshot(
             "boss_key": str(dict(loadout.get("target") or {}).get("boss_key") or ""),
             "level_key": str(dict(loadout.get("target") or {}).get("level_key") or ""),
             "affinity": str(dict(loadout.get("target") or {}).get("affinity_key") or ""),
+            "recommendation_source": str(dict(loadout.get("target") or {}).get("recommendation_source") or "optimizer"),
         },
     }
     return save_gear_snapshot_record(
@@ -2910,18 +3456,20 @@ def save_named_team_optimizer_snapshot(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
     loadout = build_team_optimizer_loadout(
         boss_key=boss_key,
         level_key=level_key,
         affinity=affinity,
+        recommendation_source=recommendation_source,
         db_path=db_path,
     )
     target = dict(loadout.get("target") or {})
-    label = f"Snapshot {target.get('boss_label') or boss_key} {target.get('level_label') or level_key} {target.get('affinity_label') or affinity}".strip()
+    label = f"Snapshot {target.get('boss_label') or boss_key} {target.get('level_label') or level_key} {target.get('affinity_label') or affinity} [{target.get('recommendation_label') or recommendation_source}]".strip()
     return save_team_optimizer_snapshot(
-        snapshot_key=build_team_optimizer_snapshot_key(boss_key, level_key, affinity),
+        snapshot_key=build_team_optimizer_snapshot_key(boss_key, level_key, affinity, recommendation_source),
         label=label,
         snapshot_kind="manual_team",
         loadout=loadout,
@@ -2933,6 +3481,7 @@ def build_team_optimizer_restore_status(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
     try:
@@ -2941,7 +3490,7 @@ def build_team_optimizer_restore_status(
         last_restore = None
     try:
         team_snapshot = load_gear_snapshot_record(
-            build_team_optimizer_snapshot_key(boss_key, level_key, affinity),
+            build_team_optimizer_snapshot_key(boss_key, level_key, affinity, recommendation_source),
             db_path=db_path,
         )
     except FileNotFoundError:
@@ -2963,7 +3512,9 @@ def restore_snapshot_record(record: Dict[str, Any]) -> Dict[str, Any]:
         artifact_ids = [str(item_id or "").strip() for item_id in list(member.get("artifact_ids") or []) if str(item_id or "").strip()]
         if not champ_id or not artifact_ids:
             continue
-        bridge_result = invoke_local_hh_bridge("equip", champ_id, ",".join(artifact_ids))
+        bridge_result = assert_local_hh_bridge_command_succeeded(
+            invoke_local_hh_bridge("equip", champ_id, ",".join(artifact_ids))
+        )
         member_results.append(
             {
                 "champion_name": champion_name,
@@ -3001,9 +3552,10 @@ def restore_named_team_optimizer_snapshot(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
-    snapshot_key = build_team_optimizer_snapshot_key(boss_key, level_key, affinity)
+    snapshot_key = build_team_optimizer_snapshot_key(boss_key, level_key, affinity, recommendation_source)
     return restore_snapshot_record(load_gear_snapshot_record(snapshot_key, db_path=db_path))
 
 
@@ -3013,12 +3565,14 @@ def equip_team_optimizer_member_in_game(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
     loadout = build_team_optimizer_loadout(
         boss_key=boss_key,
         level_key=level_key,
         affinity=affinity,
+        recommendation_source=recommendation_source,
         db_path=db_path,
     )
     member = None
@@ -3033,6 +3587,12 @@ def equip_team_optimizer_member_in_game(
             break
     if not member:
         raise KeyError("Campione non trovato nel team optimizer corrente.")
+    member_conflicts = [str(item_id or "").strip() for item_id in list(member.get("conflict_item_ids") or []) if str(item_id or "").strip()]
+    if member_conflicts:
+        raise ValueError(
+            "Equip singolo bloccato: il campione usa pezzi in conflitto con altri membri del team "
+            f"({', '.join(member_conflicts)}). Risolvi prima i conflitti nel loadout."
+        )
 
     actionable_items = [
         item
@@ -3054,13 +3614,21 @@ def equip_team_optimizer_member_in_game(
     champ_id = str(member.get("champ_id") or "").strip()
     artifact_ids = [
         str(item.get("item_id") or "").strip()
+        for item in list(member.get("items") or [])
+        if str(item.get("item_id") or "").strip()
+    ]
+    actionable_artifact_ids = [
+        str(item.get("item_id") or "").strip()
         for item in actionable_items
     ]
     if not champion_name or not champ_id or not artifact_ids:
         raise ValueError("Build non equipaggiabile per il campione selezionato.")
 
+    bridge_status = ensure_local_hh_bridge_ready()
     started_at = time.perf_counter()
-    bridge_result = invoke_local_hh_bridge("equip", champ_id, ",".join(artifact_ids))
+    bridge_result = assert_local_hh_bridge_command_succeeded(
+        invoke_local_hh_bridge("equip", champ_id, ",".join(artifact_ids))
+    )
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     member_result = {
         "champion_name": champion_name,
@@ -3072,12 +3640,14 @@ def equip_team_optimizer_member_in_game(
     return {
         "ok": True,
         "target": dict(loadout.get("target") or {}),
+        "bridge_status": bridge_status,
         "restore_snapshot": restore_snapshot,
         "summary": {
             "members_requested": 1,
             "members_succeeded": 1 if bool(dict(bridge_result).get("ok")) else 0,
             "members_failed": 0 if bool(dict(bridge_result).get("ok")) else 1,
             "total_artifacts_requested": len(artifact_ids),
+            "changed_artifacts_requested": len(actionable_artifact_ids),
             "duration_ms": duration_ms,
         },
         "members": [member_result],
@@ -3088,6 +3658,7 @@ def equip_team_optimizer_in_game(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
     started_at = time.perf_counter()
@@ -3095,6 +3666,7 @@ def equip_team_optimizer_in_game(
         boss_key=boss_key,
         level_key=level_key,
         affinity=affinity,
+        recommendation_source=recommendation_source,
         db_path=db_path,
     )
     conflicts = list(loadout.get("conflicts") or [])
@@ -3102,6 +3674,7 @@ def equip_team_optimizer_in_game(
         raise ValueError("Il team optimizer ha conflitti su pezzi condivisi: risolvili prima di equipaggiare in game.")
     restore_snapshot = save_team_optimizer_restore_snapshot(loadout, db_path=db_path)
 
+    bridge_status = ensure_local_hh_bridge_ready()
     member_results: List[Dict[str, Any]] = []
     for member in list(loadout.get("team") or []):
         champion_name = str(member.get("champion_name") or "").strip()
@@ -3113,7 +3686,9 @@ def equip_team_optimizer_in_game(
         ]
         if not champion_name or not champ_id or not artifact_ids:
             continue
-        bridge_result = invoke_local_hh_bridge("equip", champ_id, ",".join(artifact_ids))
+        bridge_result = assert_local_hh_bridge_command_succeeded(
+            invoke_local_hh_bridge("equip", champ_id, ",".join(artifact_ids))
+        )
         member_results.append(
             {
                 "champion_name": champion_name,
@@ -3132,6 +3707,7 @@ def equip_team_optimizer_in_game(
     return {
         "ok": True,
         "target": dict(loadout.get("target") or {}),
+        "bridge_status": bridge_status,
         "restore_snapshot": restore_snapshot,
         "summary": {
             "members_requested": len(member_results),
@@ -3148,12 +3724,14 @@ def build_team_optimizer_local_bridge_plan(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
     loadout = build_team_optimizer_loadout(
         boss_key=boss_key,
         level_key=level_key,
         affinity=affinity,
+        recommendation_source=recommendation_source,
         db_path=db_path,
     )
     plan = build_team_equip_plan(loadout)
@@ -3361,6 +3939,7 @@ def build_sell_queue_summary(
     exclude_ids: List[str] | None = None,
 ) -> Dict[str, Any]:
     candidates_by_page = collect_sell_queue_candidates(db_path, exclude_ids=exclude_ids)
+    queued_ids = load_local_sell_queue_state(db_path)
     pages_payload: List[Dict[str, Any]] = []
     for page, page_meta in sorted(SELL_QUEUE_PAGES.items()):
         candidates = candidates_by_page[page]
@@ -3373,7 +3952,7 @@ def build_sell_queue_summary(
                 "visible_candidates": candidates[:limit_per_page],
             }
         )
-    return {"pages": pages_payload}
+    return {"pages": pages_payload, "queued_ids": queued_ids, "queued_count": len(queued_ids)}
 
 
 def collect_sell_queue_candidates(
@@ -3381,6 +3960,7 @@ def collect_sell_queue_candidates(
     exclude_ids: List[str] | None = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     excluded = {str(item_id).strip() for item_id in (exclude_ids or []) if str(item_id).strip()}
+    excluded.update(load_local_sell_queue_state(db_path))
     pages_payload: Dict[str, List[Dict[str, Any]]] = {}
     for page, page_meta in sorted(SELL_QUEUE_PAGES.items()):
         page_items = list_gear_items(
@@ -3400,6 +3980,30 @@ def collect_sell_queue_candidates(
         ]
         pages_payload[page].sort(key=sell_queue_sort_key)
     return pages_payload
+
+
+def load_local_sell_queue_state(db_path: Path = DB_PATH) -> List[str]:
+    state = load_app_state(db_path)
+    raw_items = state.get(SELL_QUEUE_LOCAL_STATE_KEY)
+    if not isinstance(raw_items, list):
+        return []
+    queued_ids: List[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_items:
+        item_id = str(raw_value or "").strip()
+        if not item_id or item_id in seen:
+            continue
+        seen.add(item_id)
+        queued_ids.append(item_id)
+    return queued_ids
+
+
+def save_local_sell_queue_state(item_ids: List[str], db_path: Path = DB_PATH) -> None:
+    save_app_state({SELL_QUEUE_LOCAL_STATE_KEY: item_ids}, db_path=db_path)
+
+
+def clear_local_sell_queue_state(db_path: Path = DB_PATH) -> None:
+    save_local_sell_queue_state([], db_path=db_path)
 
 
 def sell_queue_sort_key(item: Dict[str, Any]) -> tuple[Any, ...]:
@@ -3458,21 +4062,33 @@ def sell_artifacts_from_queue(
     if not approved_ids:
         raise ValueError("Nessun ID vendibile trovato nella coda corrente.")
 
-    result = hellhades_live.sell_artifacts_live(approved_ids, access_token=access_token)
+    bridge_result = assert_local_hh_bridge_command_succeeded(
+        invoke_local_hh_bridge("sell", ",".join(approved_ids))
+    )
     approved_items = [candidates_by_id[item_id] for item_id in approved_ids]
-    message = str(result.get("message") or "")
+    queued_ids = load_local_sell_queue_state(db_path)
+    merged_queue = list(queued_ids)
+    known_ids = set(merged_queue)
+    for item_id in approved_ids:
+        if item_id in known_ids:
+            continue
+        known_ids.add(item_id)
+        merged_queue.append(item_id)
+    save_local_sell_queue_state(merged_queue, db_path=db_path)
+    message = f"{len(approved_ids)} ID inviati al bridge locale per la vendita."
     if rejected_ids:
         message = f"{message} Ignorati {len(rejected_ids)} ID fuori coda o non vendibili."
-    result.update(
-        {
-            "requested_ids": requested_ids,
-            "approved_ids": approved_ids,
-            "rejected_ids": rejected_ids,
-            "approved_items": approved_items,
-            "message": message.strip(),
-        }
-    )
-    return result
+    return {
+        "status": "sold_local",
+        "requested_count": len(requested_ids),
+        "queued_count": len(merged_queue),
+        "requested_ids": requested_ids,
+        "approved_ids": approved_ids,
+        "rejected_ids": rejected_ids,
+        "approved_items": approved_items,
+        "result": bridge_result,
+        "message": message.strip(),
+    }
 
 
 def gear_item_detail(item_id: str, db_path: Path = DB_PATH) -> Dict[str, Any]:
@@ -3895,6 +4511,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     boss_key=first_query_value(query, "boss") or "demon_lord",
                     level_key=first_query_value(query, "level") or "ultra_nightmare",
                     affinity=first_query_value(query, "affinity") or "void",
+                    recommendation_source=first_query_value(query, "source") or "optimizer",
                     db_path=self.app.db_path,
                 )
             )
@@ -3906,6 +4523,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     boss_key=first_query_value(query, "boss") or "demon_lord",
                     level_key=first_query_value(query, "level") or "ultra_nightmare",
                     affinity=first_query_value(query, "affinity") or "void",
+                    recommendation_source=first_query_value(query, "source") or "optimizer",
                     db_path=self.app.db_path,
                 )
             )
@@ -3917,6 +4535,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     boss_key=first_query_value(query, "boss") or "demon_lord",
                     level_key=first_query_value(query, "level") or "ultra_nightmare",
                     affinity=first_query_value(query, "affinity") or "void",
+                    recommendation_source=first_query_value(query, "source") or "optimizer",
                     db_path=self.app.db_path,
                 )
             )
@@ -3928,6 +4547,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     boss_key=first_query_value(query, "boss") or "demon_lord",
                     level_key=first_query_value(query, "level") or "ultra_nightmare",
                     affinity=first_query_value(query, "affinity") or "void",
+                    recommendation_source=first_query_value(query, "source") or "optimizer",
                     db_path=self.app.db_path,
                 )
             )
@@ -4048,7 +4668,17 @@ class CBForgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        payload = self._read_json_body()
+        try:
+            payload = self._read_json_body()
+        except UnicodeDecodeError:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, "Body JSON non UTF-8.")
+            return
+        except json.JSONDecodeError as exc:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, f"Body JSON non valido: {exc.msg}")
+            return
+        except ValueError as exc:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+            return
         try:
             if parsed.path == "/api/rebuild-db":
                 summary = bootstrap_database(
@@ -4133,7 +4763,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json({"ok": True, "summary": summary})
                 return
-            if parsed.path == "/api/live-sell-artifacts":
+            if parsed.path in {"/api/live-sell-artifacts", "/api/queue-sell-artifacts", "/api/local-sell-artifacts"}:
                 result = sell_artifacts_from_queue(
                     artifact_ids=list(payload.get("artifact_ids") or []),
                     db_path=self.app.db_path,
@@ -4146,6 +4776,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     boss_key=str(payload.get("boss") or "").strip() or "demon_lord",
                     level_key=str(payload.get("level") or "").strip() or "ultra_nightmare",
                     affinity=str(payload.get("affinity") or "").strip() or "void",
+                    recommendation_source=str(payload.get("source") or "").strip() or "optimizer",
                     db_path=self.app.db_path,
                 )
                 emit_attention_beep()
@@ -4158,6 +4789,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     boss_key=str(payload.get("boss") or "").strip() or "demon_lord",
                     level_key=str(payload.get("level") or "").strip() or "ultra_nightmare",
                     affinity=str(payload.get("affinity") or "").strip() or "void",
+                    recommendation_source=str(payload.get("source") or "").strip() or "optimizer",
                     db_path=self.app.db_path,
                 )
                 emit_attention_beep()
@@ -4168,6 +4800,7 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     boss_key=str(payload.get("boss") or "").strip() or "demon_lord",
                     level_key=str(payload.get("level") or "").strip() or "ultra_nightmare",
                     affinity=str(payload.get("affinity") or "").strip() or "void",
+                    recommendation_source=str(payload.get("source") or "").strip() or "optimizer",
                     db_path=self.app.db_path,
                 )
                 self._send_json({"ok": True, "snapshot": build_snapshot_status_payload(result)})
@@ -4177,11 +4810,24 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                 emit_attention_beep()
                 self._send_json(result)
                 return
+            if parsed.path == "/api/team-optimizer-simulate":
+                result = simulate_team_optimizer_opening_preferences(
+                    boss_key=str(payload.get("boss") or "").strip() or "demon_lord",
+                    level_key=str(payload.get("level") or "").strip() or "ultra_nightmare",
+                    affinity=str(payload.get("affinity") or "").strip() or "void",
+                    recommendation_source=str(payload.get("source") or "").strip() or "optimizer",
+                    opener_preferences=dict(payload.get("opener_preferences") or {}),
+                    max_boss_turns=int(payload.get("max_boss_turns") or 6),
+                    db_path=self.app.db_path,
+                )
+                self._send_json(result)
+                return
             if parsed.path == "/api/team-optimizer-restore-snapshot":
                 result = restore_named_team_optimizer_snapshot(
                     boss_key=str(payload.get("boss") or "").strip() or "demon_lord",
                     level_key=str(payload.get("level") or "").strip() or "ultra_nightmare",
                     affinity=str(payload.get("affinity") or "").strip() or "void",
+                    recommendation_source=str(payload.get("source") or "").strip() or "optimizer",
                     db_path=self.app.db_path,
                 )
                 emit_attention_beep()
@@ -4202,6 +4848,14 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                         encounter_key=encounter_key,
                         db_path=self.app.db_path,
                         output_path=resolved_output,
+                    )
+                )
+                return
+            if parsed.path == "/api/ai-cleanup-duplicates":
+                self._send_json(
+                    cleanup_ai_training_duplicates(
+                        db_path=self.app.db_path,
+                        source=str(payload.get("source") or "").strip() or "probe_import",
                     )
                 )
                 return
@@ -4251,7 +4905,10 @@ class CBForgeHandler(BaseHTTPRequestHandler):
         self._send_json({"error": message}, status=status)
 
     def _read_json_body(self) -> Dict[str, Any]:
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Header Content-Length non valido.") from exc
         if length <= 0:
             return {}
         raw = self.rfile.read(length)

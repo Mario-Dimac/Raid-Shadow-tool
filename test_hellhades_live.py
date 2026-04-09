@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import hellhades_live
 
@@ -69,6 +72,21 @@ def test_discover_access_token_from_edge_reads_latest_jwt(tmp_path: Path) -> Non
     assert token == "eyJaaa.bbb.ccc"
 
 
+def test_discover_valid_access_token_returns_first_token_that_negotiates(monkeypatch) -> None:
+    monkeypatch.setattr(hellhades_live, "discover_access_token_candidates", lambda leveldb_dirs=None: ["bad-token", "good-token"])
+
+    def fake_negotiate(base_url: str, access_token: str, timeout_seconds: float) -> str:
+        if access_token == "good-token":
+            return "connection-token"
+        raise hellhades_live.HellHadesLiveError("unauthorized")
+
+    monkeypatch.setattr(hellhades_live, "_negotiate_connection", fake_negotiate)
+
+    token = hellhades_live.discover_valid_access_token()
+
+    assert token == "good-token"
+
+
 def test_equip_artifacts_live_invokes_signalr_and_returns_helper_result(monkeypatch) -> None:
     fake_socket = FakeWebSocket(
         [
@@ -79,7 +97,11 @@ def test_equip_artifacts_live_invokes_signalr_and_returns_helper_result(monkeypa
     )
 
     monkeypatch.setattr(hellhades_live, "urlopen", lambda request, timeout: FakeResponse({"connectionToken": "connection-token"}))
-    monkeypatch.setattr(hellhades_live.websockets, "connect", lambda *args, **kwargs: fake_socket)
+    monkeypatch.setattr(
+        hellhades_live,
+        "websockets",
+        SimpleNamespace(connect=lambda *args, **kwargs: fake_socket),
+    )
 
     result = hellhades_live.equip_artifacts_live(
         hero_id="6206",
@@ -105,7 +127,11 @@ def test_sell_artifacts_live_invokes_signalr_with_single_argument(monkeypatch) -
     )
 
     monkeypatch.setattr(hellhades_live, "urlopen", lambda request, timeout: FakeResponse({"connectionToken": "connection-token"}))
-    monkeypatch.setattr(hellhades_live.websockets, "connect", lambda *args, **kwargs: fake_socket)
+    monkeypatch.setattr(
+        hellhades_live,
+        "websockets",
+        SimpleNamespace(connect=lambda *args, **kwargs: fake_socket),
+    )
 
     result = hellhades_live.sell_artifacts_live(
         artifact_ids=["100", "101"],
@@ -120,8 +146,8 @@ def test_sell_artifacts_live_invokes_signalr_with_single_argument(monkeypatch) -
 
 
 def test_invoke_live_request_requires_token() -> None:
-    original = hellhades_live.discover_access_token_from_edge
-    hellhades_live.discover_access_token_from_edge = lambda leveldb_dir=hellhades_live.EDGE_LEVELDB_DIR: ""
+    original = hellhades_live.discover_valid_access_token
+    hellhades_live.discover_valid_access_token = lambda base_url=hellhades_live.DEFAULT_BASE_URL, timeout_seconds=10.0, leveldb_dirs=None: ""
     try:
         hellhades_live.invoke_live_request(target="SellArtifacts", arguments=[[100]], access_token="")
     except ValueError as exc:
@@ -129,4 +155,24 @@ def test_invoke_live_request_requires_token() -> None:
     else:
         raise AssertionError("expected ValueError")
     finally:
-        hellhades_live.discover_access_token_from_edge = original
+        hellhades_live.discover_valid_access_token = original
+
+
+def test_negotiate_connection_translates_unauthorized_into_actionable_error(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):
+        raise HTTPError(
+            url=request.full_url,
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=BytesIO(b""),
+        )
+
+    monkeypatch.setattr(hellhades_live, "urlopen", fake_urlopen)
+
+    try:
+        hellhades_live._negotiate_connection("https://raidoptimiser.hellhades.com", "expired-token", 5.0)
+    except hellhades_live.HellHadesLiveError as exc:
+        assert "sessione HellHades non valida o scaduta" in str(exc)
+    else:
+        raise AssertionError("expected HellHadesLiveError")

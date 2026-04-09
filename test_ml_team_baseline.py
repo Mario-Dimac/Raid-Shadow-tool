@@ -69,6 +69,8 @@ def test_ml_team_baseline_builds_rows_and_trains(tmp_path: Path) -> None:
     assert rows[0]["features"]["team_size"] == 5
     assert "champ:Valkyrie" in rows[0]["features"]
     assert "spd_avg" in rows[0]["features"]
+    assert "sustain_members" in rows[0]["features"]
+    assert "speed_floor_hits" in rows[0]["features"]
 
     summary = train_team_baseline(rows, model_path)
 
@@ -159,3 +161,23 @@ def test_ml_team_baseline_builds_rows_and_trains(tmp_path: Path) -> None:
     assert recommendation["best_team"]
     assert recommendation["evaluated_combinations"] >= 1
     assert recommendation["predicted_total_damage"] > 0
+
+    constrained = recommend_best_team_from_candidates(
+        candidates=candidate_pool,
+        encounter_key="demon_lord_ultra_nightmare",
+        difficulty="ultra_nightmare",
+        boss_affinity="void",
+        model_path=model_path,
+        team_size=5,
+        pool_size=6,
+        hard_rules={
+            "required_champion_names": ["Stag Knight"],
+            "required_tags": ["cleanse", "counterattack"],
+            "minimum_speed": 190,
+            "minimum_speed_hits": 3,
+        },
+    )
+
+    constrained_names = {member["champion_name"] for member in constrained["best_team"]}
+    assert "Stag Knight" in constrained_names
+    assert constrained["hard_rules"]["minimum_speed_hits"] == 3

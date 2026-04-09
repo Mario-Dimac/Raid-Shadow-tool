@@ -17,7 +17,8 @@ AFFINITY_BY_ELEMENT = {
 }
 
 DEMON_LORD_STAGE_MAP: Dict[str, Dict[str, Any]] = {
-    # Confirmed on 2026-03-22 from client telemetry + in-game result screenshot.
+    # Confirmed from probe telemetry: these stage ids are the Demon Lord's
+    # highest difficulty, while affinity is resolved from the enemy type.
     "4019021": {
         "encounter_key": "demon_lord_ultra_nightmare",
         "encounter_name": "Demon Lord Ultra-Nightmare",
@@ -27,7 +28,40 @@ DEMON_LORD_STAGE_MAP: Dict[str, Dict[str, Any]] = {
         "difficulty": "ultra_nightmare",
         "stage_label": "Demon Lord. Ultra-Nightmare",
         "stage_tier": 6,
-        "difficulty_source": "confirmed_observation_2026_03_22",
+        "difficulty_source": "confirmed_probe_observation_2026_03_22",
+    },
+    "4019022": {
+        "encounter_key": "demon_lord_ultra_nightmare",
+        "encounter_name": "Demon Lord Ultra-Nightmare",
+        "encounter_family": "demon_lord",
+        "area_region": "clan_boss",
+        "game_mode": "clan_boss",
+        "difficulty": "ultra_nightmare",
+        "stage_label": "Demon Lord. Ultra-Nightmare",
+        "stage_tier": 6,
+        "difficulty_source": "confirmed_probe_observation_2026_04_06",
+    },
+    "4019023": {
+        "encounter_key": "demon_lord_ultra_nightmare",
+        "encounter_name": "Demon Lord Ultra-Nightmare",
+        "encounter_family": "demon_lord",
+        "area_region": "clan_boss",
+        "game_mode": "clan_boss",
+        "difficulty": "ultra_nightmare",
+        "stage_label": "Demon Lord. Ultra-Nightmare",
+        "stage_tier": 6,
+        "difficulty_source": "confirmed_probe_observation_2026_04_06",
+    },
+    "4019024": {
+        "encounter_key": "demon_lord_ultra_nightmare",
+        "encounter_name": "Demon Lord Ultra-Nightmare",
+        "encounter_family": "demon_lord",
+        "area_region": "clan_boss",
+        "game_mode": "clan_boss",
+        "difficulty": "ultra_nightmare",
+        "stage_label": "Demon Lord. Ultra-Nightmare",
+        "stage_tier": 6,
+        "difficulty_source": "confirmed_probe_observation_2026_04_06",
     },
 }
 

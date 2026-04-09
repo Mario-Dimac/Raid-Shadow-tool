@@ -1365,3 +1365,138 @@ La direzione corretta ormai e':
 - Quando riprendiamo:
   - scegliere se estendere `Spider` come prossimo boss
   - oppure rifinire ancora `Hydra` con warning ancora piu' stretti per testa/rotazione e gestione devour
+
+### 2026-04-07 - AI Clan Boss, bridge locale HH e test equip/run reali
+
+#### Completato
+
+- Eseguito mini-training del baseline AI per `Demon Lord Ultra-Nightmare` usando `25` run con damage.
+  - metriche attuali:
+    - `damage_mae_holdout ~= 5.39M`
+    - `damage_r2_holdout ~= 0.09`
+  - il modello e' ancora utile come filtro grossolano, non come previsione trusted
+- Collegato il team AI all'optimizer:
+  - nuovo selettore `Source = Optimizer / AI` su `/optimizer`
+  - backend e snapshot estesi per supportare `recommendation_source`
+  - file toccati:
+    - `team_optimizer.py`
+    - `cbforge_web.py`
+    - `web/optimizer.js`
+    - `web/optimizer.html`
+- Risolto il problema dei conflitti item del loadout team:
+  - prima ogni membro prendeva la sua prima build candidata in isolamento
+  - ora il resolver sceglie una combinazione globale di build candidate senza item duplicati
+  - verificato:
+    - team `Optimizer` force: conflitti `2 -> 0`
+    - team `AI` force: conflitti `4 -> 0`
+- Bloccato l'equip singolo quando il membro ha item in conflitto:
+  - evita di spogliare un donor gia equipaggiato in uno step precedente
+  - warning visibile anche in UI
+- Ridotta la lentezza dell'optimizer con cache breve:
+  - `report` ripetuto quasi istantaneo dopo il primo giro
+  - `loadout` ripetuto quasi istantaneo dopo il primo giro
+  - file toccato principalmente: `cbforge_web.py`
+- Rafforzato il bridge locale HH:
+  - `tools/hh_local_bridge/Program.cs` non e' piu' hardcoded su un solo reader
+  - discovery dinamica dei `RaidReader` disponibili nella DLL HH
+  - in questa installazione risultano disponibili:
+    - `RaidReader147415`
+    - `RaidReader147414`
+  - il bridge ora vede anche il `Raid.exe` reale con `raid_process_id` corretto
+- Corretto il falso blocco del backend su `helper_loaded = false`:
+  - osservazione pratica: lo `status` del helper puo' restare pessimista a riposo
+  - ma il comando `equip` puo' comunque riuscire davvero
+  - quindi il backend ora:
+    - controlla che RAID sia vivo e helper-capable
+    - lascia giudicare il successo all'esito reale di `EquipArtifacts`
+    - solleva errore solo se il bridge o il `published_events` riportano un fallimento vero
+- Resa piu' robusta la UI optimizer durante l'equip:
+  - timeout client sull'invio
+  - niente spinner infinito su `Invio in corso...`
+  - messaggio chiaro se la richiesta si blocca lato browser
+
+#### Verifiche reali fatte oggi
+
+- Equip reale confermato via bridge HH:
+  - `Pain Keeper`
+  - `Venus`
+  - `Stag Knight`
+- Problema pratico emerso su `Geomancer`:
+  - il planner AI teneva la `Build attuale` incompleta da `7` pezzi
+  - mancavano proprio `gloves` e `chest`
+  - inviati manualmente due pezzi alternativi liberi per completarlo senza rubare slot ai membri gia montati:
+    - `40599` gloves
+    - `41232` chest
+- Nota operativa importante:
+  - con i campioni doppi il DB puo' agganciare una run al `champ_id` sbagliato anche se il nome e' corretto
+  - caso concreto di oggi: `Pain Keeper`
+
+#### Run test salvata
+
+- Salvata nuova run:
+  - `run_id = 104`
+  - data salvataggio: `2026-04-07T21:11:14+00:00`
+  - target: `Demon Lord Ultra-Nightmare`
+  - affinity: `force`
+  - `total_damage = 15,895,340`
+- Team reale salvato nella run:
+  - `Venus`
+  - `Pain Keeper`
+  - `Stag Knight`
+  - `Geomancer`
+  - `Valkyrie`
+- Lettura pratica della run:
+  - team collassato presto
+  - il tuo feedback in live era corretto: `Pain Keeper` "non si cura" / non sostiene il team
+  - il risultato e' molto sotto la previsione AI (`~28.9M` previsti vs `15.9M` reali)
+  - quindi questa comp AI e' da considerare bocciata per Clan Boss
+
+#### Dati utili emersi dalla run 104
+
+- `Pain Keeper` salvata nella run come `champ_id = 15511`
+  - attenzione: tu in game hai indicato di aver usato quella con `6` stelle rosse
+  - quindi il mapping run -> copy specifica del campione non e' trusted al 100% quando esistono duplicati
+- Stats salvate per la run:
+  - `Venus`: `SPD 226.8`, `ACC 160`
+  - `Pain Keeper`: `SPD 173`, `ACC 74`
+  - `Stag Knight`: `SPD 268`, `ACC 296`
+  - `Geomancer`: `SPD 189`, `ACC 205`
+  - `Valkyrie`: `SPD 207`, `ACC 56`
+- Implicazioni pratiche:
+  - `Pain Keeper` era troppo lenta per questo shell
+  - `Venus` e `Geomancer` erano corte di `ACC` per UNM
+  - solo `Stag Knight` era davvero messo bene come lane `SPD/ACC`
+- Skill usage salvato:
+  - `Pain Keeper` ha comunque ciclato skill (`A3` e `A4` usate `8` volte)
+  - quindi il problema non e' "non ha mai lanciato", ma che il team come shell/tune/sustain non regge
+
+#### Stato pratico a fine sessione
+
+- Il bridge HH e l'equip reale ora funzionano abbastanza da:
+  - mandare un campione alla volta
+  - verificare il successo reale dal bridge
+- Lo `status` helper HH resta non affidabile a riposo:
+  - puo' mostrare `helper_loaded = false`
+  - ma l'equip reale puo' comunque partire e riuscire
+- L'optimizer AI per Clan Boss non e' ancora maturo come autopilota:
+  - utile per screening idee
+  - non affidabile per comp finali senza verifica reale
+
+#### Next
+
+- Fixare il resolver loadout per non preferire una `Build attuale` incompleta da `7/9` se esiste una build `inventory_only` completa e compatibile
+- Rafforzare il matching dei duplicati campione nel run importer:
+  - non affidarsi al solo `champion_name`
+  - usare anche fingerprint build / set summary / stats / eventuale slot order
+  - target dichiarato: evitare casi `Pain Keeper #15511 vs #16571`
+- Rendere esplicito in UI quando un membro del team ha snapshot equip incompleto:
+  - esempio: `Geomancer` con `7/9` pezzi letti
+- Migliorare il baseline AI Clan Boss usando i fallimenti reali:
+  - penalizzare di piu' team senza sustain/tune vera
+  - penalizzare `Pain Keeper` fuori da shell dedicate
+  - aumentare il peso della coerenza di team rispetto al punteggio del singolo
+- Valutare se il pre-check HH puo' essere reso piu' intelligente:
+  - oggi il comando reale e' piu' affidabile dello `status`
+  - capire se conviene mostrare in UI un badge diverso tipo `status incerto / azione reale disponibile`
+- Quando si riprende:
+  - ripartire da una comp Clan Boss piu' stabile e non dal team AI appena bocciato

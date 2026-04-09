@@ -427,6 +427,21 @@ button.ghost {
   gap: 16px;
 }
 
+.optimizer-team-workspace {
+  gap: 18px;
+}
+
+.optimizer-member-workspace {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.012);
+}
+
+.optimizer-member-workspace-active {
+  border-color: rgba(218, 181, 90, 0.32);
+  box-shadow: 0 0 0 1px rgba(218, 181, 90, 0.12) inset;
+}
+
 .action-row {
   display: flex;
   gap: 8px;

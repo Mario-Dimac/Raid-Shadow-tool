@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
+import threading
+import urllib.error
+import urllib.request
 
 from boss_modules import build_boss_intel
 import cbforge_web
@@ -30,6 +34,7 @@ from cbforge_web import (
     list_owned_champions_with_speed,
     build_clan_boss_recommendations,
     build_ai_training_overview,
+    cleanup_ai_training_duplicates,
     train_ai_baseline_model,
     list_run_recorder_sessions,
     prepare_server_runtime,
@@ -38,7 +43,7 @@ from cbforge_web import (
     run_recorder_session_detail,
     sell_artifacts_from_queue,
 )
-from forge_db import bootstrap_database, record_run_history
+from forge_db import bootstrap_database, cleanup_duplicate_run_history_runs, record_run_history
 
 
 class _DisconnectingWriter:
@@ -877,6 +882,147 @@ def test_ai_training_overview_exposes_dependency_runtime_when_training_is_unavai
     assert overview["dependency_runtime"]["python_executable"] == r"C:\Python311\python.exe"
 
 
+def test_ai_training_overview_exposes_dataset_advisor(tmp_path: Path) -> None:
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path = tmp_path / "normalized_account.json"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    record_run_history(
+        {
+            "source": "probe_import",
+            "source_run_uid": "battle-cb-1",
+            "battle_id": "battle-cb-1",
+            "encounter_key": "demon_lord_ultra_nightmare",
+            "encounter_name": "Demon Lord Ultra-Nightmare",
+            "encounter_family": "demon_lord",
+            "game_mode": "clan_boss",
+            "area_region": "clan_boss",
+            "difficulty": "ultra_nightmare",
+            "boss_affinity": "void",
+            "success": 1,
+            "total_damage": 32100000.0,
+            "members": [
+                {"champion_name": "Valkyrie", "stats": {"spd": 171}},
+                {"champion_name": "Ninja", "stats": {"spd": 177}},
+            ],
+        },
+        db_path=db_path,
+    )
+    record_run_history(
+        {
+            "source": "probe_import",
+            "source_run_uid": "battle-dungeon-1",
+            "battle_id": "battle-dungeon-1",
+            "encounter_key": "dragon_10",
+            "encounter_name": "Dragon",
+            "encounter_family": "dragon",
+            "game_mode": "dungeon",
+            "area_region": "dungeon",
+            "stage_id": "2062010",
+            "success": 1,
+            "members": [{"champion_name": "Yumeko", "stats": {"spd": 250}}],
+        },
+        db_path=db_path,
+    )
+
+    overview = build_ai_training_overview(db_path=db_path)
+    advisor = overview["advisor"]
+
+    assert advisor["headline"]
+    assert advisor["health"]["distinct_damage_runs"] == 1
+    assert advisor["health"]["skill_capture_runs"] >= 1
+    assert advisor["recommended_targets"][0]["encounter_key"] == "demon_lord_ultra_nightmare"
+    assert any(item["title"] == "Raccogli run PvE per capire meglio le skill" for item in advisor["next_actions"])
+
+
+def test_cleanup_duplicate_run_history_runs_removes_duplicate_children(tmp_path: Path) -> None:
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path = tmp_path / "normalized_account.json"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO run_history_runs (
+                saved_at, source, source_run_uid, battle_id, encounter_key, success, completed, auto_play,
+                feature_schema_version, labels_json, context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-04-05T20:29:22+00:00", "probe_import", "dup-battle", "dup-battle", "demon_lord_ultra_nightmare", 1, 1, 1, "run_history_v1", "{}", "{}"),
+        )
+        first_run_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO run_history_runs (
+                saved_at, source, source_run_uid, battle_id, encounter_key, success, completed, auto_play,
+                feature_schema_version, labels_json, context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-04-05T20:29:23+00:00", "probe_import", "dup-battle", "dup-battle", "demon_lord_ultra_nightmare", 1, 1, 1, "run_history_v1", "{}", "{}"),
+        )
+        second_run_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        for run_id in (first_run_id, second_run_id):
+            conn.execute(
+                """
+                INSERT INTO run_history_members (
+                    run_id, member_order, champion_name, booked, set_summary_json, tags_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, 1, "Ninja", 1, "[]", "[]"),
+            )
+            conn.execute(
+                """
+                INSERT INTO run_history_assets (
+                    run_id, asset_order, asset_kind, asset_path, metadata_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (run_id, 1, "client_probe_battle_results_bin", f"asset-{run_id}.bin", "{}"),
+            )
+        conn.commit()
+
+    summary = cleanup_duplicate_run_history_runs(db_path=db_path, source="probe_import")
+
+    assert summary["duplicate_groups"] == 1
+    assert summary["removed_runs"] == 1
+
+    with sqlite3.connect(db_path) as conn:
+        run_count = int(conn.execute("SELECT COUNT(*) FROM run_history_runs").fetchone()[0])
+        member_count = int(conn.execute("SELECT COUNT(*) FROM run_history_members").fetchone()[0])
+        asset_count = int(conn.execute("SELECT COUNT(*) FROM run_history_assets").fetchone()[0])
+
+    assert run_count == 1
+    assert member_count == 1
+    assert asset_count == 1
+
+
+def test_cleanup_ai_training_duplicates_returns_updated_overview(tmp_path: Path) -> None:
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path = tmp_path / "normalized_account.json"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    with sqlite3.connect(db_path) as conn:
+        for saved_at in ("2026-04-05T20:29:22+00:00", "2026-04-05T20:29:23+00:00"):
+            conn.execute(
+                """
+                INSERT INTO run_history_runs (
+                    saved_at, source, source_run_uid, battle_id, encounter_key, success, completed, auto_play,
+                    feature_schema_version, labels_json, context_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (saved_at, "probe_import", "dup-battle", "dup-battle", "demon_lord_ultra_nightmare", 1, 1, 1, "run_history_v1", "{}", "{}"),
+            )
+        conn.commit()
+
+    payload = cleanup_ai_training_duplicates(db_path=db_path)
+
+    assert payload["ok"] is True
+    assert payload["cleanup"]["removed_runs"] == 1
+    assert payload["overview"]["advisor"]["health"]["duplicate_groups"] == 0
+
+
 def test_train_ai_baseline_model_uses_training_module(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "cbforge.sqlite3"
     source_path = tmp_path / "normalized_account.json"
@@ -924,10 +1070,12 @@ def test_train_ai_baseline_model_uses_training_module(monkeypatch, tmp_path: Pat
 
 
 def test_team_optimizer_loadout_detects_shared_items(monkeypatch) -> None:
+    cbforge_web.TEAM_OPTIMIZER_REPORT_CACHE.clear()
+    cbforge_web.TEAM_OPTIMIZER_LOADOUT_CACHE.clear()
     monkeypatch.setattr(
         cbforge_web,
         "build_team_optimizer_report",
-        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=None: {
+        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", recommendation_source="optimizer", db_path=None: {
             "target": {"key": "demon_lord_unm", "boss_label": "Demon Lord"},
             "selected_team": [
                 {"champion_name": "Ninja", "default_build": "clan_boss_dps", "score": 99.0},
@@ -976,11 +1124,15 @@ def test_team_optimizer_loadout_detects_shared_items(monkeypatch) -> None:
     payload = build_team_optimizer_loadout()
 
     assert payload["summary"]["champions"] == 2
-    assert payload["summary"]["total_swap_count"] == 4
-    assert payload["summary"]["conflict_count"] == 1
-    assert payload["conflicts"][0]["item_id"] == "shared-helmet"
-    assert payload["team"][0]["conflict_item_ids"] == ["shared-helmet"]
-    assert payload["team"][1]["conflict_item_ids"] == ["shared-helmet"]
+    assert payload["summary"]["total_swap_count"] == 2
+    assert payload["summary"]["conflict_count"] == 0
+    assert payload["conflicts"] == []
+    shared_helmet_owners = [
+        row["champion_name"]
+        for row in payload["team"]
+        if any(item["item_id"] == "shared-helmet" for item in row["items"])
+    ]
+    assert shared_helmet_owners == ["Ninja"]
 
 
 def test_prepare_server_runtime_rebuilds_from_local_source(monkeypatch, tmp_path: Path) -> None:
@@ -1008,10 +1160,11 @@ def test_prepare_server_runtime_rebuilds_from_local_source(monkeypatch, tmp_path
 
 
 def test_team_optimizer_local_bridge_plan_wraps_loadout_into_manual_plan(monkeypatch) -> None:
+    cbforge_web.TEAM_OPTIMIZER_LOADOUT_CACHE.clear()
     monkeypatch.setattr(
         cbforge_web,
         "build_team_optimizer_loadout",
-        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=None: {
+        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", recommendation_source="optimizer", db_path=None: {
             "target": {"key": "demon_lord_unm"},
             "summary": {"champions": 1},
             "team": [
@@ -1038,10 +1191,12 @@ def test_team_optimizer_local_bridge_plan_wraps_loadout_into_manual_plan(monkeyp
 
 
 def test_build_team_optimizer_loadout_preserves_selected_team_champion_id(monkeypatch) -> None:
+    cbforge_web.TEAM_OPTIMIZER_REPORT_CACHE.clear()
+    cbforge_web.TEAM_OPTIMIZER_LOADOUT_CACHE.clear()
     monkeypatch.setattr(
         cbforge_web,
         "build_team_optimizer_report",
-        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=None: {
+        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", recommendation_source="optimizer", db_path=None: {
             "target": {"key": "demon_lord_unm"},
             "selected_team": [
                 {
@@ -1079,10 +1234,12 @@ def test_build_team_optimizer_loadout_preserves_selected_team_champion_id(monkey
 
 
 def test_build_team_optimizer_loadout_routes_area_region_from_selected_boss(monkeypatch) -> None:
+    cbforge_web.TEAM_OPTIMIZER_REPORT_CACHE.clear()
+    cbforge_web.TEAM_OPTIMIZER_LOADOUT_CACHE.clear()
     monkeypatch.setattr(
         cbforge_web,
         "build_team_optimizer_report",
-        lambda boss_key="hydra", level_key="hard", affinity="void", db_path=None: {
+        lambda boss_key="hydra", level_key="hard", affinity="void", recommendation_source="optimizer", db_path=None: {
             "target": {"key": "hydra_hard", "boss_key": "hydra"},
             "selected_team": [
                 {
@@ -1124,10 +1281,11 @@ def test_build_team_optimizer_loadout_routes_area_region_from_selected_boss(monk
 
 
 def test_equip_team_optimizer_in_game_invokes_local_bridge_for_each_member(monkeypatch) -> None:
+    cbforge_web.TEAM_OPTIMIZER_LOADOUT_CACHE.clear()
     monkeypatch.setattr(
         cbforge_web,
         "build_team_optimizer_loadout",
-        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=None: {
+        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", recommendation_source="optimizer", db_path=None: {
             "target": {"key": "demon_lord_unm"},
             "team": [
                 {
@@ -1152,6 +1310,11 @@ def test_equip_team_optimizer_in_game_invokes_local_bridge_for_each_member(monke
         return {"ok": True, "action": command}
 
     monkeypatch.setattr(cbforge_web, "invoke_local_hh_bridge", fake_invoke)
+    monkeypatch.setattr(
+        cbforge_web,
+        "ensure_local_hh_bridge_ready",
+        lambda: {"ok": True, "raid_running": True, "helper_capable": True},
+    )
     monkeypatch.setattr(
         cbforge_web,
         "save_team_optimizer_restore_snapshot",
@@ -1213,10 +1376,11 @@ def test_restore_last_team_optimizer_equip_invokes_local_bridge_from_snapshot(mo
 
 
 def test_equip_team_optimizer_member_in_game_invokes_local_bridge_for_single_member(monkeypatch) -> None:
+    cbforge_web.TEAM_OPTIMIZER_LOADOUT_CACHE.clear()
     monkeypatch.setattr(
         cbforge_web,
         "build_team_optimizer_loadout",
-        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=None: {
+        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", recommendation_source="optimizer", db_path=None: {
             "target": {"key": "demon_lord_unm"},
             "team": [
                 {
@@ -1250,6 +1414,11 @@ def test_equip_team_optimizer_member_in_game_invokes_local_bridge_for_single_mem
         return {"ok": True, "action": command}
 
     monkeypatch.setattr(cbforge_web, "invoke_local_hh_bridge", fake_invoke)
+    monkeypatch.setattr(
+        cbforge_web,
+        "ensure_local_hh_bridge_ready",
+        lambda: {"ok": True, "raid_running": True, "helper_capable": True},
+    )
 
     payload = cbforge_web.equip_team_optimizer_member_in_game(champion_name="Pain Keeper")
 
@@ -1257,6 +1426,96 @@ def test_equip_team_optimizer_member_in_game_invokes_local_bridge_for_single_mem
     assert payload["summary"]["members_requested"] == 1
     assert payload["summary"]["members_succeeded"] == 1
     assert captured == [("equip", ("16571", "2001"))]
+
+
+def test_equip_team_optimizer_member_in_game_sends_full_loadout_when_some_items_are_already_current(monkeypatch) -> None:
+    cbforge_web.TEAM_OPTIMIZER_LOADOUT_CACHE.clear()
+    monkeypatch.setattr(
+        cbforge_web,
+        "build_team_optimizer_loadout",
+        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", recommendation_source="optimizer", db_path=None: {
+            "target": {"key": "demon_lord_unm"},
+            "team": [
+                {
+                    "champion_name": "Teodor the Savant",
+                    "champ_id": "23401",
+                    "items": [
+                        {"item_id": "1001", "source_kind": "current"},
+                        {"item_id": "1002", "source_kind": "inventory"},
+                        {"item_id": "1003", "source_kind": "current"},
+                        {"item_id": "1004", "source_kind": "inventory"},
+                    ],
+                }
+            ],
+            "conflicts": [],
+        },
+    )
+    monkeypatch.setattr(
+        cbforge_web,
+        "save_team_optimizer_restore_snapshot",
+        lambda loadout, db_path=None: {
+            "saved_at": "2026-03-27T20:00:00+00:00",
+            "summary": {"champions": 1, "artifacts": 4},
+            "champions": [],
+        },
+    )
+
+    captured: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_invoke(command: str, *arguments: str) -> dict:
+        captured.append((command, arguments))
+        return {"ok": True, "action": command}
+
+    monkeypatch.setattr(cbforge_web, "invoke_local_hh_bridge", fake_invoke)
+    monkeypatch.setattr(
+        cbforge_web,
+        "ensure_local_hh_bridge_ready",
+        lambda: {"ok": True, "raid_running": True, "helper_capable": True},
+    )
+
+    payload = cbforge_web.equip_team_optimizer_member_in_game(champion_name="Teodor the Savant")
+
+    assert payload["ok"] is True
+    assert payload["summary"]["total_artifacts_requested"] == 4
+    assert payload["summary"]["changed_artifacts_requested"] == 2
+    assert captured == [("equip", ("23401", "1001,1002,1003,1004"))]
+
+
+def test_simulate_team_optimizer_opening_preferences_applies_member_openers(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cbforge_web,
+        "_cached_team_optimizer_report",
+        lambda boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", recommendation_source="optimizer", db_path=None: {
+            "target": {"key": "demon_lord_unm"},
+            "selected_team": [
+                {
+                    "champ_id": "champ-1",
+                    "champion_name": "Valkyrie",
+                    "stats": {"spd": 171},
+                    "booked": True,
+                    "skills": [
+                        {
+                            "slot": "A2",
+                            "skill_name": "Shield First",
+                            "cooldown": 4,
+                            "booked_cooldown": 3,
+                            "effects": [{"effect_type": "shield", "target": "ally", "duration": 2, "chance": 100}],
+                        }
+                    ],
+                    "skill_windows": {},
+                }
+            ],
+        },
+    )
+
+    payload = cbforge_web.simulate_team_optimizer_opening_preferences(
+        opener_preferences={"Valkyrie": "A2", "Unknown": "A3"}
+    )
+
+    assert payload["ok"] is True
+    assert payload["preferences"] == {"Valkyrie": "A2"}
+    assert payload["members"][0]["champion_name"] == "Valkyrie"
+    assert any(skill["slot"] == "A2" and skill["use_as_opener"] for skill in payload["members"][0]["skills"])
 
 
 def test_web_detail_exposes_derived_stats_and_warnings(tmp_path: Path) -> None:
@@ -1807,7 +2066,7 @@ def test_sell_queue_summary_groups_candidates_by_page(tmp_path: Path) -> None:
     assert pages["accessory"]["visible_candidates"][0]["item_id"] == "acc-1"
 
 
-def test_sell_artifacts_from_queue_only_sends_current_candidates(tmp_path: Path, monkeypatch) -> None:
+def test_sell_artifacts_from_queue_invokes_local_bridge_and_marks_items_locally(tmp_path: Path, monkeypatch) -> None:
     source_path = tmp_path / "normalized_account.json"
     db_path = tmp_path / "cbforge.sqlite3"
     payload = {
@@ -1867,30 +2126,78 @@ def test_sell_artifacts_from_queue_only_sends_current_candidates(tmp_path: Path,
     source_path.write_text(json.dumps(payload), encoding="utf-8")
     bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
 
-    captured = {}
+    captured = []
 
-    def fake_sell_artifacts_live(artifact_ids, access_token=None, base_url=cbforge_web.hellhades_live.DEFAULT_BASE_URL, timeout_seconds=10.0):
-        captured["artifact_ids"] = list(artifact_ids)
-        captured["access_token"] = access_token
-        return {
-            "status": "success",
-            "message": "SellArtifacts eseguito correttamente.",
-            "requested_count": len(captured["artifact_ids"]),
-        }
+    def fake_invoke(command: str, *arguments: str) -> dict:
+        captured.append((command, arguments))
+        return {"ok": True, "action": command}
 
-    monkeypatch.setattr(cbforge_web.hellhades_live, "sell_artifacts_live", fake_sell_artifacts_live)
+    monkeypatch.setattr(cbforge_web, "invoke_local_hh_bridge", fake_invoke)
 
     result = sell_artifacts_from_queue(
         artifact_ids=["art-1", "art-2", "missing", "art-1"],
         db_path=db_path,
-        access_token="secret-token",
     )
 
-    assert captured["artifact_ids"] == ["art-1"]
-    assert captured["access_token"] == "secret-token"
+    assert captured == [("sell", ("art-1",))]
+    assert result["status"] == "sold_local"
     assert result["approved_ids"] == ["art-1"]
     assert result["rejected_ids"] == ["art-2", "missing"]
     assert result["approved_items"][0]["item_id"] == "art-1"
+    assert cbforge_web.load_local_sell_queue_state(db_path) == ["art-1"]
+
+
+def test_sell_queue_summary_hides_locally_queued_ids(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [],
+        "gear": [
+            {
+                "item_id": "art-1",
+                "item_class": "artifact",
+                "slot": "boots",
+                "set_name": "Attack Speed",
+                "rarity": "rare",
+                "rank": 5,
+                "level": 0,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "atk", "value": 10},
+                "substats": [{"type": "hp", "value": 10, "rolls": 0, "glyph_value": 0}],
+            },
+            {
+                "item_id": "art-2",
+                "item_class": "artifact",
+                "slot": "gloves",
+                "set_name": "Attack Speed",
+                "rarity": "rare",
+                "rank": 5,
+                "level": 0,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "",
+                "locked": False,
+                "main_stat": {"type": "atk", "value": 10},
+                "substats": [{"type": "hp", "value": 10, "rolls": 0, "glyph_value": 0}],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+    cbforge_web.save_local_sell_queue_state(["art-1"], db_path)
+
+    summary = build_sell_queue_summary(db_path=db_path, limit_per_page=5)
+
+    pages = {page["page"]: page for page in summary["pages"]}
+    assert summary["queued_ids"] == ["art-1"]
+    assert pages["artifact"]["candidate_count"] == 1
+    assert pages["artifact"]["visible_candidates"][0]["item_id"] == "art-2"
 
 
 def test_sell_queue_prioritizes_bad_main_stat_plus_zero_first(tmp_path: Path) -> None:
@@ -2025,9 +2332,9 @@ def test_refresh_gear_from_game_copies_legacy_outputs_and_rebuilds(tmp_path: Pat
 
     def fake_run(command, cwd, capture_output, text, check):
         command_log.append((tuple(command), cwd))
-        if command == ["python", "extract_local.py"]:
+        if command == [cbforge_web.sys.executable, "extract_local.py"]:
             (legacy_input / "raw_account.json").write_text(json.dumps(raw_payload), encoding="utf-8")
-        if command == ["python", "normalize.py"]:
+        if command == [cbforge_web.sys.executable, "normalize.py"]:
             (legacy_input / "normalized_account.json").write_text(json.dumps(normalized_payload), encoding="utf-8")
 
         class Completed:
@@ -2053,8 +2360,8 @@ def test_refresh_gear_from_game_copies_legacy_outputs_and_rebuilds(tmp_path: Pat
     result = refresh_gear_from_game(db_path=db_path, source_path=source_path)
 
     assert command_log == [
-        (("python", "extract_local.py"), legacy_dir),
-        (("python", "normalize.py"), legacy_dir),
+        ((cbforge_web.sys.executable, "extract_local.py"), legacy_dir),
+        ((cbforge_web.sys.executable, "normalize.py"), legacy_dir),
     ]
     assert json.loads((base_input / "raw_account.json").read_text(encoding="utf-8")) == raw_payload
     assert json.loads((base_input / "normalized_account.json").read_text(encoding="utf-8")) == normalized_payload
@@ -2084,9 +2391,9 @@ def test_refresh_gear_from_game_does_not_copy_empty_outputs_when_bridge_is_outda
     normalized_payload = {"champions": [], "gear": [], "account_bonuses": []}
 
     def fake_run(command, cwd, capture_output, text, check):
-        if command == ["python", "extract_local.py"]:
+        if command == [cbforge_web.sys.executable, "extract_local.py"]:
             (legacy_input / "raw_account.json").write_text(json.dumps(raw_payload), encoding="utf-8")
-        if command == ["python", "normalize.py"]:
+        if command == [cbforge_web.sys.executable, "normalize.py"]:
             (legacy_input / "normalized_account.json").write_text(json.dumps(normalized_payload), encoding="utf-8")
 
         class Completed:
@@ -2110,6 +2417,34 @@ def test_refresh_gear_from_game_does_not_copy_empty_outputs_when_bridge_is_outda
 
     assert not (base_input / "raw_account.json").exists()
     assert not (base_input / "normalized_account.json").exists()
+
+
+def test_do_post_returns_bad_request_for_invalid_json_body(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    source_path.write_text("{}", encoding="utf-8")
+    db_path = tmp_path / "cbforge.sqlite3"
+    server = cbforge_web.CBForgeWebServer(("127.0.0.1", 0), cbforge_web.CBForgeHandler, db_path=db_path, source_path=source_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/api/refresh-gear"
+        request = urllib.request.Request(
+            url,
+            data=b"{invalid",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(request, timeout=5)
+
+        assert exc_info.value.code == 400
+        body = exc_info.value.read().decode("utf-8")
+        assert "Body JSON non valido" in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_run_recorder_controller_starts_and_stops_probe_process(tmp_path: Path, monkeypatch) -> None:
@@ -2252,6 +2587,63 @@ def test_run_recorder_session_queries_expose_saved_probe_data(tmp_path: Path) ->
     assert detail["runs"][0]["total_damage"] is None
     assert detail["runs"][0]["member_damage"] == []
     assert detail["snapshots"][0]["relative_path"].startswith("snapshots/battle_results/")
+
+
+def test_run_recorder_session_decodes_candidate_total_damage_from_best_snapshot(tmp_path: Path, monkeypatch) -> None:
+    output_root = tmp_path / "client_probe"
+    session_dir = output_root / "20260406T124846Z"
+    snapshots_dir = session_dir / "snapshots" / "battle_results"
+    snapshots_dir.mkdir(parents=True)
+    raw_snapshot = snapshots_dir / "capture.bin"
+    raw_snapshot.write_bytes(b"rich")
+    (session_dir / "session.json").write_text("{}", encoding="utf-8")
+    events = [
+        {
+            "captured_at": "2026-04-06T15:22:46+00:00",
+            "event_type": "battle_context",
+            "battle": {
+                "battle_id": "battle-4019022",
+                "stage_id": "4019022",
+                "formation_index": 0,
+                "player_members": ["Underpriest Brogni", "Valkyrie", "Ninja", "Jintoro", "Michelangelo"],
+                "enemy_rows": [{"slot": 1, "type_id": 22266, "name": "Type 22266", "level": 250}],
+            },
+        },
+        {
+            "captured_at": "2026-04-06T15:29:21+00:00",
+            "event_type": "forced_file_snapshot",
+            "source_name": "battle_results",
+            "saved": {"marker": {"size": 11833}, "raw_path": str(raw_snapshot)},
+            "battle": {
+                "battle_id": "battle-4019022",
+                "stage_id": "4019022",
+                "formation_index": 0,
+                "player_members": ["Underpriest Brogni", "Valkyrie", "Ninja", "Jintoro", "Michelangelo"],
+                "enemy_rows": [{"slot": 1, "type_id": 22266, "name": "Type 22266", "level": 250}],
+            },
+        },
+    ]
+    (session_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in events) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cbforge_web,
+        "extract_damage_summary",
+        lambda path: {
+            "total_damage": 29_557_649,
+            "damage_trusted": False,
+            "total_damage_status": "candidate_demon_lord_s_a_dt_high32",
+            "member_damage_status": "not_available",
+            "members": [],
+        },
+    )
+
+    detail = run_recorder_session_detail("20260406T124846Z", output_root=output_root)
+
+    assert detail["latest_run"]["total_damage"] == 29_557_649
+    assert detail["latest_run"]["total_damage_status"] == "candidate_demon_lord_s_a_dt_high32"
+    assert detail["latest_run"]["damage_note"] == "Total damage disponibile dal raw battleResults come candidato forte."
 
 
 def test_run_recorder_session_queries_count_replay_runs_without_createbattle_block(tmp_path: Path) -> None:
@@ -2699,3 +3091,45 @@ def test_run_history_run_detail_exposes_skill_usage_and_raw_payload(tmp_path: Pa
     assert detail["members"][0]["derived"]["incoming_target_share_pct"] == 100.0
     assert detail["derived_totals"]["incoming_target_events"] == 4
     assert session_detail["db_runs"][0]["run_id"] == summary["run_id"]
+
+
+def test_run_history_run_detail_falls_back_to_run_total_damage_when_member_metrics_are_missing(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    summary = record_run_history(
+        {
+            "saved_at": "2026-04-06T15:29:21+00:00",
+            "source": "probe_import",
+            "source_run_uid": "battle-4019022",
+            "battle_id": "battle-4019022",
+            "probe_session_slug": "20260406T124846Z",
+            "encounter_key": "demon_lord_ultra_nightmare",
+            "encounter_name": "Demon Lord Ultra-Nightmare",
+            "stage_id": "4019022",
+            "stage_label": "Demon Lord. Ultra-Nightmare",
+            "success": True,
+            "completed": True,
+            "total_damage": 29_557_649,
+            "members": [
+                {
+                    "champion_name": "Underpriest Brogni",
+                    "champion_type_id": 5936,
+                    "level": 60,
+                    "rank": 6,
+                    "metrics": {},
+                }
+            ],
+            "assets": [],
+        },
+        db_path=db_path,
+    )
+
+    detail = run_history_run_detail(summary["run_id"], db_path=db_path)
+
+    assert detail["run"]["total_damage"] == 29_557_649
+    assert detail["derived_totals"]["damage_done"] == 29_557_649
+    assert detail["derived_totals"]["damage_done_members_total"] == 0
+    assert detail["derived_totals"]["damage_done_run_total"] == 29_557_649

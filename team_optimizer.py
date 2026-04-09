@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set
 
 from clan_boss_simulator import default_member_row as default_clan_boss_member_row, simulate_clan_boss_battle
-from forge_db import DB_PATH, ensure_schema
+from forge_db import DB_PATH, ensure_schema, load_set_rules
 
 
 @dataclass(frozen=True)
@@ -216,6 +216,155 @@ DEMON_LORD_ENCOUNTER_KEYS: Dict[str, str] = {
 }
 
 
+def clan_boss_model_encounter_key(level_key: str) -> str:
+    normalized = str(level_key or "").strip() or "ultra_nightmare"
+    if normalized == "ultra_nightmare":
+        return "demon_lord_ultra_nightmare"
+    if normalized == "nightmare":
+        return "demon_lord_nm"
+    return f"demon_lord_{normalized}"
+
+
+def normalize_team_recommendation_source(source: str, boss_key: str) -> str:
+    normalized = str(source or "").strip().lower() or "optimizer"
+    if normalized == "ai" and str(boss_key or "").strip() == "demon_lord":
+        return "ai"
+    return "optimizer"
+
+
+def resolve_team_recommendation_strategy(source: str, boss_key: str) -> tuple[str, str, Dict[str, Any]]:
+    normalized = str(source or "").strip().lower() or "optimizer"
+    family = str(boss_key or "").strip().lower()
+    objective = "stable"
+    if normalized in {"push", "optimizer_push", "optimizer_70m", "push_70m"}:
+        normalized = "optimizer"
+        objective = "push_70m"
+    elif normalized in {"ai_push", "ai_70m"}:
+        normalized = "ai"
+        objective = "push_70m"
+    elif normalized in {"stable", "optimizer_stable"}:
+        normalized = "optimizer"
+        objective = "stable"
+    elif normalized in {"ai_stable"}:
+        normalized = "ai"
+        objective = "stable"
+
+    effective_source = normalize_team_recommendation_source(normalized, family)
+    objective_meta: Dict[str, Any] = {
+        "key": objective,
+        "label": "Baseline stabile" if objective == "stable" else "Push 70M",
+        "description": (
+            "Privilegia shell affidabili, storico medio e copertura difensiva reale."
+            if objective == "stable"
+            else "Spinge shell ad alto ceiling, danno massimo storico e core offensivi piu aggressivi."
+        ),
+        "target_damage": 70_000_000.0 if family == "demon_lord" and objective == "push_70m" else None,
+    }
+    return effective_source, objective, objective_meta
+
+
+def historical_encounter_keys(family_key: str, level_key: str, encounter_key: str) -> tuple[str, ...]:
+    family = str(family_key or "").strip().lower()
+    level = str(level_key or "").strip().lower()
+    primary = str(encounter_key or "").strip()
+    keys: List[str] = [primary] if primary else []
+    if family == "demon_lord":
+        if level == "ultra_nightmare":
+            keys.extend(["demon_lord_unm", "demon_lord_ultra_nightmare"])
+        elif level == "nightmare":
+            keys.extend(["demon_lord_nm", "demon_lord_nightmare"])
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for key in keys:
+        normalized = str(key or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        deduped.append(normalized)
+        seen.add(normalized)
+    return tuple(deduped)
+
+
+def _team_signature(names: Iterable[str]) -> str:
+    normalized = sorted(str(name or "").strip() for name in names if str(name or "").strip())
+    return "|".join(normalized)
+
+
+def _merge_history_metric(target: Dict[str, Any], total_damage: float) -> None:
+    target["run_count"] = int(target.get("run_count") or 0) + 1
+    target["total_damage_sum"] = float(target.get("total_damage_sum") or 0.0) + float(total_damage)
+    target["avg_total_damage"] = round(float(target["total_damage_sum"]) / max(int(target["run_count"]), 1), 2)
+    target["max_total_damage"] = round(max(float(target.get("max_total_damage") or 0.0), float(total_damage)), 2)
+
+
+def _build_team_history_index(rows: Iterable[sqlite3.Row]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    members_by_run: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        run_id = int(row["run_id"] or 0)
+        run = members_by_run.setdefault(
+            run_id,
+            {
+                "total_damage": _to_float(row["total_damage"]),
+                "champion_names": [],
+            },
+        )
+        champion_name = str(row["champion_name"] or "").strip()
+        if champion_name:
+            run["champion_names"].append(champion_name)
+
+    exact_teams: Dict[str, Dict[str, Any]] = {}
+    pair_teams: Dict[str, Dict[str, Any]] = {}
+    for run in members_by_run.values():
+        champion_names = sorted({str(name) for name in list(run.get("champion_names") or []) if str(name)})
+        total_damage = _to_float(run.get("total_damage"))
+        if len(champion_names) >= 2:
+            for first_index, first_name in enumerate(champion_names):
+                for second_name in champion_names[first_index + 1:]:
+                    pair_key = _team_signature((first_name, second_name))
+                    pair_row = pair_teams.setdefault(pair_key, {"run_count": 0, "total_damage_sum": 0.0, "avg_total_damage": 0.0, "max_total_damage": 0.0})
+                    _merge_history_metric(pair_row, total_damage)
+        if champion_names:
+            exact_key = _team_signature(champion_names)
+            exact_row = exact_teams.setdefault(exact_key, {"run_count": 0, "total_damage_sum": 0.0, "avg_total_damage": 0.0, "max_total_damage": 0.0})
+            exact_row["team_size"] = len(champion_names)
+            _merge_history_metric(exact_row, total_damage)
+    return {"exact": exact_teams, "pairs": pair_teams}
+
+
+def _group_equipped_sets_by_champion(
+    rows: Iterable[sqlite3.Row],
+    set_rules: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    piece_counts: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        champ_id = str(row["equipped_by"] or "").strip()
+        set_name = str(row["set_name"] or "").strip()
+        if not champ_id or not set_name:
+            continue
+        piece_counts.setdefault(champ_id, {})
+        piece_counts[champ_id][set_name] = int(piece_counts[champ_id].get(set_name) or 0) + 1
+
+    output: Dict[str, List[Dict[str, Any]]] = {}
+    for champ_id, counts in piece_counts.items():
+        summary: List[Dict[str, Any]] = []
+        for set_name, piece_count in sorted(counts.items()):
+            rule = dict(set_rules.get(set_name) or {})
+            pieces_required = max(int(rule.get("pieces_required") or 0), 1)
+            completed_sets = int(piece_count // pieces_required)
+            if completed_sets <= 0:
+                continue
+            summary.append(
+                {
+                    "set_name": set_name,
+                    "display_name": set_name,
+                    "pieces": int(piece_count),
+                    "completed_sets": completed_sets,
+                    "pieces_required": pieces_required,
+                }
+            )
+        output[champ_id] = summary
+    return output
+
+
 CHAMPION_HINTS: Dict[str, ChampionHint] = {
     "Maneater": ChampionHint(("speed", "survival", "unkillable", "support"), {"demon_lord_unm": 100.0}, "speed_tuned_support"),
     "Pain Keeper": ChampionHint(("speed", "support", "cooldown"), {"demon_lord_unm": 94.0}, "cooldown_support"),
@@ -257,6 +406,25 @@ CHAMPION_HINTS: Dict[str, ChampionHint] = {
     "Duchess Lilitu": ChampionHint(("support", "revive", "survival"), {"hydra_hard": 94.0, "iron_twins_stage_15": 90.0}, "support_tank"),
     "Krisk the Ageless": ChampionHint(("support", "ally_protect", "decrease_speed", "survival"), {"hydra_hard": 95.0, "iron_twins_stage_15": 93.0}, "ally_protector"),
     "Pythion": ChampionHint(("support", "cleanse", "revive", "survival"), {"hydra_hard": 91.0, "iron_twins_stage_15": 89.0}, "support_tank"),
+}
+
+CHAMPION_CAPABILITY_HINTS: Dict[str, Set[str]] = {
+    "Doompriest": {"healing", "sustain", "cleanse"},
+    "Riho Bonespear": {"healing", "sustain", "cleanse"},
+    "Underpriest Brogni": {"shield", "sustain", "defense_core"},
+    "Rakka Viletide": {"revive", "sustain"},
+    "Tyrant Ixlimor": {"ally_protect", "sustain", "defense_core"},
+    "Teodor the Savant": {"poison", "boss_pressure"},
+    "Martyr": {"ally_protect", "defense_core", "counterattack", "sustain"},
+    "Valkyrie": {"shield", "defense_core", "counterattack", "sustain"},
+}
+
+SET_SUSTAIN_HINTS: Dict[str, Set[str]] = {
+    "Life Drain": {"sustain"},
+    "Crit Rate And Life Drain": {"sustain"},
+    "HP And Heal": {"sustain"},
+    "Shield And HP": {"shield", "sustain", "defense_core"},
+    "Shield And Speed": {"shield", "sustain", "defense_core"},
 }
 
 
@@ -407,6 +575,7 @@ def build_team_optimizer_report(
     boss_key: str = "demon_lord",
     level_key: str = "ultra_nightmare",
     affinity: str = "void",
+    recommendation_source: str = "optimizer",
     db_path: Path = DB_PATH,
 ) -> Dict[str, Any]:
     family, profile, effective_level, effective_affinity, encounter_key, thresholds = resolve_optimizer_context(
@@ -414,6 +583,12 @@ def build_team_optimizer_report(
         level_key=level_key,
         affinity=affinity,
     )
+    encounter_history_keys = historical_encounter_keys(
+        family_key=family.key,
+        level_key=effective_level,
+        encounter_key=encounter_key,
+    )
+    history_placeholders = ", ".join("?" for _ in encounter_history_keys) or "?"
 
     ensure_schema(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -445,6 +620,17 @@ def build_team_optimizer_report(
             ORDER BY source ASC
             """
         ).fetchall()
+        equipped_set_rows = conn.execute(
+            """
+            SELECT equipped_by, set_name
+            FROM gear_items
+            WHERE equipped_by IS NOT NULL
+              AND equipped_by != ''
+              AND set_name IS NOT NULL
+              AND set_name != ''
+            """
+        ).fetchall()
+        set_rules = load_set_rules(conn)
         role_rows = conn.execute("SELECT champion_name, role_tag FROM champion_roles").fetchall()
         skill_rows = conn.execute(
             """
@@ -459,7 +645,7 @@ def build_team_optimizer_report(
             """
         ).fetchall()
         evidence_rows = conn.execute(
-            """
+            f"""
             SELECT
                 rm.champion_name,
                 COUNT(DISTINCT rr.run_id) AS run_count,
@@ -472,10 +658,22 @@ def build_team_optimizer_report(
             LEFT JOIN run_history_member_metrics rmm
                 ON rmm.run_id = rm.run_id
                 AND rmm.member_order = rm.member_order
-            WHERE rr.encounter_key = ?
+            WHERE rr.encounter_key IN ({history_placeholders})
             GROUP BY rm.champion_name
             """,
-            (encounter_key,),
+            encounter_history_keys,
+        ).fetchall()
+        team_history_rows = conn.execute(
+            f"""
+            SELECT rr.run_id, rr.total_damage, rm.champion_name
+            FROM run_history_runs rr
+            JOIN run_history_members rm
+                ON rm.run_id = rr.run_id
+            WHERE rr.encounter_key IN ({history_placeholders})
+              AND rr.total_damage IS NOT NULL
+            ORDER BY rr.run_id ASC, rm.member_order ASC
+            """,
+            encounter_history_keys,
         ).fetchall()
 
     best_roster_rows = _dedupe_roster_by_champion_name(roster_rows)
@@ -485,6 +683,7 @@ def build_team_optimizer_report(
     account_roles_by_name = _group_roles_by_name(role_rows)
     effect_texts_by_name = _group_effect_texts_by_name(skill_rows, effect_rows)
     skills_by_name = _group_skills_by_name(skill_rows, effect_rows)
+    equipped_sets_by_champ_id = _group_equipped_sets_by_champion(equipped_set_rows, set_rules)
     evidence_by_name = {
         str(row["champion_name"] or ""): {
             "run_count": int(row["run_count"] or 0),
@@ -494,6 +693,7 @@ def build_team_optimizer_report(
         }
         for row in evidence_rows
     }
+    team_history = _build_team_history_index(team_history_rows)
 
     candidates = [
         _build_candidate(
@@ -503,6 +703,7 @@ def build_team_optimizer_report(
             account_roles=account_roles_by_name.get(str(row["champion_name"] or ""), set()),
             effect_texts=effect_texts_by_name.get(str(row["champion_name"] or ""), []),
             skills=skills_by_name.get(str(row["champion_name"] or ""), []),
+            current_set_summary=equipped_sets_by_champ_id.get(str(row["champ_id"] or ""), []),
             evidence=evidence_by_name.get(str(row["champion_name"] or ""), {}),
             target_key=encounter_key,
             boss_affinity=effective_affinity,
@@ -513,13 +714,66 @@ def build_team_optimizer_report(
     ]
     candidates.sort(key=lambda item: (-float(item["score"]), item["champion_name"].lower()))
 
+    effective_source, objective_key, objective_meta = resolve_team_recommendation_strategy(recommendation_source, family.key)
+    selection_notes: List[str] = []
+    source_warnings: List[str] = []
     selected_team = _select_team(
         candidates,
         profile,
         target_key=encounter_key,
         thresholds=thresholds,
         boss_affinity=effective_affinity,
+        team_history=team_history,
+        objective_key=objective_key,
     )
+    if effective_source == "ai":
+        try:
+            from ml_team_baseline import default_model_path, recommend_best_team_from_candidates
+
+            model_path = default_model_path(clan_boss_model_encounter_key(effective_level))
+            if not model_path.exists():
+                source_warnings.append(f"Modello AI non trovato: {model_path.name}. Uso proposta optimizer.")
+                effective_source = "optimizer"
+            else:
+                ai_hard_rules: Dict[str, Any] = {}
+                if family.key == "demon_lord":
+                    ai_hard_rules = {
+                        "required_tags": ["decrease_attack"],
+                        "minimum_speed": _to_float(thresholds.get("required_speed")),
+                        "minimum_speed_hits": max(profile.team_size - 1, 1),
+                        "minimum_accuracy": _to_float(thresholds.get("required_accuracy")),
+                        "minimum_accuracy_hits": 2 if objective_key == "push_70m" else 1,
+                    }
+                ai_payload = recommend_best_team_from_candidates(
+                    candidates=list(candidates),
+                    encounter_key=clan_boss_model_encounter_key(effective_level),
+                    difficulty=effective_level,
+                    boss_affinity=effective_affinity,
+                    model_path=model_path,
+                    hard_rules=ai_hard_rules,
+                )
+                ai_team = list(ai_payload.get("best_team") or [])
+                if len(ai_team) == profile.team_size:
+                    selected_team = ai_team
+                    selection_notes.extend(
+                        [
+                            f"Selezione team: AI baseline ({int(ai_payload.get('evaluated_combinations') or 0)} combinazioni).",
+                            f"Danno previsto: {_to_float(ai_payload.get('predicted_total_damage')):.0f}.",
+                            f"Obiettivo ranking: {objective_meta.get('label')}.",
+                        ]
+                    )
+                    if ai_payload.get("hard_rules"):
+                        selection_notes.append("AI filtrata con vincoli minimi di speed/debuff prima del ranking.")
+                    if ai_payload.get("predicted_success_probability") is not None:
+                        selection_notes.append(
+                            f"Probabilita successo stimata: {_to_float(ai_payload.get('predicted_success_probability')) * 100:.1f}%."
+                        )
+                else:
+                    source_warnings.append("AI senza team completo: uso proposta optimizer.")
+                    effective_source = "optimizer"
+        except Exception as exc:
+            source_warnings.append(f"AI non disponibile: {exc}. Uso proposta optimizer.")
+            effective_source = "optimizer"
     selected_names = {str(item["champion_name"] or "") for item in selected_team}
     bench = [item for item in candidates if str(item["champion_name"] or "") not in selected_names][:5]
 
@@ -552,6 +806,8 @@ def build_team_optimizer_report(
         thresholds=thresholds,
         boss_affinity=effective_affinity,
     )
+    selected_team_history = dict((team_history.get("exact") or {}).get(_team_signature(selected_names)) or {})
+    objective_target_damage = _to_float(objective_meta.get("target_damage"))
     warnings: List[str] = []
     if missing_required:
         warnings.append(f"Coverage incompleta: {', '.join(missing_required)}.")
@@ -562,8 +818,11 @@ def build_team_optimizer_report(
             warnings.append("Manca una risposta chiara a stun/debuff, salvo tune specifici.")
         if sum(1 for member in selected_team if "damage" in list(member.get("roles") or [])) < 2:
             warnings.append("Il team ha pochi slot dichiaratamente offensivi.")
-        if effective_affinity != "void":
-            warnings.append(f"Affinita boss selezionata: {effective_affinity}. Controlla i campioni in weak affinity.")
+        weak_affinity_members = list(team_fit.get("weak_affinity_members") or [])
+        if effective_affinity != "void" and weak_affinity_members:
+            warnings.append(
+                f"Roster corto su affinity {effective_affinity}: restano dentro campioni weak affinity ({', '.join(weak_affinity_members[:3])})."
+            )
     elif family.key == "hydra":
         if "block_buffs" not in team_roles:
             warnings.append("Hydra senza ruolo Block Buffs esplicito nel team proposto.")
@@ -575,6 +834,12 @@ def build_team_optimizer_report(
         if effective_affinity != "void":
             warnings.append(f"Affinity Iron Twins selezionata: {effective_affinity}. Controlla i weak hits.")
     warnings.extend(list(team_fit.get("warnings") or []))
+    if objective_key == "push_70m" and family.key == "demon_lord":
+        history_max = _to_float(selected_team_history.get("max_total_damage"))
+        if history_max > 0.0 and objective_target_damage > 0.0 and history_max < objective_target_damage:
+            warnings.append(
+                f"Ceiling storico sotto target: shell vista fino a {history_max:.0f} danni, target {objective_target_damage:.0f}."
+            )
 
     return {
         "target": {
@@ -588,6 +853,14 @@ def build_team_optimizer_report(
             "level_label": display_level_label(family, effective_level),
             "affinity_key": effective_affinity,
             "affinity_label": display_affinity_label(family, effective_affinity),
+            "recommendation_source": effective_source,
+            "recommendation_label": (
+                f"{'AI baseline' if effective_source == 'ai' else 'Optimizer'} - {objective_meta.get('label')}"
+            ),
+            "objective_key": objective_key,
+            "objective_label": str(objective_meta.get("label") or objective_key),
+            "objective_description": str(objective_meta.get("description") or ""),
+            "target_damage": objective_meta.get("target_damage"),
             "thresholds": dict(thresholds),
         },
         "selected_team": selected_team,
@@ -596,9 +869,26 @@ def build_team_optimizer_report(
         "coverage": coverage,
         "valuable_role_coverage": valuable_coverage,
         "team_fit": team_fit,
+        "historical_team_evidence": selected_team_history,
         "missing_required_roles": missing_required,
-        "warnings": warnings,
+        "warnings": source_warnings + warnings,
         "notes": [
+            *selection_notes,
+            f"Obiettivo attivo: {objective_meta.get('label')}. {objective_meta.get('description')}",
+            *(
+                [
+                    f"Storico forte su questa shell: {int(selected_team_history.get('run_count') or 0)} run, media {_to_float(selected_team_history.get('avg_total_damage')):.0f} danni."
+                ]
+                if selected_team_history
+                else []
+            ),
+            *(
+                [
+                    f"Gap dal target: max storico {_to_float(selected_team_history.get('max_total_damage')):.0f} su target {objective_target_damage:.0f}."
+                ]
+                if objective_key == "push_70m" and objective_target_damage > 0.0 and selected_team_history
+                else []
+            ),
             "Scheletro euristico: usa hint statici, role inference da skill/effect e stats correnti del roster.",
             "I punteggi ora pesano anche sustain, strati difensivi, debuff chiave e sinergia di squadra, ma non sono ancora un simulatore turn-order trusted.",
         ],
@@ -611,18 +901,25 @@ def _select_team(
     target_key: str,
     thresholds: Mapping[str, float],
     boss_affinity: str,
+    team_history: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
+    objective_key: str = "stable",
 ) -> List[Dict[str, Any]]:
     selected: List[Dict[str, Any]] = []
     selected_names: Set[str] = set()
     covered_roles: Set[str] = set()
 
     for requirement in profile.required_role_groups:
-        options = [
+        all_options = [
             candidate
             for candidate in candidates
             if candidate["champion_name"] not in selected_names
             and any(role in requirement.acceptable_roles for role in list(candidate.get("roles") or []))
         ]
+        options = [
+            candidate
+            for candidate in all_options
+            if not _candidate_is_weak_for_selected_boss(candidate, target_key, boss_affinity)
+        ] or all_options
         if not options:
             continue
         chosen = max(
@@ -636,6 +933,8 @@ def _select_team(
                     target_key=target_key,
                     thresholds=thresholds,
                     boss_affinity=boss_affinity,
+                    team_history=team_history,
+                    objective_key=objective_key,
                 ),
                 item["score"],
             ),
@@ -645,7 +944,12 @@ def _select_team(
         covered_roles.update(list(chosen.get("roles") or []))
 
     while len(selected) < profile.team_size:
-        options = [candidate for candidate in candidates if candidate["champion_name"] not in selected_names]
+        all_options = [candidate for candidate in candidates if candidate["champion_name"] not in selected_names]
+        options = [
+            candidate
+            for candidate in all_options
+            if not _candidate_is_weak_for_selected_boss(candidate, target_key, boss_affinity)
+        ] or all_options
         if not options:
             break
         chosen = max(
@@ -659,6 +963,8 @@ def _select_team(
                     target_key=target_key,
                     thresholds=thresholds,
                     boss_affinity=boss_affinity,
+                    team_history=team_history,
+                    objective_key=objective_key,
                 ),
                 item["score"],
             ),
@@ -674,6 +980,8 @@ def _select_team(
         target_key=target_key,
         thresholds=thresholds,
         boss_affinity=boss_affinity,
+        team_history=team_history,
+        objective_key=objective_key,
     )
 
 
@@ -685,6 +993,8 @@ def _selection_score(
     target_key: str,
     thresholds: Mapping[str, float],
     boss_affinity: str,
+    team_history: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
+    objective_key: str = "stable",
 ) -> float:
     candidate_roles = set(str(role) for role in list(candidate.get("roles") or []))
     new_valuable_roles = sum(1 for role in profile.valuable_roles if role in candidate_roles and role not in covered_roles)
@@ -707,7 +1017,70 @@ def _selection_score(
         boss_affinity=boss_affinity,
     )
     team_delta = float(team_after.get("score") or 0.0) - float(team_before.get("score") or 0.0)
-    return float(candidate.get("score") or 0.0) + (new_required_roles * 8.0) + (new_valuable_roles * 2.0) + team_delta
+    historical_pair_bonus = _historical_pair_bonus([*selected_team, candidate], team_history, objective_key=objective_key)
+    objective_bonus = _objective_candidate_bonus(
+        candidate,
+        selected_team=selected_team,
+        objective_key=objective_key,
+        target_key=target_key,
+        thresholds=thresholds,
+    )
+    return (
+        _candidate_base_score_for_objective(candidate, objective_key=objective_key, target_key=target_key)
+        + (new_required_roles * 8.0)
+        + (new_valuable_roles * 2.0)
+        + team_delta
+        + historical_pair_bonus
+        + objective_bonus
+    )
+
+
+def _exclude_weak_affinity_for_target(target_key: str, boss_affinity: str) -> bool:
+    return str(target_key or "").startswith("demon_lord_") and str(boss_affinity or "").strip().lower() != "void"
+
+
+def _candidate_is_weak_for_selected_boss(candidate: Mapping[str, Any], target_key: str, boss_affinity: str) -> bool:
+    if not _exclude_weak_affinity_for_target(target_key, boss_affinity):
+        return False
+    return str(candidate.get("affinity_matchup") or "").strip().lower() == "weak"
+
+
+def _team_has_disallowed_weak_affinity(team: Sequence[Mapping[str, Any]], target_key: str, boss_affinity: str) -> bool:
+    if not _exclude_weak_affinity_for_target(target_key, boss_affinity):
+        return False
+    return any(_candidate_is_weak_for_selected_boss(member, target_key, boss_affinity) for member in team)
+
+
+def _candidate_base_score_for_objective(
+    candidate: Mapping[str, Any],
+    objective_key: str,
+    target_key: str,
+) -> float:
+    base_score = float(candidate.get("score") or 0.0)
+    if objective_key != "push_70m" or not str(target_key or "").startswith("demon_lord_"):
+        return base_score
+    weighted_signals = dict(candidate.get("weighted_stat_signals") or {})
+    roles = {str(role) for role in list(candidate.get("roles") or [])}
+    capability_tags = {str(tag) for tag in list(candidate.get("capability_tags") or [])}
+    evidence = dict(candidate.get("evidence") or {})
+    generic_score = base_score * 0.18
+    generic_score += min(_to_float(weighted_signals.get("damage")) * 36.0, 42.0)
+    generic_score += min(_to_float(weighted_signals.get("speed")) * 16.0, 18.0)
+    generic_score += min(_to_float(weighted_signals.get("accuracy")) * 10.0, 12.0)
+    generic_score += min(_to_float(weighted_signals.get("survival")) * 8.0, 10.0)
+    if roles & {"damage", "poisoner", "burner"}:
+        generic_score += 8.0
+    if capability_tags & {"poison", "hp_burn", "boss_pressure"}:
+        generic_score += 8.0
+    if capability_tags & {"decrease_defense", "weaken"}:
+        generic_score += 6.0
+    if "decrease_attack" in roles:
+        generic_score += 4.0
+    if "speed" in roles:
+        generic_score += 3.0
+    if int(evidence.get("run_count") or 0) == 0:
+        generic_score += 4.0
+    return round(generic_score, 2)
 
 
 def _build_candidate(
@@ -717,6 +1090,7 @@ def _build_candidate(
     account_roles: Set[str],
     effect_texts: Sequence[str],
     skills: Sequence[Mapping[str, Any]],
+    current_set_summary: Sequence[Mapping[str, Any]],
     evidence: Mapping[str, Any],
     target_key: str,
     boss_affinity: str,
@@ -731,6 +1105,7 @@ def _build_candidate(
     inferred_roles = infer_roles_from_texts(effect_texts)
     roles = sorted(hint_roles | mapped_account_roles | inferred_roles)
     capability_tags = sorted(infer_capabilities_from_texts(effect_texts, roles=roles, champion_name=champion_name))
+    capability_tags = sorted(set(capability_tags) | _infer_set_based_capabilities(current_set_summary))
     skill_windows = _summarize_skill_windows(skills=skills, booked=bool(roster_row["booked"]))
     default_build = hint.default_build if hint else _infer_default_build(roles)
 
@@ -799,6 +1174,7 @@ def _build_candidate(
         "default_build": default_build,
         "capability_tags": capability_tags,
         "skills": [dict(skill) for skill in skills],
+        "set_summary": [dict(row) for row in current_set_summary],
         "skill_windows": skill_windows,
         "score": round(score, 2),
         "score_breakdown": score_breakdown,
@@ -842,7 +1218,7 @@ def infer_capabilities_from_texts(texts: Iterable[str], roles: Iterable[str] = (
             capabilities.update(inferred_capabilities)
 
     role_set = {_normalize_token(role) for role in roles if str(role or "").strip()}
-    if "allyprotect" in role_set:
+    if "ally protect" in role_set:
         capabilities.update({"ally_protect", "sustain", "defense_core"})
     if "counterattack" in role_set:
         capabilities.update({"counterattack", "defense_core"})
@@ -850,19 +1226,19 @@ def infer_capabilities_from_texts(texts: Iterable[str], roles: Iterable[str] = (
         capabilities.update({"cleanse", "cleanse_support"})
     if "unkillable" in role_set:
         capabilities.update({"unkillable", "defense_core"})
-    if "decreaseattack" in role_set:
+    if "decrease attack" in role_set:
         capabilities.update({"decrease_attack", "boss_debuff"})
-    if "decreasespeed" in role_set:
+    if "decrease speed" in role_set:
         capabilities.update({"decrease_speed", "boss_control"})
-    if "blockbuffs" in role_set:
+    if "block buffs" in role_set:
         capabilities.update({"block_buffs", "boss_control"})
     if "provoke" in role_set:
         capabilities.update({"provoke", "boss_control"})
     if "hexer" in role_set:
         capabilities.update({"hex", "boss_pressure"})
-    if "mischieftank" in role_set:
+    if "mischief tank" in role_set:
         capabilities.update({"perfect_veil", "mischief_tank"})
-    if "reviveondeath" in role_set:
+    if "revive on death" in role_set:
         capabilities.update({"revive_on_death", "defense_core"})
     if "poisoner" in role_set:
         capabilities.update({"poison", "boss_pressure"})
@@ -872,6 +1248,18 @@ def infer_capabilities_from_texts(texts: Iterable[str], roles: Iterable[str] = (
         capabilities.add("cooldown_reset")
     if _normalize_token(champion_name) == "maneater":
         capabilities.add("unkillable")
+    capabilities.update(CHAMPION_CAPABILITY_HINTS.get(str(champion_name or "").strip(), set()))
+    return capabilities
+
+
+def _infer_set_based_capabilities(set_summary: Sequence[Mapping[str, Any]]) -> Set[str]:
+    capabilities: Set[str] = set()
+    for row in list(set_summary or []):
+        set_name = str(row.get("display_name") or row.get("set_name") or "").strip()
+        completed_sets = int(row.get("completed_sets") or 0)
+        if not set_name or completed_sets <= 0:
+            continue
+        capabilities.update(SET_SUSTAIN_HINTS.get(set_name, set()))
     return capabilities
 
 
@@ -1080,7 +1468,11 @@ def _sim_effects_for_skill(candidate: Mapping[str, Any], skill: Mapping[str, Any
     return effects
 
 
-def build_candidate_clan_boss_member_row(candidate: Mapping[str, Any], slot_index: int) -> Dict[str, Any]:
+def build_candidate_clan_boss_member_row(
+    candidate: Mapping[str, Any],
+    slot_index: int,
+    opener_slot: str | None = None,
+) -> Dict[str, Any]:
     member_row = default_clan_boss_member_row(slot_index)
     member_row["champ_id"] = str(candidate.get("champ_id") or "").strip()
     member_row["champion_name"] = str(candidate.get("champion_name") or "").strip()
@@ -1123,6 +1515,22 @@ def build_candidate_clan_boss_member_row(candidate: Mapping[str, Any], slot_inde
     if not built_any and default_skills:
         default_skills[0]["enabled"] = True
 
+    normalized_opener = str(opener_slot or "").strip().upper()
+    if normalized_opener in {"A1", "A2", "A3", "A4"}:
+        opener_applied = False
+        for skill_row in default_skills:
+            is_requested_slot = bool(skill_row.get("enabled")) and str(skill_row.get("slot") or "").upper() == normalized_opener
+            skill_row["use_as_opener"] = is_requested_slot
+            if is_requested_slot:
+                skill_row["priority"] = max(int(skill_row.get("priority") or 0), 500)
+                opener_applied = True
+        if opener_applied:
+            member_row["notes"] = f"{member_row['notes']} | opener {normalized_opener}".strip(" |")
+    elif normalized_opener == "NONE":
+        for skill_row in default_skills:
+            skill_row["use_as_opener"] = False
+        member_row["notes"] = f"{member_row['notes']} | opener manuale disattivato".strip(" |")
+
     member_row["skills"] = default_skills
     return member_row
 
@@ -1147,8 +1555,21 @@ def simulate_candidate_team(
     difficulty: str = "ultra_nightmare",
     affinity: str = "void",
     max_boss_turns: int = 6,
+    opener_overrides: Mapping[str, str] | None = None,
 ) -> Dict[str, Any]:
-    members = [build_candidate_clan_boss_member_row(candidate, index) for index, candidate in enumerate(team, start=1)]
+    opener_map = {
+        str(champion_name or "").strip(): str(slot or "").strip().upper()
+        for champion_name, slot in dict(opener_overrides or {}).items()
+        if str(champion_name or "").strip() and str(slot or "").strip()
+    }
+    members = [
+        build_candidate_clan_boss_member_row(
+            candidate,
+            index,
+            opener_slot=opener_map.get(str(candidate.get("champion_name") or "").strip()),
+        )
+        for index, candidate in enumerate(team, start=1)
+    ]
     if not members:
         return {"ok": False, "errors": ["Inserisci almeno un campione nel team."], "team": []}
     stun_target_slot = min(members, key=lambda row: (_to_float(row.get("speed") or 0.0), int(row.get("slot_index") or 99))).get("slot_index") or len(members)
@@ -1217,6 +1638,21 @@ def _evaluate_team_fit(
         for name, tags in capability_sets.items()
         if tags & {"poison", "hp_burn", "boss_pressure"} or any(effect in skill_windows_by_name.get(name, {}) for effect in {"poison", "hp_burn"})
     )
+    healing_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if "healing" in tags
+    )
+    shield_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if "shield" in tags or "shield" in skill_windows_by_name.get(name, {})
+    )
+    ally_protect_members = sorted(
+        name
+        for name, tags in capability_sets.items()
+        if "ally_protect" in tags or "ally_protect" in skill_windows_by_name.get(name, {})
+    )
     cleanse_members = sorted(
         name
         for name, tags in capability_sets.items()
@@ -1228,6 +1664,23 @@ def _evaluate_team_fit(
         if "speed" in list(member.get("roles") or []) or "speed_boost" in capability_sets.get(str(member.get("champion_name") or ""), set())
     )
     weak_affinity_members = sorted(str(member.get("champion_name") or "") for member in members if str(member.get("affinity_matchup") or "") == "weak")
+
+    def windows_for(effect_type: str) -> List[Dict[str, Any]]:
+        windows: List[Dict[str, Any]] = []
+        for member in members:
+            name = str(member.get("champion_name") or "")
+            window = dict(skill_windows_by_name.get(name, {}).get(effect_type) or {})
+            if not window:
+                continue
+            windows.append({"champion_name": name, **window})
+        windows.sort(
+            key=lambda row: (
+                -float(row.get("quality") or 0.0),
+                int(row.get("cooldown") or 0),
+                str(row.get("champion_name") or ""),
+            )
+        )
+        return windows
 
     def best_window(effect_type: str) -> Dict[str, Any]:
         best: Dict[str, Any] = {}
@@ -1244,6 +1697,7 @@ def _evaluate_team_fit(
     attack_down_window = best_window("decrease_attack")
     defense_down_window = best_window("decrease_defense")
     weaken_window = best_window("weaken")
+    shield_windows = windows_for("shield")
     block_debuffs_window = best_window("block_debuffs")
     increase_def_window = best_window("increase_defense")
     ally_protect_window = best_window("ally_protect")
@@ -1277,6 +1731,10 @@ def _evaluate_team_fit(
             score -= 24.0
             warnings.append("Mancano cure o sustain affidabile: il team rischia di collassare presto.")
 
+        if not healing_members and float(unkillable_window.get("quality") or 0.0) < 0.7:
+            score -= 14.0
+            warnings.append("Sustain reale assente: vedo scudi/protezioni ma non cure o leech affidabili per i turni lunghi.")
+
         if len(defense_members) >= 2:
             score += 16.0
             notes.append("Difesa di squadra con almeno due strati.")
@@ -1286,6 +1744,21 @@ def _evaluate_team_fit(
         else:
             score -= 18.0
             warnings.append("Mancano strati difensivi stabili: serve piu protezione su tutto il team.")
+
+        if len(shield_windows) >= 2:
+            primary_shield = shield_windows[0]
+            secondary_shield = shield_windows[1]
+            if (
+                float(primary_shield.get("quality") or 0.0) >= 0.58
+                and float(secondary_shield.get("quality") or 0.0) >= 0.58
+                and abs(int(primary_shield.get("cooldown") or 0) - int(secondary_shield.get("cooldown") or 0)) <= 1
+                and not healing_members
+                and not ally_protect_members
+            ):
+                score -= 10.0
+                warnings.append(
+                    f"Scudi sovrapposti: {primary_shield.get('champion_name')} e {secondary_shield.get('champion_name')} rischiano di coprire lo stesso turno lasciando buchi dopo."
+                )
 
         if float(attack_down_window.get("quality") or 0.0) >= 0.85:
             score += 18.0
@@ -1582,6 +2055,9 @@ def _evaluate_team_fit(
     return {
         "score": round(score, 2),
         "sustain_members": sustain_members,
+        "healing_members": healing_members,
+        "shield_members": shield_members,
+        "ally_protect_members": ally_protect_members,
         "defense_members": defense_members,
         "attack_down_members": attack_down_members,
         "defense_down_members": defense_down_members,
@@ -1599,21 +2075,253 @@ def _evaluate_team_fit(
     }
 
 
+def _historical_pair_bonus(
+    team: Sequence[Mapping[str, Any]],
+    team_history: Mapping[str, Mapping[str, Mapping[str, Any]]] | None,
+    objective_key: str = "stable",
+) -> float:
+    pair_index = dict((team_history or {}).get("pairs") or {})
+    if len(team) < 2 or not pair_index:
+        return 0.0
+    names = sorted({str(member.get("champion_name") or "").strip() for member in team if str(member.get("champion_name") or "").strip()})
+    bonus = 0.0
+    for first_index, first_name in enumerate(names):
+        for second_name in names[first_index + 1:]:
+            pair_row = dict(pair_index.get(_team_signature((first_name, second_name))) or {})
+            if not pair_row:
+                continue
+            run_count = int(pair_row.get("run_count") or 0)
+            avg_total_damage = _to_float(pair_row.get("avg_total_damage"))
+            max_total_damage = _to_float(pair_row.get("max_total_damage"))
+            if objective_key == "push_70m":
+                if max_total_damage >= 60_000_000.0:
+                    bonus += min(run_count, 2) * 1.5
+                    bonus += min(max_total_damage / 10_000_000.0, 8.0) * 2.0
+            else:
+                bonus += min(run_count, 4) * 0.8
+                bonus += min(avg_total_damage / 10_000_000.0, 5.0) * 0.8
+    return round(bonus, 2)
+
+
+def _historical_exact_team_bonus(
+    team: Sequence[Mapping[str, Any]],
+    team_history: Mapping[str, Mapping[str, Mapping[str, Any]]] | None,
+    objective_key: str = "stable",
+) -> float:
+    exact_index = dict((team_history or {}).get("exact") or {})
+    if not team or not exact_index:
+        return 0.0
+    exact_row = dict(exact_index.get(_team_signature(str(member.get("champion_name") or "") for member in team)) or {})
+    if not exact_row:
+        return 0.0
+    avg_total_damage = _to_float(exact_row.get("avg_total_damage"))
+    max_total_damage = _to_float(exact_row.get("max_total_damage"))
+    run_count = int(exact_row.get("run_count") or 0)
+    if objective_key == "push_70m":
+        if max_total_damage < 60_000_000.0:
+            return 0.0
+        bonus = min(run_count, 3) * 3.0
+        bonus += min(max_total_damage / 1_000_000.0, 90.0) * 2.5
+        if max_total_damage >= 70_000_000.0:
+            bonus += 140.0
+    else:
+        bonus = min(run_count, 8) * 3.0
+        bonus += min(avg_total_damage / 1_000_000.0, 60.0) * 0.35
+        bonus += min(max_total_damage / 1_000_000.0, 60.0) * 0.1
+    return round(bonus, 2)
+
+
+def _objective_candidate_bonus(
+    candidate: Mapping[str, Any],
+    selected_team: Sequence[Mapping[str, Any]],
+    objective_key: str,
+    target_key: str,
+    thresholds: Mapping[str, float],
+) -> float:
+    if not str(target_key or "").startswith("demon_lord_"):
+        return 0.0
+    roles = {str(role) for role in list(candidate.get("roles") or [])}
+    capability_tags = {str(tag) for tag in list(candidate.get("capability_tags") or [])}
+    weighted_signals = dict(candidate.get("weighted_stat_signals") or {})
+    selected_names = {str(member.get("champion_name") or "") for member in selected_team}
+    selected_roles = {str(role) for member in selected_team for role in list(member.get("roles") or [])}
+    if objective_key == "stable":
+        selected_tags = {str(tag) for member in selected_team for tag in list(member.get("capability_tags") or [])}
+        bonus = 0.0
+        if "healing" not in selected_tags and "healing" in capability_tags:
+            bonus += 48.0
+        if "cleanse" not in selected_tags and capability_tags & {"cleanse", "block_debuffs"}:
+            bonus += 16.0
+        if len(selected_team) >= 2 and "decrease_attack" not in selected_roles and "decrease_attack" in roles:
+            bonus += 12.0
+        if "sustain" in capability_tags:
+            bonus += 6.0
+        return round(bonus, 2)
+
+    if objective_key != "push_70m":
+        return 0.0
+    bonus = 0.0
+    if roles & {"damage", "poisoner", "burner"}:
+        bonus += 9.0
+    if capability_tags & {"poison", "hp_burn", "boss_pressure"}:
+        bonus += 7.0
+    if capability_tags & {"decrease_defense", "weaken"}:
+        bonus += 6.0
+    if "counterattack" in roles:
+        bonus += 4.0
+    bonus += min(_to_float(weighted_signals.get("damage")) * 9.0, 12.0)
+    bonus += min(_to_float(weighted_signals.get("speed")) * 5.0, 6.0)
+    if "decrease_attack" in roles and "decrease_attack" not in selected_roles:
+        bonus += 5.0
+    if "speed" in roles and "speed" not in selected_roles:
+        bonus += 3.0
+    if "Maneater" in selected_names and str(candidate.get("champion_name") or "") == "Pain Keeper":
+        bonus += 10.0
+    return round(bonus, 2)
+
+
+def _objective_team_bonus(
+    team: Sequence[Mapping[str, Any]],
+    objective_key: str,
+    target_key: str,
+    thresholds: Mapping[str, float],
+    boss_affinity: str,
+    team_fit: Mapping[str, Any] | None = None,
+    team_history: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
+) -> float:
+    fit = dict(team_fit or _evaluate_team_fit(team, target_key=target_key, thresholds=thresholds, boss_affinity=boss_affinity))
+    if not str(target_key or "").startswith("demon_lord_"):
+        return 0.0
+    damage_roles = sum(1 for member in team if {"damage", "poisoner", "burner"} & {str(role) for role in list(member.get("roles") or [])})
+    capability_union = {str(tag) for member in team for tag in list(member.get("capability_tags") or [])}
+    capability_by_name = {
+        str(member.get("champion_name") or ""): {str(tag) for tag in list(member.get("capability_tags") or [])}
+        for member in team
+    }
+    roles_by_name = {
+        str(member.get("champion_name") or ""): {str(role) for role in list(member.get("roles") or [])}
+        for member in team
+    }
+    exact_history = dict((team_history or {}).get("exact", {}).get(_team_signature(str(member.get("champion_name") or "") for member in team)) or {})
+    avg_total_damage = _to_float(exact_history.get("avg_total_damage"))
+    max_total_damage = _to_float(exact_history.get("max_total_damage"))
+    run_count = int(exact_history.get("run_count") or 0)
+    attack_down_members = len(list(fit.get("attack_down_members") or []))
+    pressure_members = len(list(fit.get("pressure_members") or []))
+    defense_members = len(list(fit.get("defense_members") or []))
+    cleanse_members = len(list(fit.get("cleanse_members") or []))
+    speed_members = len(list(fit.get("speed_members") or []))
+
+    if objective_key == "push_70m":
+        bonus = 0.0
+        bonus += damage_roles * 10.0
+        bonus += pressure_members * 7.0
+        bonus += 8.0 if capability_union & {"decrease_defense", "weaken"} else -8.0
+        bonus += 6.0 if attack_down_members >= 1 else -18.0
+        bonus += 4.0 if speed_members >= 1 else 0.0
+        bonus += min(max_total_damage / 1_000_000.0, 90.0) * 1.8
+        bonus += min(avg_total_damage / 1_000_000.0, 90.0) * 0.8
+        bonus += min(run_count, 3) * 3.0
+        if run_count == 0:
+            bonus += 28.0
+        elif max_total_damage < 50_000_000.0:
+            bonus -= 35.0
+        elif max_total_damage < 60_000_000.0:
+            bonus -= 12.0
+        if max_total_damage >= 70_000_000.0:
+            bonus += 120.0
+        elif max_total_damage >= 60_000_000.0:
+            bonus += 70.0
+        elif max_total_damage <= 0.0:
+            bonus += 10.0 if damage_roles >= 3 and pressure_members >= 2 else -10.0
+        if damage_roles < 3:
+            bonus -= 22.0
+        if pressure_members == 0:
+            bonus -= 18.0
+        return round(bonus, 2)
+
+    bonus = 0.0
+    bonus += min(run_count, 8) * 9.0
+    bonus += min(avg_total_damage / 1_000_000.0, 60.0) * 0.8
+    bonus += min(max_total_damage / 1_000_000.0, 60.0) * 0.3
+    bonus += attack_down_members * 6.0
+    bonus += defense_members * 4.0
+    bonus += cleanse_members * 4.0
+    healing_members = len(list(fit.get("healing_members") or []))
+    sustain_members = len(list(fit.get("sustain_members") or []))
+    undercovered_supports = [
+        name
+        for name, roles in roles_by_name.items()
+        if roles & {"support", "debuffer", "decrease_attack"}
+        and not capability_by_name.get(name, set()) & {"healing", "sustain", "shield", "ally_protect", "defense_core", "unkillable"}
+    ]
+    exposed_attack_down = [
+        name
+        for name in list(fit.get("attack_down_members") or [])
+        if not capability_by_name.get(name, set()) & {"healing", "sustain", "shield", "ally_protect", "defense_core", "unkillable"}
+    ]
+    if str(target_key or "").startswith("demon_lord_"):
+        if healing_members == 0:
+            bonus -= 220.0
+        else:
+            bonus += healing_members * 36.0
+        if sustain_members < 2:
+            bonus -= 70.0
+        else:
+            bonus += sustain_members * 10.0
+        if cleanse_members == 0:
+            bonus -= 24.0
+        if undercovered_supports:
+            bonus -= 90.0
+        if exposed_attack_down:
+            bonus -= 120.0
+    if len(list(fit.get("warnings") or [])) >= 6:
+        bonus -= 12.0
+    return round(bonus, 2)
+
+
 def _evaluate_team_total_score(
     team: Sequence[Mapping[str, Any]],
     profile: OptimizerBossProfile,
     target_key: str,
     thresholds: Mapping[str, float],
     boss_affinity: str,
+    team_history: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
+    objective_key: str = "stable",
 ) -> float:
+    if _team_has_disallowed_weak_affinity(team, target_key, boss_affinity):
+        return -10000.0
+    if objective_key == "stable" and str(target_key or "").startswith("demon_lord_"):
+        preview_fit = _evaluate_team_fit(team, target_key=target_key, thresholds=thresholds, boss_affinity=boss_affinity)
+        if not list(preview_fit.get("attack_down_members") or []):
+            return -9000.0
     covered_roles = {str(role) for member in team for role in list(member.get("roles") or [])}
     required_coverage = sum(
         1 for requirement in profile.required_role_groups if any(role in requirement.acceptable_roles for role in covered_roles)
     )
     valuable_coverage = sum(1 for role in profile.valuable_roles if role in covered_roles)
-    base_score = sum(float(member.get("score") or 0.0) for member in team)
+    base_score = sum(
+        _candidate_base_score_for_objective(member, objective_key=objective_key, target_key=target_key)
+        for member in team
+    )
     team_fit = _evaluate_team_fit(team, target_key=target_key, thresholds=thresholds, boss_affinity=boss_affinity)
-    return base_score + (required_coverage * 10.0) + (valuable_coverage * 2.0) + float(team_fit.get("score") or 0.0)
+    return (
+        base_score
+        + (required_coverage * 10.0)
+        + (valuable_coverage * 2.0)
+        + float(team_fit.get("score") or 0.0)
+        + _historical_exact_team_bonus(team, team_history, objective_key=objective_key)
+        + _historical_pair_bonus(team, team_history, objective_key=objective_key)
+        + _objective_team_bonus(
+            team,
+            objective_key=objective_key,
+            target_key=target_key,
+            thresholds=thresholds,
+            boss_affinity=boss_affinity,
+            team_fit=team_fit,
+            team_history=team_history,
+        )
+    )
 
 
 def _refine_team_selection(
@@ -1623,6 +2331,8 @@ def _refine_team_selection(
     target_key: str,
     thresholds: Mapping[str, float],
     boss_affinity: str,
+    team_history: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
+    objective_key: str = "stable",
 ) -> List[Dict[str, Any]]:
     best_team = [dict(member) for member in selected]
     if not best_team:
@@ -1634,6 +2344,8 @@ def _refine_team_selection(
         target_key=target_key,
         thresholds=thresholds,
         boss_affinity=boss_affinity,
+        team_history=team_history,
+        objective_key=objective_key,
     )
 
     for _ in range(2):
@@ -1647,12 +2359,16 @@ def _refine_team_selection(
                     continue
                 proposal = list(best_team)
                 proposal[index] = dict(candidate)
+                if _team_has_disallowed_weak_affinity(proposal, target_key, boss_affinity):
+                    continue
                 proposal_score = _evaluate_team_total_score(
                     proposal,
                     profile=profile,
                     target_key=target_key,
                     thresholds=thresholds,
                     boss_affinity=boss_affinity,
+                    team_history=team_history,
+                    objective_key=objective_key,
                 )
                 if proposal_score > (best_score + 0.5):
                     best_team = proposal
@@ -1661,6 +2377,43 @@ def _refine_team_selection(
                     improved = True
         if not improved:
             break
+
+    exact_history_index = dict((team_history or {}).get("exact") or {})
+    candidate_by_name = {
+        str(candidate.get("champion_name") or ""): dict(candidate)
+        for candidate in candidates
+        if str(candidate.get("champion_name") or "")
+    }
+    ranked_history = sorted(
+        exact_history_index.items(),
+        key=lambda item: (
+            _to_float(dict(item[1]).get("max_total_damage")) if objective_key == "push_70m" else _to_float(dict(item[1]).get("avg_total_damage")),
+            int(dict(item[1]).get("run_count") or 0),
+            _to_float(dict(item[1]).get("avg_total_damage")),
+        ),
+        reverse=True,
+    )
+    for signature, history_row in ranked_history[:12]:
+        team_names = [name for name in str(signature or "").split("|") if name]
+        if len(team_names) != profile.team_size:
+            continue
+        if any(name not in candidate_by_name for name in team_names):
+            continue
+        proposal = [dict(candidate_by_name[name]) for name in team_names]
+        if _team_has_disallowed_weak_affinity(proposal, target_key, boss_affinity):
+            continue
+        proposal_score = _evaluate_team_total_score(
+            proposal,
+            profile=profile,
+            target_key=target_key,
+            thresholds=thresholds,
+            boss_affinity=boss_affinity,
+            team_history=team_history,
+            objective_key=objective_key,
+        )
+        if proposal_score > (best_score + 0.5):
+            best_team = proposal
+            best_score = proposal_score
 
     return sorted(best_team, key=lambda item: (-float(item.get("score") or 0.0), str(item.get("champion_name") or "").lower()))
 

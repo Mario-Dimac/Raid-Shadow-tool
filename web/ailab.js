@@ -11,6 +11,7 @@ const summaryEl = document.getElementById("aiSummary");
 const detailsEl = document.getElementById("aiDetails");
 const statusEl = document.getElementById("aiStatus");
 const refreshBtn = document.getElementById("aiRefreshBtn");
+const cleanupBtn = document.getElementById("aiCleanupBtn");
 const trainBtn = document.getElementById("aiTrainBtn");
 
 async function fetchJson(url, options) {
@@ -138,6 +139,71 @@ function renderTrainingResult() {
   `;
 }
 
+function renderAdvisor() {
+  const advisor = state.overview?.advisor || null;
+  if (!advisor) return "";
+  const health = advisor.health || {};
+  const actions = advisor.next_actions || [];
+  const contentFocus = advisor.content_focus || [];
+  const targets = advisor.recommended_targets || [];
+  return `
+    <div class="details-grid">
+      <div class="list-card">
+        <h3>Consigliere Dataset</h3>
+        <div class="list-row">
+          <strong>Stato</strong>
+          <span class="subtext">${escapeHtml(advisor.headline || "-")}</span>
+        </div>
+        <div class="list-row">
+          <strong>Run con danno distinte</strong>
+          <span class="subtext">${escapeHtml(formatNumber(health.distinct_damage_runs || 0, 0))}</span>
+        </div>
+        <div class="list-row">
+          <strong>Clan Boss / team distinti</strong>
+          <span class="subtext">${escapeHtml(`${formatNumber(health.clan_boss_damage_runs || 0, 0)} run | ${formatNumber(health.clan_boss_unique_teams || 0, 0)} team`)}</span>
+        </div>
+        <div class="list-row">
+          <strong>Run skill fuori CB</strong>
+          <span class="subtext">${escapeHtml(formatNumber(health.skill_capture_runs || 0, 0))}</span>
+        </div>
+        <div class="list-row ${Number(health.duplicate_groups || 0) > 0 ? "warn" : ""}">
+          <strong>Duplicati</strong>
+          <span class="subtext">${escapeHtml(`${formatNumber(health.duplicate_groups || 0, 0)} gruppi | ${formatNumber(health.duplicate_rows || 0, 0)} righe extra`)}</span>
+        </div>
+      </div>
+      <div class="list-card">
+        <h3>Prossime Mosse</h3>
+        ${actions.length ? actions.map((item) => `
+          <div class="list-row">
+            <strong>${escapeHtml(item.title || "-")}</strong>
+            <span class="subtext">[${escapeHtml(item.priority || "-")}] ${escapeHtml(item.detail || "")}</span>
+          </div>
+        `).join("") : '<div class="empty">Nessun consiglio disponibile.</div>'}
+      </div>
+    </div>
+    <div class="details-grid">
+      <div class="list-card">
+        <h3>Focus Contenuti</h3>
+        ${contentFocus.map((item) => `
+          <div class="list-row">
+            <strong>${escapeHtml(item.category_label || item.category_key || "-")}</strong>
+            <span class="subtext">${escapeHtml(`${formatNumber(item.run_count || 0, 0)} run | ${item.why_now || ""}`)}</span>
+          </div>
+        `).join("")}
+      </div>
+      <div class="list-card">
+        <h3>Target Da Spingere</h3>
+        ${targets.length ? targets.map((item) => `
+          <div class="list-row">
+            <strong>${escapeHtml(item.encounter_name || item.encounter_key || "-")}</strong>
+            <span class="subtext">${escapeHtml(`${formatNumber(item.runs_with_damage || 0, 0)} con danno / ${formatNumber(item.run_count || 0, 0)} totali${item.boss_affinity ? ` | aff ${item.boss_affinity}` : ""}${item.train_ready ? " | train ready" : ""}`)}</span>
+          </div>
+        `).join("") : '<div class="empty">Importa prima qualche run utile.</div>'}
+      </div>
+    </div>
+  `;
+}
+
 function renderDetails() {
   const selected = selectedEncounterRow();
   const runtime = state.overview?.dependency_runtime || {};
@@ -175,7 +241,7 @@ function renderDetails() {
     const errorNote = state.overview?.error
       ? `<div class="list-card"><h3>Stato AI</h3>${dependencyRows}</div>`
       : "";
-    detailsEl.innerHTML = `${errorNote}<div class="empty">Nessun encounter disponibile. Importa prima qualche run reale.</div>`;
+    detailsEl.innerHTML = `${errorNote}${renderAdvisor()}<div class="empty">Nessun encounter disponibile. Importa prima qualche run reale.</div>`;
     return;
   }
   detailsEl.innerHTML = `
@@ -212,6 +278,7 @@ function renderDetails() {
         ${dependencyRows}
       </div>
     </div>
+    ${renderAdvisor()}
     ${renderTrainingResult()}
   `;
 }
@@ -243,6 +310,7 @@ async function loadOverview() {
   state.trainingResult = null;
   syncSelectedEncounter();
   trainBtn.disabled = state.overview?.training_available === false;
+  cleanupBtn.disabled = false;
   renderAll();
   if (state.overview?.training_available === false) {
     setStatus(state.overview.error || "AI Lab caricato, ma il training non e' disponibile in questo ambiente Python.", true);
@@ -283,6 +351,28 @@ async function trainModel() {
   }
 }
 
+async function cleanupDuplicates() {
+  cleanupBtn.disabled = true;
+  setStatus("Pulizia duplicati run in corso...");
+  try {
+    const payload = await fetchJson("/api/ai-cleanup-duplicates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "probe_import" }),
+    });
+    state.overview = payload.overview || state.overview;
+    state.trainingResult = null;
+    syncSelectedEncounter();
+    renderAll();
+    const cleanup = payload.cleanup || {};
+    setStatus(`Pulizia completata: ${formatNumber(cleanup.removed_runs || 0, 0)} run duplicate rimosse in ${formatNumber(cleanup.duplicate_groups || 0, 0)} gruppi.`);
+  } catch (error) {
+    setStatus(error.message || "Pulizia duplicati non riuscita.", true);
+  } finally {
+    cleanupBtn.disabled = false;
+  }
+}
+
 encounterEl.addEventListener("change", () => {
   state.selectedEncounter = encounterEl.value || "";
   syncSelectedEncounter();
@@ -290,6 +380,7 @@ encounterEl.addEventListener("change", () => {
 });
 
 refreshBtn.addEventListener("click", loadOverview);
+cleanupBtn.addEventListener("click", cleanupDuplicates);
 trainBtn.addEventListener("click", trainModel);
 
 loadOverview();

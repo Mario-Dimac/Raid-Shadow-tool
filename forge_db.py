@@ -1552,6 +1552,7 @@ def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> 
     payload = dict_value(run_payload)
     saved_at = optional_string(payload.get("saved_at")) or now_utc_iso()
     source = optional_string(payload.get("source")) or "manual"
+    source_run_uid = optional_string(first_non_empty(payload.get("source_run_uid"), payload.get("battle_id")))
     labels = dict_value(payload.get("labels"))
     context = dict_value(payload.get("context"))
     members = list_value(payload.get("members"))
@@ -1560,6 +1561,21 @@ def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> 
     effect_timeline = dict_value(payload.get("effect_timeline"))
 
     with sqlite3.connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if source_run_uid:
+            existing = conn.execute(
+                """
+                SELECT run_id
+                FROM run_history_runs
+                WHERE source = ? AND source_run_uid = ?
+                ORDER BY run_id DESC
+                LIMIT 1
+                """,
+                (source, source_run_uid),
+            ).fetchone()
+            if existing:
+                return run_history_summary(run_id=int(existing[0]), db_path=db_path)
+
         cursor = conn.execute(
             """
             INSERT INTO run_history_runs (
@@ -1575,7 +1591,7 @@ def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> 
             (
                 saved_at,
                 source,
-                optional_string(first_non_empty(payload.get("source_run_uid"), payload.get("battle_id"))),
+                source_run_uid,
                 optional_string(payload.get("battle_id")),
                 optional_string(payload.get("probe_session_slug")),
                 optional_string(first_non_empty(payload.get("encounter_key"), payload.get("stage_id"), "unknown_encounter")) or "unknown_encounter",
@@ -1747,6 +1763,116 @@ def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> 
         conn.commit()
 
     return run_history_summary(run_id=run_id, db_path=db_path)
+
+
+def cleanup_duplicate_run_history_runs(db_path: Path = DB_PATH, source: str = "") -> Dict[str, Any]:
+    ensure_schema(db_path)
+    source_text = str(source or "").strip()
+    filters = [
+        "NULLIF(TRIM(COALESCE(source_run_uid, '')), '') IS NOT NULL",
+    ]
+    params: List[Any] = []
+    if source_text:
+        filters.append("source = ?")
+        params.append(source_text)
+
+    duplicate_query = f"""
+        SELECT source, source_run_uid, COUNT(*) AS duplicate_count
+        FROM run_history_runs
+        WHERE {' AND '.join(filters)}
+        GROUP BY source, source_run_uid
+        HAVING COUNT(*) > 1
+        ORDER BY source ASC, source_run_uid ASC
+    """
+    child_tables = (
+        "run_history_effect_timeline",
+        "run_history_events",
+        "run_history_assets",
+        "run_history_member_metrics",
+        "run_history_member_skill_usage",
+        "run_history_member_stats",
+        "run_history_members",
+    )
+
+    groups: List[Dict[str, Any]] = []
+    deleted_run_ids: List[int] = []
+    preserved_run_ids: List[int] = []
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        duplicate_rows = conn.execute(duplicate_query, params).fetchall()
+
+        for duplicate_row in duplicate_rows:
+            run_rows = conn.execute(
+                """
+                SELECT
+                    r.run_id,
+                    r.saved_at,
+                    r.total_damage,
+                    r.elapsed_seconds,
+                    (SELECT COUNT(*) FROM run_history_members m WHERE m.run_id = r.run_id) AS member_count,
+                    (SELECT COUNT(*) FROM run_history_assets a WHERE a.run_id = r.run_id) AS asset_count,
+                    (SELECT COUNT(*) FROM run_history_events e WHERE e.run_id = r.run_id) AS event_count,
+                    (SELECT COUNT(*) FROM run_history_member_skill_usage su WHERE su.run_id = r.run_id) AS skill_usage_count,
+                    (SELECT COUNT(*) FROM run_history_effect_timeline et WHERE et.run_id = r.run_id) AS effect_timeline_count
+                FROM run_history_runs r
+                WHERE r.source = ? AND r.source_run_uid = ?
+                ORDER BY r.run_id ASC
+                """,
+                (str(duplicate_row["source"] or ""), str(duplicate_row["source_run_uid"] or "")),
+            ).fetchall()
+            if len(run_rows) <= 1:
+                continue
+
+            scored_rows = sorted(
+                run_rows,
+                key=lambda row: (
+                    1 if row["total_damage"] is not None else 0,
+                    int(row["effect_timeline_count"] or 0),
+                    int(row["skill_usage_count"] or 0),
+                    int(row["event_count"] or 0),
+                    int(row["asset_count"] or 0),
+                    int(row["member_count"] or 0),
+                    1 if row["elapsed_seconds"] is not None else 0,
+                    -int(row["run_id"]),
+                ),
+                reverse=True,
+            )
+            keep_run_id = int(scored_rows[0]["run_id"])
+            remove_run_ids = [int(row["run_id"]) for row in scored_rows[1:]]
+            if not remove_run_ids:
+                continue
+
+            preserved_run_ids.append(keep_run_id)
+            deleted_run_ids.extend(remove_run_ids)
+            groups.append(
+                {
+                    "source": str(duplicate_row["source"] or ""),
+                    "source_run_uid": str(duplicate_row["source_run_uid"] or ""),
+                    "duplicate_count": int(duplicate_row["duplicate_count"] or 0),
+                    "keep_run_id": keep_run_id,
+                    "remove_run_ids": remove_run_ids,
+                }
+            )
+
+            placeholders = ", ".join("?" for _ in remove_run_ids)
+            for table in child_tables:
+                conn.execute(f"DELETE FROM {table} WHERE run_id IN ({placeholders})", remove_run_ids)
+            conn.execute(f"DELETE FROM run_history_runs WHERE run_id IN ({placeholders})", remove_run_ids)
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "source_filter": source_text,
+        "duplicate_groups": len(groups),
+        "removed_runs": len(deleted_run_ids),
+        "kept_runs": len(preserved_run_ids),
+        "groups": groups,
+        "deleted_run_ids": deleted_run_ids,
+        "preserved_run_ids": preserved_run_ids,
+    }
 
 
 def run_history_summary(run_id: int, db_path: Path = DB_PATH) -> Dict[str, Any]:

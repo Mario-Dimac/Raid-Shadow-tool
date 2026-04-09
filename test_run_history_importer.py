@@ -6,7 +6,7 @@ from pathlib import Path
 
 import run_history_importer
 from forge_db import bootstrap_database
-from run_history_importer import backfill_probe_effect_timeline, backfill_probe_skill_usage, event_battle_id, import_probe_session
+from run_history_importer import backfill_probe_effect_timeline, backfill_probe_skill_usage, event_battle_id, import_probe_session, select_best_rich_battle_result_events
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -165,6 +165,47 @@ def test_event_battle_id_prefers_saved_reason_when_battle_context_is_stale() -> 
     }
 
     assert event_battle_id(event) == "correct-battle-id"
+
+
+def test_select_best_rich_battle_result_events_keeps_one_event_per_battle_id() -> None:
+    selected = select_best_rich_battle_result_events(
+        [
+            {
+                "captured_at": "2026-04-05T19:57:14+00:00",
+                "source_name": "battle_results",
+                "saved": {
+                    "reason": "BattleResult added: [Id=battle-1] TotalCount=1",
+                    "marker": {"size": 12680},
+                    "raw_path": "battle-1-rich-a.bin",
+                },
+                "battle": {"battle_id": "battle-1"},
+            },
+            {
+                "captured_at": "2026-04-05T19:57:14+00:00",
+                "source_name": "battle_results",
+                "saved": {
+                    "reason": "BattleResult added: [Id=battle-1] TotalCount=1",
+                    "marker": {"size": 12690},
+                    "raw_path": "battle-1-rich-b.bin",
+                },
+                "battle": {"battle_id": "battle-1"},
+            },
+            {
+                "captured_at": "2026-04-05T20:29:22+00:00",
+                "source_name": "battle_results",
+                "saved": {
+                    "reason": "BattleResult added: [Id=battle-2] TotalCount=1",
+                    "marker": {"size": 12250},
+                    "raw_path": "battle-2-rich.bin",
+                },
+                "battle": {"battle_id": "battle-2"},
+            },
+        ]
+    )
+
+    assert len(selected) == 2
+    assert selected[0]["saved"]["raw_path"] == "battle-1-rich-b.bin"
+    assert selected[1]["saved"]["raw_path"] == "battle-2-rich.bin"
 
 
 def test_import_probe_session_persists_skill_usage_when_available(tmp_path: Path, monkeypatch) -> None:

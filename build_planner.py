@@ -73,9 +73,15 @@ BUILD_PROFILES: Dict[str, Dict[str, Any]] = {
         "label": "Speed Tuned Support",
         "description": "Priorita a speed, tenuta e ordine turni per shell Clan Boss o support chiave.",
         "weights": {"spd": 9.0, "hp": 1.6, "def": 1.5, "res": 0.25, "acc": 0.45},
-        "set_bias": {"Attack Speed": 15.0, "Accuracy And Speed": 12.0, "HP And Heal": 10.0, "HP And Defence": 10.0, "Shield And Speed": 8.0},
+        "set_bias": {"Attack Speed": 20.0, "Accuracy And Speed": 15.0, "HP And Heal": 14.0, "HP And Defence": 11.0, "Shield And Speed": 8.0, "AoE Damage Decrease": 8.0},
         "minimum_ratio_vs_current": {"hp": 0.9, "def": 0.9},
-        "orphan_piece_penalty": 22.0,
+        "orphan_piece_penalty": 30.0,
+        "set_coherence_weight": 4.2,
+        "completed_fixed_set_bonus": 4.0,
+        "preserve_current_biased_fixed_sets": True,
+        "preserve_set_bias_min": 11.0,
+        "required_set_progress_bonus": 8.0,
+        "required_set_violation_penalty": 50000.0,
         "prefer_fewer_fixed_orphans": True,
         "highlights": ["spd", "hp", "def", "res"],
     },
@@ -83,9 +89,15 @@ BUILD_PROFILES: Dict[str, Dict[str, Any]] = {
         "label": "Cooldown Support",
         "description": "Support rapido e robusto che vuole ruotare la skill chiave con continuita.",
         "weights": {"spd": 8.6, "hp": 1.5, "def": 1.35, "res": 0.22, "acc": 0.2},
-        "set_bias": {"Attack Speed": 14.0, "Cooldown Reduction Chance": 12.0, "Accuracy And Speed": 10.0, "HP And Heal": 9.0},
+        "set_bias": {"Attack Speed": 18.0, "Cooldown Reduction Chance": 12.0, "Accuracy And Speed": 13.0, "HP And Heal": 13.0, "AoE Damage Decrease": 6.0},
         "minimum_ratio_vs_current": {"hp": 0.9, "def": 0.9},
-        "orphan_piece_penalty": 22.0,
+        "orphan_piece_penalty": 30.0,
+        "set_coherence_weight": 4.0,
+        "completed_fixed_set_bonus": 4.0,
+        "preserve_current_biased_fixed_sets": True,
+        "preserve_set_bias_min": 12.0,
+        "required_set_progress_bonus": 8.0,
+        "required_set_violation_penalty": 50000.0,
         "prefer_fewer_fixed_orphans": True,
         "highlights": ["spd", "hp", "def", "res"],
     },
@@ -93,9 +105,15 @@ BUILD_PROFILES: Dict[str, Dict[str, Any]] = {
         "label": "Cleanser",
         "description": "Cleanser o Block Debuffs con focus su speed, tenuta e un minimo di RES.",
         "weights": {"spd": 8.0, "hp": 1.55, "def": 1.45, "res": 0.42, "acc": 0.15},
-        "set_bias": {"Attack Speed": 13.0, "HP And Defence": 12.0, "HP And Heal": 10.0, "Shield And Speed": 8.0},
+        "set_bias": {"Attack Speed": 17.0, "HP And Defence": 13.0, "HP And Heal": 14.0, "Shield And Speed": 8.0, "AoE Damage Decrease": 7.0},
         "minimum_ratio_vs_current": {"hp": 0.92, "def": 0.92},
-        "orphan_piece_penalty": 22.0,
+        "orphan_piece_penalty": 30.0,
+        "set_coherence_weight": 4.0,
+        "completed_fixed_set_bonus": 4.0,
+        "preserve_current_biased_fixed_sets": True,
+        "preserve_set_bias_min": 13.0,
+        "required_set_progress_bonus": 8.0,
+        "required_set_violation_penalty": 50000.0,
         "prefer_fewer_fixed_orphans": True,
         "highlights": ["spd", "hp", "def", "res"],
     },
@@ -103,9 +121,15 @@ BUILD_PROFILES: Dict[str, Dict[str, Any]] = {
         "label": "Ally Protector",
         "description": "Build tanky per protector, shielder o counterattack core da Clan Boss.",
         "weights": {"hp": 2.2, "def": 1.9, "spd": 5.6, "res": 0.18, "acc": 0.18},
-        "set_bias": {"HP And Defence": 16.0, "HP And Heal": 13.0, "Shield And HP": 11.0, "Shield And Speed": 8.0},
+        "set_bias": {"HP And Defence": 18.0, "HP And Heal": 16.0, "Shield And HP": 11.0, "Shield And Speed": 8.0, "AoE Damage Decrease": 14.0, "Life Drain": 8.0},
         "minimum_ratio_vs_current": {"hp": 0.95, "def": 0.95},
-        "orphan_piece_penalty": 26.0,
+        "orphan_piece_penalty": 34.0,
+        "set_coherence_weight": 4.5,
+        "completed_fixed_set_bonus": 5.0,
+        "preserve_current_biased_fixed_sets": True,
+        "preserve_set_bias_min": 11.0,
+        "required_set_progress_bonus": 8.0,
+        "required_set_violation_penalty": 50000.0,
         "prefer_fewer_fixed_orphans": True,
         "highlights": ["hp", "def", "spd", "res"],
     },
@@ -113,9 +137,15 @@ BUILD_PROFILES: Dict[str, Dict[str, Any]] = {
         "label": "Decrease ATK Support",
         "description": "Debuffer da Clan Boss: vuole accuracy e speed senza collassare di tenuta.",
         "weights": {"spd": 7.8, "acc": 7.0, "hp": 1.3, "def": 1.25, "res": 0.14},
-        "set_bias": {"Accuracy And Speed": 15.0, "Accuracy": 12.0, "Attack Speed": 10.0, "HP And Defence": 7.0},
+        "set_bias": {"Accuracy And Speed": 18.0, "Accuracy": 12.0, "Attack Speed": 14.0, "HP And Defence": 9.0, "HP And Heal": 10.0, "Life Drain": 8.0},
         "minimum_ratio_vs_current": {"hp": 0.9, "def": 0.9},
-        "orphan_piece_penalty": 22.0,
+        "orphan_piece_penalty": 30.0,
+        "set_coherence_weight": 4.0,
+        "completed_fixed_set_bonus": 4.0,
+        "preserve_current_biased_fixed_sets": True,
+        "preserve_set_bias_min": 10.0,
+        "required_set_progress_bonus": 8.0,
+        "required_set_violation_penalty": 50000.0,
         "prefer_fewer_fixed_orphans": True,
         "highlights": ["acc", "spd", "hp", "def"],
     },
@@ -123,27 +153,45 @@ BUILD_PROFILES: Dict[str, Dict[str, Any]] = {
         "label": "Poisoner",
         "description": "Accuracy, speed e abbastanza tenuta per tenere alto l'uptime dei veleni.",
         "weights": {"spd": 6.6, "acc": 6.6, "hp": 1.0, "def": 1.0, "crit_rate": 1.0, "crit_dmg": 0.9, "atk": 0.4},
-        "set_bias": {"Accuracy And Speed": 15.0, "Accuracy": 11.0, "Attack Speed": 10.0, "Dot Rate": 9.0},
+        "set_bias": {"Accuracy And Speed": 18.0, "Accuracy": 12.0, "Attack Speed": 16.0, "Dot Rate": 10.0, "Life Drain": 17.0, "HP And Heal": 9.0},
         "minimum_ratio_vs_current": {"hp": 0.88, "def": 0.88},
-        "orphan_piece_penalty": 20.0,
+        "orphan_piece_penalty": 30.0,
+        "set_coherence_weight": 4.4,
+        "completed_fixed_set_bonus": 5.0,
+        "preserve_current_biased_fixed_sets": True,
+        "preserve_set_bias_min": 10.0,
+        "required_set_progress_bonus": 8.0,
+        "required_set_violation_penalty": 50000.0,
         "highlights": ["acc", "spd", "hp", "def"],
     },
     "hp_burner": {
         "label": "HP Burner",
         "description": "Profilo per HP Burn da Clan Boss: speed, accuracy e tenuta prima del resto.",
         "weights": {"spd": 6.4, "acc": 6.2, "hp": 1.1, "def": 1.0, "crit_rate": 0.9, "crit_dmg": 0.8, "atk": 0.45},
-        "set_bias": {"Accuracy And Speed": 15.0, "Accuracy": 10.0, "Attack Speed": 10.0, "Cooldown Reduction Chance": 6.0},
+        "set_bias": {"Accuracy And Speed": 18.0, "Accuracy": 10.0, "Attack Speed": 15.0, "Cooldown Reduction Chance": 6.0, "Life Drain": 16.0, "HP And Heal": 9.0},
         "minimum_ratio_vs_current": {"hp": 0.88, "def": 0.88},
-        "orphan_piece_penalty": 20.0,
+        "orphan_piece_penalty": 30.0,
+        "set_coherence_weight": 4.2,
+        "completed_fixed_set_bonus": 5.0,
+        "preserve_current_biased_fixed_sets": True,
+        "preserve_set_bias_min": 10.0,
+        "required_set_progress_bonus": 8.0,
+        "required_set_violation_penalty": 50000.0,
         "highlights": ["acc", "spd", "hp", "def"],
     },
     "clan_boss_dps": {
         "label": "Clan Boss DPS",
         "description": "Danno single-target con abbastanza speed e accuracy dove servono.",
         "weights": {"crit_rate": 4.8, "crit_dmg": 4.5, "atk": 2.8, "def": 1.6, "hp": 0.9, "spd": 4.1, "acc": 2.8},
-        "set_bias": {"Attack Power And Ignore Defense": 10.0, "Attack Speed": 7.0, "Accuracy And Speed": 7.0, "Cooldown Reduction Chance": 5.0},
+        "set_bias": {"Life Drain": 20.0, "Attack Speed": 12.0, "Accuracy And Speed": 10.0, "Attack Power And Ignore Defense": 5.0, "HP And Heal": 8.0, "AoE Damage Decrease": 6.0},
         "minimum_ratio_vs_current": {"hp": 0.82, "def": 0.82},
-        "orphan_piece_penalty": 18.0,
+        "orphan_piece_penalty": 28.0,
+        "set_coherence_weight": 4.6,
+        "completed_fixed_set_bonus": 5.0,
+        "preserve_current_biased_fixed_sets": True,
+        "preserve_set_bias_min": 10.0,
+        "required_set_progress_bonus": 8.0,
+        "required_set_violation_penalty": 50000.0,
         "highlights": ["crit_rate", "crit_dmg", "spd", "acc"],
     },
 }
@@ -268,6 +316,7 @@ def build_champion_plan(
             normalized_area_region,
         )
     )
+    profile = resolve_effective_profile(profile, current_model.applied_sets, set_rules)
     current_build = summarize_build(
         scope_key="current",
         scope_label="Build attuale",
@@ -368,6 +417,7 @@ def build_champion_plan(
             "label": profile["label"],
             "description": profile["description"],
             "highlights": list(profile.get("highlights") or []),
+            "required_completed_sets": format_required_completed_set_labels(profile),
         },
         "profiles": list_build_profiles(),
         "area_regions": list_area_bonus_regions(),
@@ -379,9 +429,138 @@ def build_champion_plan(
 
 def effective_beam_width(scope: Mapping[str, Any], profile: Mapping[str, Any]) -> int:
     base_beam_width = int(scope.get("beam_width") or 48)
-    if mapping_value(profile.get("minimum_ratio_vs_current")) or bool(profile.get("prefer_fewer_fixed_orphans")):
+    if (
+        mapping_value(profile.get("minimum_ratio_vs_current"))
+        or bool(profile.get("prefer_fewer_fixed_orphans"))
+        or bool(resolve_required_completed_set_counts(profile))
+    ):
         return max(base_beam_width, min(base_beam_width * 4, 240))
     return base_beam_width
+
+
+def resolve_effective_profile(
+    profile: Mapping[str, Any],
+    current_applied_sets: Iterable[Mapping[str, Any]],
+    set_rules: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    effective_profile = dict(profile)
+    required_counts = resolve_required_completed_set_counts(profile)
+    if bool(profile.get("preserve_current_biased_fixed_sets")):
+        biased_sets = resolve_preservable_biased_sets(profile)
+        for set_name, completed in extract_completed_fixed_set_counts(current_applied_sets, set_rules).items():
+            if set_name not in biased_sets:
+                continue
+            required_counts[set_name] = max(required_counts.get(set_name, 0), completed)
+    if required_counts:
+        effective_profile["required_completed_sets"] = required_counts
+    return effective_profile
+
+
+def resolve_required_completed_set_counts(profile: Mapping[str, Any]) -> Dict[str, int]:
+    raw_value = profile.get("required_completed_sets")
+    if isinstance(raw_value, dict):
+        return {
+            str(set_name).strip(): max(0, int(float_value(completed)))
+            for set_name, completed in raw_value.items()
+            if str(set_name).strip() and int(float_value(completed)) > 0
+        }
+    counts: Dict[str, int] = {}
+    for raw_name in list_value(raw_value):
+        set_name = str(raw_name).strip()
+        if not set_name:
+            continue
+        counts[set_name] = counts.get(set_name, 0) + 1
+    return counts
+
+
+def resolve_preservable_biased_sets(profile: Mapping[str, Any]) -> set[str]:
+    minimum_bias = float(profile.get("preserve_set_bias_min") or 0.0)
+    explicit_sets = {
+        str(set_name).strip()
+        for set_name in list_value(profile.get("preserve_set_names"))
+        if str(set_name).strip()
+    }
+    if explicit_sets:
+        return explicit_sets
+    return {
+        str(set_name).strip()
+        for set_name, bias in mapping_value(profile.get("set_bias")).items()
+        if str(set_name).strip() and float_value(bias) > 0 and float_value(bias) >= minimum_bias
+    }
+
+
+def count_fixed_set_pieces_by_name(
+    items: Iterable[Mapping[str, Any]],
+    set_rules: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for item in items:
+        if str(item.get("item_class") or "").strip().lower() != "artifact":
+            continue
+        set_name = str(item.get("set_name") or "").strip()
+        if not set_name:
+            continue
+        rule = mapping_value(set_rules.get(set_name))
+        if str(rule.get("set_kind") or "fixed").strip().lower() != "fixed":
+            continue
+        counts[set_name] = counts.get(set_name, 0) + 1
+    return counts
+
+
+def extract_completed_fixed_set_counts(
+    applied_sets: Iterable[Mapping[str, Any]],
+    set_rules: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in applied_sets:
+        set_name = str(row.get("set_name") or "").strip()
+        if not set_name:
+            continue
+        rule = mapping_value(set_rules.get(set_name))
+        if str(row.get("set_kind") or rule.get("set_kind") or "fixed").strip().lower() != "fixed":
+            continue
+        completed_sets = max(0, int(row.get("completed_sets") or 0))
+        if completed_sets <= 0:
+            continue
+        counts[set_name] = counts.get(set_name, 0) + completed_sets
+    return counts
+
+
+def missing_required_completed_set_counts(
+    items: Iterable[Mapping[str, Any]],
+    set_rules: Mapping[str, Mapping[str, Any]],
+    profile: Mapping[str, Any],
+) -> Dict[str, int]:
+    required_counts = resolve_required_completed_set_counts(profile)
+    if not required_counts:
+        return {}
+    completed_counts: Dict[str, int] = {}
+    for set_name, pieces_equipped in count_fixed_set_pieces_by_name(items, set_rules).items():
+        pieces_required = int(mapping_value(set_rules.get(set_name)).get("pieces_required") or 0)
+        if pieces_required <= 1:
+            continue
+        completed_counts[set_name] = pieces_equipped // pieces_required
+    missing: Dict[str, int] = {}
+    for set_name, required_completed in required_counts.items():
+        outstanding = required_completed - completed_counts.get(set_name, 0)
+        if outstanding > 0:
+            missing[set_name] = outstanding
+    return missing
+
+
+def build_meets_required_completed_sets(
+    items: Iterable[Mapping[str, Any]],
+    set_rules: Mapping[str, Mapping[str, Any]],
+    profile: Mapping[str, Any],
+) -> bool:
+    return not missing_required_completed_set_counts(items, set_rules, profile)
+
+
+def format_required_completed_set_labels(profile: Mapping[str, Any]) -> List[str]:
+    labels: List[str] = []
+    for set_name, completed in sorted(resolve_required_completed_set_counts(profile).items()):
+        labels.append(f"{set_name} x{completed}")
+    return labels
 
 
 def load_champion_account(conn: sqlite3.Connection, champion_name: str) -> Dict[str, Any]:
@@ -640,7 +819,10 @@ def solve_build_with_beam_search(
                 score = (
                     score_profile_totals(totals, profile)
                     + score_active_set_bias(stat_result.applied_sets, profile)
+                    + score_required_set_progress_bonus(new_items, set_rules, profile)
+                    + score_set_coherence_bonus(new_items, set_rules, profile, is_complete_build=is_complete_build)
                     - score_orphan_set_penalty(new_items, set_rules, profile, is_complete_build=is_complete_build)
+                    - score_required_set_violation_penalty(new_items, set_rules, profile, is_complete_build=is_complete_build)
                     - score_floor_violation_penalty(
                         totals,
                         reference_totals,
@@ -840,6 +1022,8 @@ def summarize_build(
     applied_sets = applied_sets_override if applied_sets_override is not None else stat_result.applied_sets
     unsupported_sets = unsupported_override if unsupported_override is not None else stat_result.unsupported_sets
     set_coherence = summarize_set_coherence(item_list, set_rules)
+    required_completed_sets = resolve_required_completed_set_counts(profile)
+    missing_required_sets = missing_required_completed_set_counts(item_list, set_rules, profile)
     notes = build_notes(
         deltas=deltas,
         inventory_count=inventory_count,
@@ -849,6 +1033,8 @@ def summarize_build(
         unmodeled_relics=bool(int(champion.get("relic_count") or 0) > 0 and (source_override or stat_result.source) != "raw"),
         area_region=area_region,
         invalid_item_count=invalid_item_count,
+        required_set_labels=format_required_completed_set_labels(profile),
+        missing_required_set_labels=[f"{set_name} x{count}" for set_name, count in sorted(missing_required_sets.items())],
     )
     return {
         "key": scope_key,
@@ -868,6 +1054,8 @@ def summarize_build(
         "source": ("derived" if area_region else source_override) or stat_result.source,
         "completeness": completeness_override or stat_result.completeness,
         "applied_sets": applied_sets,
+        "required_completed_sets": required_completed_sets,
+        "required_sets_met": not missing_required_sets,
         "set_coherence": set_coherence,
         "unsupported_sets": unsupported_sets,
     }
@@ -882,6 +1070,8 @@ def build_notes(
     unmodeled_relics: bool = False,
     area_region: str = "",
     invalid_item_count: int = 0,
+    required_set_labels: Iterable[str] | None = None,
+    missing_required_set_labels: Iterable[str] | None = None,
 ) -> List[str]:
     notes: List[str] = []
     if area_region:
@@ -893,6 +1083,9 @@ def build_notes(
         notes.append("Relic presenti: bonus non ancora leggibili dal catalogo, stats finali parziali")
     if invalid_item_count:
         notes.append(f"{invalid_item_count} pezzi esclusi: decode gear sospetto")
+    missing_required = [str(label) for label in (missing_required_set_labels or []) if str(label)]
+    if missing_required:
+        notes.append("Set richiesti mancanti: " + ", ".join(missing_required[:2]))
     for stat_name in ("spd", "acc", "hp", "def", "res", "crit_rate", "crit_dmg", "atk"):
         delta = float(deltas.get(stat_name) or 0.0)
         if abs(delta) < 0.01:
@@ -909,6 +1102,10 @@ def build_notes(
     set_labels = [format_applied_set_label(row) for row in applied_sets]
     if set_labels:
         notes.append("Set: " + ", ".join(set_labels[:2]))
+    elif required_set_labels:
+        required_labels = [str(label) for label in required_set_labels if str(label)]
+        if required_labels:
+            notes.append("Set richiesti: " + ", ".join(required_labels[:2]))
     return notes[:5]
 
 
@@ -1011,6 +1208,65 @@ def score_orphan_set_penalty(
     return round(penalty, 4)
 
 
+def score_required_set_progress_bonus(
+    items: Iterable[Mapping[str, Any]],
+    set_rules: Mapping[str, Mapping[str, Any]],
+    profile: Mapping[str, Any],
+) -> float:
+    required_counts = resolve_required_completed_set_counts(profile)
+    progress_bonus = float(profile.get("required_set_progress_bonus") or 0.0)
+    if not required_counts or progress_bonus <= 0:
+        return 0.0
+    equipped_counts = count_fixed_set_pieces_by_name(items, set_rules)
+    score = 0.0
+    for set_name, required_completed in required_counts.items():
+        pieces_required = int(mapping_value(set_rules.get(set_name)).get("pieces_required") or 0)
+        if pieces_required <= 1 or required_completed <= 0:
+            continue
+        needed_pieces = pieces_required * required_completed
+        progress = min(1.0, equipped_counts.get(set_name, 0) / needed_pieces)
+        score += progress * progress_bonus
+    return round(score, 4)
+
+
+def score_required_set_violation_penalty(
+    items: Iterable[Mapping[str, Any]],
+    set_rules: Mapping[str, Mapping[str, Any]],
+    profile: Mapping[str, Any],
+    is_complete_build: bool,
+) -> float:
+    if not is_complete_build:
+        return 0.0
+    penalty_per_missing = float(profile.get("required_set_violation_penalty") or 0.0)
+    if penalty_per_missing <= 0:
+        return 0.0
+    missing_counts = missing_required_completed_set_counts(items, set_rules, profile)
+    if not missing_counts:
+        return 0.0
+    return round(sum(missing_counts.values()) * penalty_per_missing, 4)
+
+
+def score_set_coherence_bonus(
+    items: Iterable[Mapping[str, Any]],
+    set_rules: Mapping[str, Mapping[str, Any]],
+    profile: Mapping[str, Any],
+    is_complete_build: bool,
+) -> float:
+    if not is_complete_build:
+        return 0.0
+    coherence_weight = float(profile.get("set_coherence_weight") or 0.0)
+    completed_fixed_set_bonus = float(profile.get("completed_fixed_set_bonus") or 0.0)
+    if coherence_weight <= 0 and completed_fixed_set_bonus <= 0:
+        return 0.0
+    coherence = summarize_set_coherence(items, set_rules)
+    score = 0.0
+    if coherence_weight > 0:
+        score += (float(coherence.get("score") or 0.0) * coherence_weight) / 10.0
+    if completed_fixed_set_bonus > 0:
+        score += int(coherence.get("completed_fixed_sets") or 0) * completed_fixed_set_bonus
+    return round(score, 4)
+
+
 def score_floor_violation_penalty(
     totals: Mapping[str, Any],
     reference_totals: Mapping[str, Any] | None,
@@ -1070,6 +1326,13 @@ def choose_best_beam_state(
         if not build_breaks_profile_guardrails(mapping_value(state.get("totals")), reference_totals, profile)
     ]
     candidate_states = valid_states or state_list
+    valid_required_states = [
+        state
+        for state in candidate_states
+        if build_meets_required_completed_sets(list_value(state.get("items")), set_rules, profile)
+    ]
+    if valid_required_states:
+        candidate_states = valid_required_states
     prefer_fewer_fixed_orphans = bool(profile.get("prefer_fewer_fixed_orphans"))
     candidate_states.sort(
         key=lambda state: (

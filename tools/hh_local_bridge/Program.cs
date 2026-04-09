@@ -1,13 +1,11 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json;
 using Common.Events;
 using HellHades.ArtifactExtractor.Helper;
 using HellHades.ArtifactExtractor.LiveUpdates;
 using HellHades.ArtifactExtractor.Models.Events;
 using HellHades.ArtifactExtractor.Models.Reader;
-using HellHades.ArtifactExtractor.Models.Reader.Reader_Windows_145147_x64;
-using HellHades.ArtifactExtractor.Models.Reader.Reader_Windows_145857_x64;
-using HellHades.ArtifactExtractor.Models.Reader.Reader_Windows_146353_x64;
 using HellHades.ArtifactExtractor.Models.Reader.Windows;
 using HellHades.ArtifactExtractor.RaidReader;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -38,6 +36,9 @@ try
         "equip" => bridge.Equip(
             heroId: ParseRequiredInt(args, 1, "hero_id"),
             artifactIds: ParseArtifactIds(args, 2)
+        ),
+        "sell" => bridge.Sell(
+            artifactIds: ParseArtifactIds(args, 1)
         ),
         _ => throw new InvalidOperationException($"Comando non supportato: {command}"),
     };
@@ -95,19 +96,17 @@ sealed class LocalBridge
     private readonly RaidProcessReader _raidProcessReader;
     private readonly HelperHandler _helperHandler;
     private readonly NoopEventPublisher _eventPublisher = new();
+    private readonly string[] _readerNames;
 
     public LocalBridge()
     {
         _raidMemoryReader = new RaidMemoryReader(_processMemory);
         _helper = new WindowsHelper(_processMemory);
+        var raidReaders = DiscoverRaidReaders();
+        _readerNames = raidReaders.Select(static reader => reader.GetType().Name).ToArray();
         _raidProcessReader = new RaidProcessReader(
             new UpdateRaidDataRequestHandlerOptions(),
-            new IRaidReader[]
-            {
-                new RaidReader145147(),
-                new RaidReader145857(),
-                new RaidReader146353(),
-            },
+            raidReaders,
             _raidMemoryReader,
             NullLogger.Instance,
             _helper
@@ -117,8 +116,7 @@ sealed class LocalBridge
 
     public object BuildStatusPayload()
     {
-        RefreshProcess();
-        var raidProcess = _raidProcessReader.RaidProcess;
+        var raidProcess = RefreshProcess();
         return new
         {
             ok = true,
@@ -130,14 +128,14 @@ sealed class LocalBridge
             restart_required = _helper.RestartRequired,
             process_memory_ready = _processMemory.IsReady,
             process_memory_pid = _processMemory.ProcessId,
+            reader_candidates = _readerNames,
             published_events = _eventPublisher.PublishedEvents,
         };
     }
 
     public object Equip(int heroId, int[] artifactIds)
     {
-        RefreshProcess();
-        var raidProcess = _raidProcessReader.RaidProcess;
+        var raidProcess = RefreshProcess();
         var payload = new EquipArtifactsEvent
         {
             HeroId = heroId,
@@ -155,18 +153,42 @@ sealed class LocalBridge
             helper_capable = _helper.HelperCapable,
             helper_loaded = _helper.HelperIsLoaded,
             restart_required = _helper.RestartRequired,
+            reader_candidates = _readerNames,
             published_events = _eventPublisher.PublishedEvents,
         };
     }
 
-    private void RefreshProcess()
+    public object Sell(int[] artifactIds)
+    {
+        var raidProcess = RefreshProcess();
+        var payload = new SellArtifactsEvent
+        {
+            ArtifactIds = artifactIds,
+        };
+        _helperHandler.HandleAsync(payload, CancellationToken.None).GetAwaiter().GetResult();
+        return new
+        {
+            ok = true,
+            action = "sell",
+            artifact_ids = artifactIds,
+            raid_running = _raidProcessReader.IsRaidRunning,
+            raid_process_id = raidProcess?.Id ?? 0,
+            helper_capable = _helper.HelperCapable,
+            helper_loaded = _helper.HelperIsLoaded,
+            restart_required = _helper.RestartRequired,
+            reader_candidates = _readerNames,
+            published_events = _eventPublisher.PublishedEvents,
+        };
+    }
+
+    private Process RefreshProcess()
     {
         var process = _raidProcessReader.RaidProcess;
         if (process is not null)
         {
             _processMemory.SetProcess(process);
             _raidMemoryReader.SetProcess(process);
-            return;
+            return process;
         }
 
         process = Process.GetProcesses()
@@ -175,10 +197,41 @@ sealed class LocalBridge
         {
             _processMemory.SetProcess(process);
             _raidMemoryReader.SetProcess(process);
-            return;
+            return process;
         }
 
         throw new InvalidOperationException("Raid: Shadow Legends non risulta in esecuzione.");
+    }
+
+    private static IRaidReader[] DiscoverRaidReaders()
+    {
+        var interfaceType = typeof(IRaidReader);
+        var assembly = interfaceType.Assembly;
+        var readers = assembly
+            .GetTypes()
+            .Where(type =>
+                type is { IsAbstract: false, IsInterface: false }
+                && interfaceType.IsAssignableFrom(type)
+                && type.Name.StartsWith("RaidReader", StringComparison.OrdinalIgnoreCase)
+            )
+            .OrderByDescending(type => ExtractTrailingNumber(type.Name))
+            .Select(static type => (IRaidReader?)Activator.CreateInstance(type))
+            .Where(static reader => reader is not null)
+            .Cast<IRaidReader>()
+            .ToArray();
+        if (readers.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"Nessun RaidReader HH disponibile in {assembly.FullName}."
+            );
+        }
+        return readers;
+    }
+
+    private static int ExtractTrailingNumber(string value)
+    {
+        var digits = new string(value.Reverse().TakeWhile(char.IsDigit).Reverse().ToArray());
+        return int.TryParse(digits, out var parsed) ? parsed : 0;
     }
 }
 

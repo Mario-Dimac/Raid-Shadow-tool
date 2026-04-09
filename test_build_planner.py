@@ -26,6 +26,138 @@ def test_effective_beam_width_expands_for_guardrailed_profiles() -> None:
     assert effective_beam_width(scope, speed_profile) == 48
 
 
+def test_clan_boss_dps_rewards_closed_sets_over_orphaned_mix() -> None:
+    profile = build_planner.BUILD_PROFILES["clan_boss_dps"]
+    set_rules = {
+        "Life Drain": {"set_kind": "fixed", "pieces_required": 4},
+        "Attack Speed": {"set_kind": "fixed", "pieces_required": 2},
+        "Cruel": {"set_kind": "fixed", "pieces_required": 2},
+    }
+    coherent_items = [
+        {"item_id": "ls-weapon", "item_class": "artifact", "slot": "weapon", "set_name": "Life Drain"},
+        {"item_id": "ls-helmet", "item_class": "artifact", "slot": "helmet", "set_name": "Life Drain"},
+        {"item_id": "ls-shield", "item_class": "artifact", "slot": "shield", "set_name": "Life Drain"},
+        {"item_id": "ls-gloves", "item_class": "artifact", "slot": "gloves", "set_name": "Life Drain"},
+        {"item_id": "spd-chest", "item_class": "artifact", "slot": "chest", "set_name": "Attack Speed"},
+        {"item_id": "spd-boots", "item_class": "artifact", "slot": "boots", "set_name": "Attack Speed"},
+    ]
+    orphaned_items = [
+        {"item_id": "mix-weapon", "item_class": "artifact", "slot": "weapon", "set_name": "Life Drain"},
+        {"item_id": "mix-helmet", "item_class": "artifact", "slot": "helmet", "set_name": "Attack Speed"},
+        {"item_id": "mix-shield", "item_class": "artifact", "slot": "shield", "set_name": "Cruel"},
+        {"item_id": "mix-gloves", "item_class": "artifact", "slot": "gloves", "set_name": "Life Drain"},
+        {"item_id": "mix-chest", "item_class": "artifact", "slot": "chest", "set_name": "Attack Speed"},
+        {"item_id": "mix-boots", "item_class": "artifact", "slot": "boots", "set_name": "Cruel"},
+    ]
+
+    coherent_bonus = build_planner.score_set_coherence_bonus(coherent_items, set_rules, profile, is_complete_build=True)
+    orphaned_bonus = build_planner.score_set_coherence_bonus(orphaned_items, set_rules, profile, is_complete_build=True)
+    coherent_penalty = build_planner.score_orphan_set_penalty(coherent_items, set_rules, profile, is_complete_build=True)
+    orphaned_penalty = build_planner.score_orphan_set_penalty(orphaned_items, set_rules, profile, is_complete_build=True)
+
+    assert coherent_bonus > orphaned_bonus
+    assert coherent_penalty == 0.0
+    assert orphaned_penalty > coherent_penalty
+
+
+def test_resolve_effective_profile_preserves_multiple_current_biased_sets() -> None:
+    profile = build_planner.BUILD_PROFILES["clan_boss_dps"]
+    current_applied_sets = [
+        {"set_name": "Life Drain", "set_kind": "fixed", "completed_sets": 1},
+        {"set_name": "Attack Speed", "set_kind": "fixed", "completed_sets": 1},
+        {"set_name": "Accuracy And Speed", "set_kind": "fixed", "completed_sets": 1},
+        {"set_name": "Cruel", "set_kind": "fixed", "completed_sets": 1},
+    ]
+    set_rules = {
+        "Life Drain": {"set_kind": "fixed", "pieces_required": 4},
+        "Attack Speed": {"set_kind": "fixed", "pieces_required": 2},
+        "Accuracy And Speed": {"set_kind": "fixed", "pieces_required": 2},
+        "Cruel": {"set_kind": "fixed", "pieces_required": 2},
+    }
+
+    effective_profile = build_planner.resolve_effective_profile(profile, current_applied_sets, set_rules)
+
+    assert effective_profile["required_completed_sets"] == {
+        "Life Drain": 1,
+        "Attack Speed": 1,
+        "Accuracy And Speed": 1,
+    }
+
+
+def test_resolve_effective_profile_does_not_preserve_low_bias_lifedrain_on_support() -> None:
+    profile = build_planner.BUILD_PROFILES["decrease_attack_support"]
+    current_applied_sets = [
+        {"set_name": "Life Drain", "set_kind": "fixed", "completed_sets": 1},
+        {"set_name": "Attack Speed", "set_kind": "fixed", "completed_sets": 1},
+        {"set_name": "Accuracy", "set_kind": "fixed", "completed_sets": 1},
+    ]
+    set_rules = {
+        "Life Drain": {"set_kind": "fixed", "pieces_required": 4},
+        "Attack Speed": {"set_kind": "fixed", "pieces_required": 2},
+        "Accuracy": {"set_kind": "fixed", "pieces_required": 2},
+    }
+
+    effective_profile = build_planner.resolve_effective_profile(profile, current_applied_sets, set_rules)
+
+    assert effective_profile["required_completed_sets"] == {
+        "Attack Speed": 1,
+        "Accuracy": 1,
+    }
+    assert "Life Drain" not in effective_profile["required_completed_sets"]
+
+
+def test_choose_best_beam_state_prefers_candidate_that_keeps_required_sets() -> None:
+    profile = {
+        "prefer_fewer_fixed_orphans": True,
+        "required_completed_sets": {"Life Drain": 1, "Attack Speed": 1, "Accuracy And Speed": 1},
+    }
+    set_rules = {
+        "Life Drain": {"set_kind": "fixed", "pieces_required": 4},
+        "Attack Speed": {"set_kind": "fixed", "pieces_required": 2},
+        "Accuracy And Speed": {"set_kind": "fixed", "pieces_required": 2},
+        "Cruel": {"set_kind": "fixed", "pieces_required": 2},
+    }
+    required_build = {
+        "items": [
+            {"item_id": "ls-1", "item_class": "artifact", "set_name": "Life Drain"},
+            {"item_id": "ls-2", "item_class": "artifact", "set_name": "Life Drain"},
+            {"item_id": "ls-3", "item_class": "artifact", "set_name": "Life Drain"},
+            {"item_id": "ls-4", "item_class": "artifact", "set_name": "Life Drain"},
+            {"item_id": "spd-1", "item_class": "artifact", "set_name": "Attack Speed"},
+            {"item_id": "spd-2", "item_class": "artifact", "set_name": "Attack Speed"},
+            {"item_id": "accspd-1", "item_class": "artifact", "set_name": "Accuracy And Speed"},
+            {"item_id": "accspd-2", "item_class": "artifact", "set_name": "Accuracy And Speed"},
+        ],
+        "score": 100.0,
+        "signature": "required",
+        "totals": {"hp": 1},
+    }
+    broken_build = {
+        "items": [
+            {"item_id": "ls-1", "item_class": "artifact", "set_name": "Life Drain"},
+            {"item_id": "ls-2", "item_class": "artifact", "set_name": "Life Drain"},
+            {"item_id": "ls-3", "item_class": "artifact", "set_name": "Life Drain"},
+            {"item_id": "spd-1", "item_class": "artifact", "set_name": "Attack Speed"},
+            {"item_id": "accspd-1", "item_class": "artifact", "set_name": "Accuracy And Speed"},
+            {"item_id": "cruel-1", "item_class": "artifact", "set_name": "Cruel"},
+            {"item_id": "cruel-2", "item_class": "artifact", "set_name": "Cruel"},
+            {"item_id": "flex-1", "item_class": "artifact", "set_name": "Cruel"},
+        ],
+        "score": 999.0,
+        "signature": "broken",
+        "totals": {"hp": 1},
+    }
+
+    selected = choose_best_beam_state(
+        [broken_build, required_build],
+        set_rules=set_rules,
+        profile=profile,
+        reference_totals=None,
+    )
+
+    assert selected["signature"] == "required"
+
+
 def test_build_plan_can_apply_region_specific_area_bonus(tmp_path: Path) -> None:
     source_path = tmp_path / "normalized_account.json"
     db_path = tmp_path / "cbforge.sqlite3"

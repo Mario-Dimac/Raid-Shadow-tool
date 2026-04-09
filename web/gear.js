@@ -63,8 +63,30 @@ if (initialParams.get("item_class")) itemClassFilterEl.value = initialParams.get
 if (initialParams.get("advice")) adviceFilterEl.value = initialParams.get("advice");
 state.selectedItemId = initialParams.get("id") || null;
 
-async function fetchJson(url, options) {
-  const response = await fetch(url, options);
+async function fetchJson(url, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const fetchOptions = { ...options };
+  delete fetchOptions.timeoutMs;
+  let timeoutId = 0;
+  if (timeoutMs > 0 && !fetchOptions.signal) {
+    const controller = new AbortController();
+    fetchOptions.signal = controller.signal;
+    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  }
+  let response;
+  try {
+    response = await fetch(url, fetchOptions);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Richiesta scaduta. La vendita locale non ha risposto in tempo: riavvia CB Forge e riprova.");
+    }
+    if (error instanceof TypeError) {
+      throw new Error("Connessione al server interrotta durante la richiesta. Se CB Forge si e' chiuso, riavvialo con start_cbforge_web.ps1 e riprova.");
+    }
+    throw error;
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
+  }
   const text = await response.text();
   let payload = {};
   try {
@@ -81,6 +103,19 @@ async function fetchJson(url, options) {
 function setStatus(message, isError = false) {
   gearStatusEl.textContent = message || "";
   gearStatusEl.style.color = isError ? "var(--danger)" : "var(--muted)";
+}
+
+function isPendingSoldItem(item) {
+  return Boolean(
+    item
+    && !item.equipped
+    && item.item_id
+    && state.pendingSoldIds.has(String(item.item_id))
+  );
+}
+
+function visibleItems(items) {
+  return (items || []).filter((item) => !isPendingSoldItem(item));
 }
 
 function escapeHtml(value) {
@@ -148,11 +183,13 @@ function renderSummary() {
     gearSummaryEl.innerHTML = "";
     return;
   }
+  const pendingSoldCount = state.pendingSoldIds.size;
   const push12 = summary.verdict_counts?.push_12 || 0;
   const push16 = summary.verdict_counts?.push_16 || 0;
-  const sell = (summary.verdict_counts?.sell_now || 0) + (summary.verdict_counts?.sell_after_12 || 0);
+  const sell = Math.max(0, ((summary.verdict_counts?.sell_now || 0) + (summary.verdict_counts?.sell_after_12 || 0)) - pendingSoldCount);
+  const totalItems = Math.max(0, (summary.total_items || 0) - pendingSoldCount);
   gearSummaryEl.innerHTML = [
-    metricCard("Totale", summary.total_items || 0, "Pezzi nel database"),
+    metricCard("Totale", totalItems, pendingSoldCount ? "Vendita live gia' inviata" : "Pezzi nel database"),
     metricCard("Equipaggiati", summary.equipped_items || 0, "Attualmente addosso"),
     metricCard("Push +12", push12, "Base promettente"),
     metricCard("Push +16", push16, "Roll buoni a +12"),
@@ -170,8 +207,8 @@ function renderSellAssist() {
   sellAssistEl.innerHTML = `
     <section class="card">
       <div class="eyebrow">Sell Queue</div>
-      <h2>ID Candidati Vendita</h2>
-      <p class="subtext">Qui vedi solo i pezzi candidati a vendita dal DB, separati tra pagina Artifact e pagina Accessori. Il bottone live manda gli ID mostrati a <code>SellArtifacts</code>: vende davvero, non seleziona soltanto.</p>
+      <h2>Vendita Locale</h2>
+      <p class="subtext">Qui vedi solo i pezzi candidati a vendita dal DB, separati tra pagina Artifact e pagina Accessori. Il bottone usa il bridge locale e vende davvero gli item in game, senza HellHades.</p>
     </section>
     <section class="grid">
       ${pages.map((page) => renderSellAssistPage(page)).join("")}
@@ -198,7 +235,7 @@ function renderSellAssistPage(page) {
       </div>
       <div class="action-row">
         <button class="ghost" data-sell-page="${escapeHtml(page.item_class || "")}">Filtra ${escapeHtml(itemClassLabel(page.item_class || ""))}</button>
-        ${candidates.length ? `<button data-live-sell-page="${escapeHtml(page.page || "")}">Vendi ID mostrati (${candidates.length})</button>` : ""}
+        ${candidates.length ? `<button data-live-sell-page="${escapeHtml(page.page || "")}">Vendi in game (${candidates.length})</button>` : ""}
       </div>
       <div style="margin-top: 12px;">
         ${candidates.length ? candidates.map((item) => `
@@ -357,7 +394,7 @@ async function loadItems() {
     sort: gearSortEl.value,
   });
   const payload = await fetchJson(`/api/gear-items?${query.toString()}`);
-  state.items = payload.items || [];
+  state.items = visibleItems(payload.items || []);
   state.filters = payload.filters || { slots: [], sets: [], owners: [] };
   refillSelect(slotFilterEl, state.filters.slots || [], "Tutti gli slot");
   refillSelect(setFilterEl, state.filters.sets || [], "Tutti i set");
@@ -397,22 +434,24 @@ async function liveSellPage(pageName) {
   }
 
   const confirmed = window.confirm(
-    `Conferma vendita live di ${artifactIds.length} pezzi nella pagina ${page?.label || pageName}.\n\n` +
+    `Conferma vendita locale di ${artifactIds.length} pezzi nella pagina ${page?.label || pageName}.\n\n` +
     `IDs: ${artifactIds.join(", ")}\n\n` +
-    "Questa chiamata usa SellArtifacts e vende davvero gli item."
+    "Questa azione usa il bridge locale e vende davvero gli item in game. Gli ID resteranno nascosti dal pannello finche' non fai refresh equip dal game."
   );
   if (!confirmed) return;
 
-  setStatus(`Invio vendita live per ${artifactIds.length} pezzi...`);
-  const payload = await fetchJson("/api/live-sell-artifacts", {
+  setStatus(`Invio vendita locale per ${artifactIds.length} pezzi...`);
+  const payload = await fetchJson("/api/local-sell-artifacts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ artifact_ids: artifactIds }),
+    timeoutMs: 30000,
   });
   const approvedIds = payload.result?.approved_ids || [];
   approvedIds.forEach((itemId) => state.pendingSoldIds.add(itemId));
-  await loadSellAssist();
-  setStatus(`${payload.result?.message || "Richiesta inviata."} Il DB locale non si aggiorna da solo finché non reimporti.`);
+  renderSummary();
+  await Promise.all([loadSellAssist(), loadItems()]);
+  setStatus(`${payload.result?.message || "Vendita locale inviata."} Fai refresh equip dal game per riallineare il DB.`);
 }
 
 async function refreshGearFromGame() {
