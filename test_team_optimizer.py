@@ -5,6 +5,11 @@ from pathlib import Path
 
 from forge_db import bootstrap_database, record_run_history
 from team_optimizer import (
+    _build_team_history_index,
+    _evaluate_team_fit,
+    _normalize_effect_type,
+    _objective_team_bonus,
+    _summarize_skill_windows,
     build_candidate_clan_boss_member_row,
     build_team_optimizer_report,
     infer_capabilities_from_texts,
@@ -234,6 +239,10 @@ def test_team_optimizer_builds_a_sensible_unm_skeleton(tmp_path: Path) -> None:
     assert "Stag Knight" in selected_names
     assert "Teodor the Savant" in selected_names
     assert report["missing_required_roles"] == []
+    assert report["team_leader"]["champion_name"] == report["selected_team"][0]["champion_name"]
+    assert report["selected_team"][0]["is_team_leader"] is True
+    assert [member["team_slot"] for member in report["selected_team"]] == [1, 2, 3, 4, 5]
+    assert all(member["is_team_leader"] is False for member in report["selected_team"][1:])
     ninja = next(item for item in report["selected_team"] if item["champion_name"] == "Ninja")
     assert ninja["stat_reliability"]["source"] == "raw"
     assert ninja["stat_reliability"]["confidence"] == 1.0
@@ -432,6 +441,293 @@ def test_team_optimizer_surfaces_skill_windows_for_rotation_reasoning(tmp_path: 
     assert candidate["skill_windows"]["decrease_attack"]["cooldown"] == 4
     assert candidate["skill_windows"]["decrease_attack"]["quality"] > 0.6
     assert candidate["skill_windows"]["decrease_defense"]["duration"] == 2
+
+
+def test_team_optimizer_normalizes_imported_effect_aliases() -> None:
+    assert _normalize_effect_type("decrease_atk") == "decrease_attack"
+    assert _normalize_effect_type("decrease atk") == "decrease_attack"
+    assert _normalize_effect_type("block_debuff") == "block_debuffs"
+    assert _normalize_effect_type("block debuff") == "block_debuffs"
+
+
+def test_team_optimizer_does_not_treat_enemy_turn_meter_control_as_speed_boost() -> None:
+    windows = _summarize_skill_windows(
+        skills=[
+            {
+                "slot": "A1",
+                "skill_name": "Denigration",
+                "description_clean": "Attacks 1 enemy 2 times. Decrease Turn Meter by 10% on each hit if the target has any buffs.",
+                "description": "Attacks 1 enemy 2 times. Decrease Turn Meter by 10% on each hit if the target has any buffs.",
+                "effects": [],
+            }
+        ],
+        booked=False,
+    )
+
+    assert "speed_boost" not in windows
+
+
+def test_team_optimizer_skips_passives_in_clan_boss_sim_rows() -> None:
+    candidate = {
+        "champ_id": "champ-stag",
+        "champion_name": "Stag Knight",
+        "booked": True,
+        "stats": {"spd": 250},
+        "skills": [
+            {
+                "slot": "A2",
+                "skill_name": "Huntmaster",
+                "skill_type": "Active",
+                "cooldown": 4,
+                "booked_cooldown": 3,
+                "effects": [{"effect_type": "decrease_attack", "target": "enemy", "duration": 2, "chance": 100}],
+            },
+            {
+                "slot": "A3",
+                "skill_name": "Lead the Pack",
+                "skill_type": "Passive",
+                "effects": [{"effect_type": "increase_acc", "target": "ally", "duration": 1, "chance": 100}],
+            },
+        ],
+        "skill_windows": {"decrease_attack": {"slot": "A2", "duration": 2, "chance": 100, "quality": 0.7}},
+    }
+
+    row = build_candidate_clan_boss_member_row(candidate, slot_index=1)
+    enabled_slots = [skill["slot"] for skill in row["skills"] if skill.get("enabled")]
+
+    assert enabled_slots == ["A2"]
+
+
+def test_team_optimizer_prioritizes_a1_decrease_attack_over_low_value_actives() -> None:
+    candidate = {
+        "champ_id": "champ-peydma",
+        "champion_name": "Peydma",
+        "booked": True,
+        "stats": {"spd": 200},
+        "skills": [
+            {
+                "slot": "A1",
+                "skill_name": "Agonize",
+                "skill_type": "Basic",
+                "cooldown": 0,
+                "booked_cooldown": 0,
+                "effects": [{"effect_type": "decrease_attack", "target": "enemy", "duration": 2, "chance": 85}],
+            },
+            {
+                "slot": "A2",
+                "skill_name": "Flesh Warp",
+                "skill_type": "Active",
+                "cooldown": 4,
+                "booked_cooldown": 4,
+                "effects": [{"effect_type": "decrease acc", "target": "enemy", "duration": 2, "chance": 35}],
+            },
+            {
+                "slot": "A3",
+                "skill_name": "Appropriate",
+                "skill_type": "Active",
+                "cooldown": 5,
+                "booked_cooldown": 5,
+                "effects": [{"effect_type": "remove buffs", "target": "enemy", "duration": 0, "chance": 100}],
+            },
+        ],
+        "skill_windows": {"decrease_attack": {"slot": "A1", "duration": 2, "chance": 85, "quality": 0.83}},
+    }
+
+    row = build_candidate_clan_boss_member_row(candidate, slot_index=1)
+    priorities = {skill["slot"]: skill["priority"] for skill in row["skills"] if skill.get("enabled")}
+
+    assert priorities["A1"] > priorities["A2"]
+    assert priorities["A1"] > priorities["A3"]
+
+
+def test_team_optimizer_prefers_fully_equipped_duplicate_copy(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+
+    def gear_item(item_id: str, owner_id: str, slot: str) -> dict:
+        return {
+            "item_id": item_id,
+            "item_class": "artifact" if slot not in {"ring", "amulet", "banner"} else "accessory",
+            "slot": slot,
+            "set_name": "Life Drain",
+            "rarity": "epic",
+            "rank": 6,
+            "level": 16,
+            "equipped_by": owner_id,
+            "main_stat": {"type": "spd" if slot == "boots" else "hp", "value": 45 if slot == "boots" else 4080},
+            "substats": [],
+        }
+
+    full_slots = ["weapon", "helmet", "shield", "gloves", "chest", "boots", "ring", "amulet", "banner"]
+    partial_slots = ["weapon", "helmet", "shield", "gloves", "chest", "boots", "ring"]
+    payload = {
+        "champions": [
+            {
+                "champ_id": "jintoro-full",
+                "name": "Jintoro",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": False,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 18000, "atk": 1500, "def": 1000, "spd": 100},
+                "total_stats": {"hp": 52000, "atk": 4200, "def": 2500, "spd": 205, "crit_rate": 100, "crit_dmg": 210},
+                "equipped_item_ids": [],
+                "skills": [],
+            },
+            {
+                "champ_id": "jintoro-missing",
+                "name": "Jintoro",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": False,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 18000, "atk": 1500, "def": 1000, "spd": 100},
+                "total_stats": {"hp": 45000, "atk": 2800, "def": 1700, "spd": 150, "crit_rate": 100, "crit_dmg": 150},
+                "equipped_item_ids": [],
+                "skills": [],
+            },
+        ],
+        "gear": [
+            *(gear_item(f"full-{slot}", "jintoro-full", slot) for slot in full_slots),
+            *(gear_item(f"partial-{slot}", "jintoro-missing", slot) for slot in partial_slots),
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    report = build_team_optimizer_report(boss_key="demon_lord", level_key="ultra_nightmare", affinity="void", db_path=db_path)
+    candidate = next(item for item in report["candidates"] if item["champion_name"] == "Jintoro")
+
+    assert candidate["champ_id"] == "jintoro-full"
+    assert candidate["gear_summary"]["has_full_build"] is True
+    assert candidate["gear_summary"]["equipped_count"] == 9
+
+
+def test_stable_clan_boss_bonus_does_not_crush_non_healer_sustain_shell(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-brogni",
+                "name": "Underpriest Brogni",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 21000, "def": 1400, "spd": 96},
+                "total_stats": {"hp": 78000, "def": 3800, "spd": 215, "res": 250, "acc": 200},
+                "equipped_item_ids": [],
+                "skills": [{"slot": "A3", "skill_id": "brogni-a3", "name": "Shield", "cooldown": 3, "description": "Places Shield and Block Debuffs on all allies.", "effects": [{"type": "shield", "target": "ally", "duration": 2}, {"type": "block_debuffs", "target": "ally", "duration": 2}]}],
+            },
+            {
+                "champ_id": "champ-valk",
+                "name": "Valkyrie",
+                "rarity": "legendary",
+                "affinity": "spirit",
+                "faction": "Barbarians",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["defense", "support"],
+                "base_stats": {"hp": 21000, "atk": 1000, "def": 1500, "spd": 95},
+                "total_stats": {"hp": 70000, "atk": 1800, "def": 5000, "spd": 230, "acc": 180, "crit_rate": 100, "crit_dmg": 170},
+                "equipped_item_ids": [],
+                "skills": [{"slot": "A2", "skill_id": "valk-a2", "name": "Stand Firm", "cooldown": 3, "description": "Places Shield and Counterattack on all allies.", "effects": [{"type": "shield", "target": "ally", "duration": 2}, {"type": "counterattack", "target": "ally", "duration": 2}]}],
+            },
+            {
+                "champ_id": "champ-stag",
+                "name": "Stag Knight",
+                "rarity": "epic",
+                "affinity": "magic",
+                "faction": "Banner Lords",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 19000, "atk": 1200, "def": 1200, "spd": 102},
+                "total_stats": {"hp": 54000, "atk": 2400, "def": 3600, "spd": 220, "acc": 345, "res": 210},
+                "equipped_item_ids": [],
+                "skills": [{"slot": "A2", "skill_id": "stag-a2", "name": "Huntmaster", "cooldown": 4, "description": "Places Decrease ATK and Decrease DEF.", "effects": [{"type": "decrease_attack", "target": "enemy", "duration": 2, "chance": 100}, {"type": "decrease_def", "target": "enemy", "duration": 2, "chance": 100}]}],
+            },
+            {
+                "champ_id": "champ-ninja",
+                "name": "Ninja",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"atk": 1500, "spd": 98},
+                "total_stats": {"hp": 42000, "atk": 5400, "def": 2800, "spd": 205, "acc": 265, "crit_rate": 100, "crit_dmg": 220},
+                "equipped_item_ids": [],
+                "skills": [{"slot": "A2", "skill_id": "ninja-a2", "name": "Hailburn", "cooldown": 3, "description": "Places HP Burn.", "effects": [{"type": "hp_burn", "target": "enemy", "duration": 3, "chance": 100}]}],
+            },
+            {
+                "champ_id": "champ-jintoro",
+                "name": "Jintoro",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Shadowkin",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": False,
+                "role_tags": ["attack"],
+                "base_stats": {"atk": 1500, "spd": 100},
+                "total_stats": {"hp": 52000, "atk": 4200, "def": 2500, "spd": 210, "crit_rate": 100, "crit_dmg": 210},
+                "equipped_item_ids": [],
+                "skills": [],
+            },
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    report = build_team_optimizer_report(boss_key="demon_lord", level_key="ultra_nightmare", affinity="spirit", db_path=db_path)
+    candidates = {item["champion_name"]: item for item in report["candidates"]}
+    team = [candidates[name] for name in ["Underpriest Brogni", "Valkyrie", "Stag Knight", "Ninja", "Jintoro"]]
+    fit = _evaluate_team_fit(team, target_key="demon_lord_unm", thresholds={"required_accuracy": 250.0, "required_speed": 190.0, "survival_floor": 0.70}, boss_affinity="spirit")
+    bonus = _objective_team_bonus(
+        team,
+        objective_key="stable",
+        target_key="demon_lord_unm",
+        thresholds={"required_accuracy": 250.0, "required_speed": 190.0, "survival_floor": 0.70},
+        boss_affinity="spirit",
+        team_fit=fit,
+        team_history=_build_team_history_index([]),
+    )
+
+    assert fit["sustain_members"]
+    assert fit["speed_members"]
+    assert bonus > -200.0
 
 
 def test_build_candidate_clan_boss_member_row_applies_manual_opener_override() -> None:
@@ -1176,7 +1472,7 @@ def test_team_optimizer_prefers_historically_proven_unm_shell(tmp_path: Path) ->
     bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
 
     proven_team = ["Rakka Viletide", "Valkyrie", "Ninja", "Jintoro", "Stag Knight"]
-    for index, total_damage in enumerate((45_621_541.0, 45_205_413.0, 43_522_952.0), start=1):
+    for index, (total_damage, boss_turn) in enumerate(((45_621_541.0, 36), (45_205_413.0, 38), (43_522_952.0, 35)), start=1):
         record_run_history(
             {
                 "source": "test",
@@ -1188,6 +1484,7 @@ def test_team_optimizer_prefers_historically_proven_unm_shell(tmp_path: Path) ->
                 "boss_affinity": "void",
                 "success": 1,
                 "elapsed_seconds": 500.0,
+                "boss_turn": boss_turn,
                 "total_damage": total_damage,
                 "members": [
                     {
@@ -1206,7 +1503,9 @@ def test_team_optimizer_prefers_historically_proven_unm_shell(tmp_path: Path) ->
     assert selected_names == set(proven_team)
     assert report["historical_team_evidence"]["run_count"] == 3
     assert report["historical_team_evidence"]["avg_total_damage"] > 44_000_000
+    assert report["historical_team_evidence"]["avg_boss_turn"] > 36
     assert any("Storico forte" in note for note in report["notes"])
+    assert any("turno boss" in note.lower() for note in report["notes"])
 
 
 def test_team_optimizer_distinguishes_stable_from_push_objective(tmp_path: Path) -> None:
@@ -1355,6 +1654,7 @@ def test_team_optimizer_distinguishes_stable_from_push_objective(tmp_path: Path)
                 "boss_affinity": "void",
                 "success": 1,
                 "elapsed_seconds": 500.0,
+                "boss_turn": 39 + (index % 2),
                 "total_damage": total_damage,
                 "members": [{"champion_name": champion_name, "stats": {"spd": 200 + position, "acc": 250 + position}} for position, champion_name in enumerate(stable_team, start=1)],
             },
@@ -1372,6 +1672,7 @@ def test_team_optimizer_distinguishes_stable_from_push_objective(tmp_path: Path)
                 "boss_affinity": "void",
                 "success": 1,
                 "elapsed_seconds": 500.0,
+                "boss_turn": 31 + index,
                 "total_damage": total_damage,
                 "members": [{"champion_name": champion_name, "stats": {"spd": 205 + position, "acc": 255 + position}} for position, champion_name in enumerate(push_team, start=1)],
             },

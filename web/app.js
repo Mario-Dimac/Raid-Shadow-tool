@@ -10,46 +10,7 @@ const detailsEl = document.getElementById("details");
 const summaryEl = document.getElementById("summary");
 const sidebarStatusEl = document.getElementById("sidebarStatus");
 const searchEl = document.getElementById("search");
-const scopeEl = document.getElementById("scope");
-const sortEl = document.getElementById("sort");
-const rebuildBtn = document.getElementById("rebuildBtn");
-const recomputeStatsBtn = document.getElementById("recomputeStatsBtn");
-const refreshAllBtn = document.getElementById("refreshAllBtn");
-const refreshOneBtn = document.getElementById("refreshOneBtn");
 const reloadBtn = document.getElementById("reloadBtn");
-const SET_LABELS = {
-  "Attack Speed": "Speed",
-  "Accuracy And Speed": "Perception",
-  "HP And Heal": "Immortal",
-  "HP And Defence": "Resilience",
-  "Shield And HP": "Divine Life",
-  "Shield And Speed": "Divine Speed",
-  "Shield And Attack Power": "Divine Offense",
-  "Shield And Critical Chance": "Divine Crit Rate",
-  "Attack Power And Ignore Defense": "Cruel",
-  "Life Drain": "Lifesteal",
-  "Counterattack On Crit": "Avenging",
-  "Dot Rate": "Toxic",
-  "Freeze Rate On Damage Received": "Frost",
-  "AoE Damage Decrease": "Stalwart",
-  "Ignore Defense": "Savage",
-  "Sleep Chance": "Daze",
-  "Decrease Max HP": "Destroy",
-  "Attack Power": "Offense",
-  "Cooldown Reduction Chance": "Reflex",
-  "Critical Heal Multiplier": "Critical Damage",
-  "Unkillable And SPD And CR Damage": "Swift Parry",
-  "Attack And Crit Rate": "Fatal",
-  "Block Debuff": "Immunity",
-  "Crit Rate And Ignore DEF Multiplier": "Lethal",
-  "Damage Increase On HP Decrease": "Fury",
-  "Get Extra Turn": "Relentless",
-  "HP": "Life",
-  "Stun Chance": "Stun",
-  "Crit Damage And Transform Week Into Crit Hit": "Affinitybreaker",
-  "Crit Rate And Life Drain": "Bloodthirst",
-  "Change Hit Type": "Reaction Accessory",
-};
 
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
@@ -57,7 +18,7 @@ async function fetchJson(url, options) {
   let payload = {};
   try {
     payload = text ? JSON.parse(text) : {};
-  } catch (error) {
+  } catch (_error) {
     throw new Error(text || "Risposta non valida");
   }
   if (!response.ok) {
@@ -66,23 +27,13 @@ async function fetchJson(url, options) {
   return payload;
 }
 
-function formatAppliedSetLabel(setRow) {
-  const setName = displaySetName(setRow?.set_name || "");
-  if ((setRow?.set_kind || "").toLowerCase() === "variable") {
-    const piecesEquipped = Number(setRow?.pieces_equipped || 0);
-    const maxPieces = Number(setRow?.max_pieces || 0);
-    return maxPieces > 0 ? `${setName} ${piecesEquipped}/${maxPieces}` : setName;
-  }
-  return `${setName} x${String(setRow?.completed_sets || 0)}`;
-}
-
 function setSidebarStatus(message, isError = false) {
   sidebarStatusEl.textContent = message || "";
   sidebarStatusEl.style.color = isError ? "var(--danger)" : "var(--muted)";
 }
 
 function escapeHtml(value) {
-  return String(value)
+  return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -110,20 +61,7 @@ function formatStatValue(value) {
   return numeric.toFixed(1);
 }
 
-function displaySetName(setName) {
-  return SET_LABELS[setName] || setName || "n/d";
-}
-
-function statsLabel(model) {
-  if (!model || !model.source) return "n/d";
-  if (model.source === "raw") return "import raw";
-  if (model.source === "derived" && model.completeness === "partial") return "derivato con caveat";
-  if (model.source === "derived") return "derivato da gear";
-  if (model.source === "missing") return "non disponibile";
-  return model.source;
-}
-
-function renderStatsGrid(stats, tone = "") {
+function renderStatsGrid(stats = {}) {
   const entries = [
     ["HP", stats.hp],
     ["ATK", stats.atk],
@@ -135,202 +73,85 @@ function renderStatsGrid(stats, tone = "") {
     ["C.DMG", stats.crit_dmg],
   ];
   return `
-    <div class="summary ${tone}">
+    <div class="summary">
       ${entries.map(([label, value]) => metricCard(label, formatStatValue(value))).join("")}
     </div>
   `;
 }
 
+function getVisibleChampions() {
+  return (state.champions || []).filter((champion) => Number(champion?.rank || 0) === 6);
+}
+
 function renderSummary() {
-  const summary = state.summary;
-  if (!summary) {
+  if (!state.summary) {
     summaryEl.innerHTML = "";
     return;
   }
+  const visibleChampions = getVisibleChampions();
+  const selectedChampion = state.championDetail?.account?.champion_name || state.selectedChampion || "-";
   summaryEl.innerHTML = [
-    metricCard("Posseduti", summary.owned_champions || 0, "Campioni presenti nel tuo account"),
-    metricCard("Target L60", summary.registry_targets || 0, "Roster gestito per Clan Boss"),
-    metricCard("Target Pronti", summary.registry_targets_ready || 0, "Target con skill complete e utilizzabili"),
-    metricCard("Con Effetti", summary.registry_targets_with_effect_data || 0, `${summary.skill_effect_rows || 0} effetti strutturati`),
-    metricCard("Registry Locale", summary.registry_targets_ready_from_local_registry || 0, `${summary.skill_rows_from_local_registry || 0} skill locali`),
-    metricCard("Fallback HH", summary.registry_targets_ready_from_hellhades || 0, formatProviderHits(summary.skill_registry_last_sync_provider_hits)),
+    metricCard("Campioni 6*", visibleChampions.length || 0, "Lista principale"),
+    metricCard("Selezionato", selectedChampion, "Stats totali sotto"),
+    metricCard("Target", state.summary.registry_targets || 0, "Gestiti dal DB"),
+    metricCard("Sync", state.summary.registry_targets_ready || 0, "Target con dati pronti"),
   ].join("");
 }
 
-function formatProviderHits(providerHits) {
-  const payload = providerHits || {};
-  const entries = Object.entries(payload).filter(([, value]) => Number(value) > 0);
-  if (!entries.length) return "Nessun sync recente";
-  return entries.map(([key, value]) => `${key}:${value}`).join(" | ");
-}
-
 function championPills(champion) {
-  const pills = [];
-  pills.push(`<span class="pill gold">Lv ${champion.level}</span>`);
-  pills.push(`<span class="pill">R${champion.rank}</span>`);
-  pills.push(`<span class="pill">${escapeHtml(champion.rarity || "n/d")}</span>`);
-  if (champion.is_registry_target) pills.push('<span class="pill gold">Target</span>');
-  if (champion.data_status === "complete") pills.push('<span class="pill ok">Dati completi</span>');
-  else if (champion.data_status === "partial") pills.push('<span class="pill warn">Dati parziali</span>');
-  else pills.push('<span class="pill warn">Dati mancanti</span>');
-  return pills.join("");
+  return [
+    `<span class="pill gold">Lv ${escapeHtml(champion.level)}</span>`,
+    `<span class="pill">${escapeHtml(champion.rarity || "n/d")}</span>`,
+    `<span class="pill">${escapeHtml(champion.affinity || "n/d")}</span>`,
+  ].join("");
 }
 
 function renderRoster() {
-  if (!state.champions.length) {
-    rosterEl.innerHTML = '<div class="empty">Nessun campione trovato con i filtri correnti.</div>';
+  const champions = getVisibleChampions();
+  if (!champions.length) {
+    rosterEl.innerHTML = '<div class="empty">Nessun 6 stelle trovato con i filtri correnti.</div>';
     return;
   }
-  rosterEl.innerHTML = state.champions.map((champion) => `
+  rosterEl.innerHTML = champions.map((champion) => `
     <button class="champ-row ${state.selectedChampion === champion.champion_name ? "active" : ""}" data-name="${escapeHtml(champion.champion_name)}">
       <div class="champ-topline">
         <div class="champ-name">${escapeHtml(champion.champion_name)}</div>
-        <div class="pill">${champion.skill_rows_with_data}/${champion.skill_rows}</div>
+        <div class="pill gold">6*</div>
       </div>
       <div class="pillbar">${championPills(champion)}</div>
     </button>
   `).join("");
   rosterEl.querySelectorAll(".champ-row").forEach((button) => {
-    button.addEventListener("click", () => selectChampion(button.dataset.name));
+    button.addEventListener("click", () => selectChampion(button.dataset.name || ""));
   });
-}
-
-function formatEffect(effect) {
-  const bits = [effect.effect_type];
-  if (effect.target) bits.push(`@${effect.target}`);
-  if (effect.effect_value !== null && effect.effect_value !== undefined) bits.push(String(effect.effect_value));
-  if (effect.duration !== null && effect.duration !== undefined) bits.push(`${effect.duration}t`);
-  if (effect.chance !== null && effect.chance !== undefined) bits.push(`${effect.chance}%`);
-  return escapeHtml(bits.join(" "));
 }
 
 function renderDetails() {
   const detail = state.championDetail;
   if (!detail) {
-    detailsEl.innerHTML = '<div class="empty">Seleziona un campione dalla lista per vedere stats, skill ed effetti.</div>';
+    detailsEl.innerHTML = '<div class="empty">Seleziona un campione 6 stelle per vedere solo le stats totali.</div>';
     return;
   }
-
-  const accountMeta = [
-    `<span class="pill gold">Lv ${detail.account.level}</span>`,
-    `<span class="pill">Rank ${detail.account.rank}</span>`,
-    `<span class="pill">${escapeHtml(detail.account.rarity || "n/d")}</span>`,
-    `<span class="pill">${escapeHtml(detail.account.affinity || "n/d")}</span>`,
-    `<span class="pill">${escapeHtml(detail.account.faction || "n/d")}</span>`,
-    detail.account.booked ? '<span class="pill ok">Bookato</span>' : '<span class="pill">Non bookato</span>',
-    detail.skill_data?.data_status === "complete"
-      ? '<span class="pill ok">Skill complete</span>'
-      : detail.skill_data?.data_status === "partial"
-        ? '<span class="pill warn">Skill parziali</span>'
-        : '<span class="pill warn">Skill da completare</span>',
-  ].join("");
-
-  const profileRows = [
-    ["Campione", detail.account.champion_name],
-    ["Rarita", detail.account.rarity || "n/d"],
-    ["Affinity", detail.account.affinity || "n/d"],
-    ["Faction", detail.account.faction || "n/d"],
-    ["Livello", detail.account.level],
-    ["Rank", detail.account.rank],
-    ["Awakening", detail.account.awakening_level],
-    ["Empowerment", detail.account.empowerment_level],
-    ["Bookato", detail.account.booked ? "si" : "no"],
-  ].map(([label, value]) => `
-    <div class="kv-row"><span>${escapeHtml(String(label))}</span><strong>${escapeHtml(String(value))}</strong></div>
-  `).join("");
-
-  const unsupportedSets = (detail.stat_model?.unsupported_sets || []).map((setName) => displaySetName(setName)).join(", ") || "nessuno";
-  const appliedSets = (detail.stat_model?.applied_sets || []).map((setRow) => formatAppliedSetLabel(setRow)).join(", ") || "nessuno";
-  const enrichRows = [
-    ["Fonte skill", detail.skill_data?.primary_source || detail.catalog.external_provider || "n/d"],
-    ["Ref esterno", detail.catalog.external_ref_id ?? "n/d"],
-    ["Ultimo sync esterno", detail.catalog.external_synced_at || "n/d"],
-    ["Skill", `${detail.skills.length}`],
-    ["Skill con dati", `${detail.skill_data?.skill_rows_with_data ?? 0}/${detail.skill_data?.skill_rows ?? 0}`],
-    ["Skill con effetti", `${detail.skill_data?.skill_rows_with_effects ?? 0}`],
-    ["Stato skill", detail.skill_data?.data_status || "n/d"],
-    ["Effect rows", `${detail.skills.reduce((count, skill) => count + (skill.effects || []).length, 0)}`],
-    ["Ruoli", detail.roles.length ? detail.roles.join(", ") : "n/d"],
-    ["Stats source", statsLabel(detail.stat_model)],
-    ["Stats refresh", detail.stat_model?.computed_at || "n/d"],
-    ["Stats importate", detail.stat_model?.imported_total_stats_present ? "si" : "no"],
-    ["Bonus account", (detail.stat_model?.bonus_sources || []).join(", ") || "n/d"],
-    ["Set applicati", appliedSets],
-    ["Set non quantificati", unsupportedSets],
-  ].map(([label, value]) => `
-    <div class="kv-row"><span>${escapeHtml(String(label))}</span><strong>${escapeHtml(String(value))}</strong></div>
-  `).join("");
-
-  const statsWarnings = (detail.stat_model?.warnings || []).map((warning) => `
-    <div class="kv-row"><span>Attenzione</span><strong>${escapeHtml(warning)}</strong></div>
-  `).join("");
-  const missingSourcesLabel = (detail.stat_model?.missing_sources || []).join(", ") || "nessuna nota";
-  const statsNote = detail.stat_model?.imported_total_stats_present
-    ? "Valori account affidabili: le total stats importate sono disponibili."
-    : detail.stat_model?.completeness === "partial"
-      ? "Valori derivati da base, gear, glyph e bonus account parziali. Usali come stima, non come verita finale."
-      : "Valori derivati da base, gear, glyph, set e bonus account disponibili. Alcune sorgenti in-game possono comunque mancare.";
-
-  const skills = (detail.skills || []).map((skill) => `
-    <article class="skill">
-      <div class="skill-header">
-        <div>
-          <div class="skill-title">${escapeHtml(skill.slot)} · ${escapeHtml(skill.skill_name || "Skill")}</div>
-          <div class="subtext">${escapeHtml(skill.skill_type || "n/d")}</div>
-        </div>
-        <div class="pillbar">
-          <span class="pill">CD ${skill.cooldown ?? "-"}</span>
-          <span class="pill">Booked ${skill.booked_cooldown ?? "-"}</span>
-        </div>
-      </div>
-      <div class="skill-desc">${escapeHtml(skill.description_clean || skill.description || "Nessuna descrizione")}</div>
-      ${(skill.effects || []).length ? `
-        <div class="effects">
-          ${skill.effects.map((effect) => `<span class="effect">${formatEffect(effect)}</span>`).join("")}
-        </div>
-      ` : ""}
-    </article>
-  `).join("");
-
+  const statSourceLabel = detail.stat_model?.imported_total_stats_present
+    ? "Stats importate dal client"
+    : "Stats derivate dal DB";
   detailsEl.innerHTML = `
     <section class="detail-hero">
       <div>
-        <div class="eyebrow">Champion Detail</div>
-        <h2>${escapeHtml(detail.account.champion_name)}</h2>
-        <div class="detail-meta">${accountMeta}</div>
-      </div>
-      <div class="pillbar">
-        ${detail.roles.map((role) => `<span class="pill">${escapeHtml(role)}</span>`).join("")}
-      </div>
-    </section>
-
-    <section class="grid">
-      <div class="card">
-        <h3>Profilo Account</h3>
-        <div class="kv">${profileRows}</div>
-      </div>
-      <div class="card">
-        <h3>Stato Dati</h3>
-        <div class="kv">${enrichRows}</div>
+        <div class="eyebrow">Campione</div>
+        <h2>${escapeHtml(detail.account?.champion_name || "-")}</h2>
+        <div class="detail-meta">
+          <span class="pill gold">6*</span>
+          <span class="pill">${escapeHtml(detail.account?.rarity || "n/d")}</span>
+          <span class="pill">${escapeHtml(detail.account?.affinity || "n/d")}</span>
+          <span class="pill">${escapeHtml(detail.account?.faction || "n/d")}</span>
+        </div>
       </div>
     </section>
-
     <section class="card">
-      <h3>Totale Account</h3>
-      <div class="subtext">${escapeHtml(statsNote)}</div>
-      ${statsWarnings ? `<div class="kv" style="margin: 12px 0 10px;">${statsWarnings}<div class="kv-row"><span>Sorgenti mancanti</span><strong>${escapeHtml(missingSourcesLabel)}</strong></div></div>` : ""}
-      ${renderStatsGrid(detail.total_stats)}
-    </section>
-
-    <section class="card">
-      <h3>Base Stimata</h3>
-      <div class="subtext">Base convertita dal dump locale in formato utile per il controllo manuale.</div>
-      ${renderStatsGrid(detail.base_totals, "muted")}
-    </section>
-
-    <section class="card">
-      <h3>Skill</h3>
-      ${skills || '<div class="empty">Nessuna skill disponibile.</div>'}
+      <h3>Stats Totali</h3>
+      <div class="subtext">${escapeHtml(statSourceLabel)}</div>
+      ${renderStatsGrid(detail.total_stats || {})}
     </section>
   `;
 }
@@ -343,20 +164,22 @@ async function loadSummary() {
 async function loadChampions() {
   setSidebarStatus("Caricamento roster...");
   const query = new URLSearchParams({
-    search: searchEl.value.trim(),
-    scope: scopeEl.value,
-    sort: sortEl.value,
+    search: searchEl?.value?.trim?.() || "",
+    scope: "all",
+    sort: "power",
   });
   const payload = await fetchJson(`/api/champions?${query.toString()}`);
   state.champions = payload.champions || [];
-  if (!state.selectedChampion && state.champions.length) {
-    state.selectedChampion = state.champions[0].champion_name;
+  const visibleChampions = getVisibleChampions();
+  if (!state.selectedChampion && visibleChampions.length) {
+    state.selectedChampion = visibleChampions[0].champion_name;
   }
-  if (state.selectedChampion && !state.champions.some((item) => item.champion_name === state.selectedChampion)) {
-    state.selectedChampion = state.champions[0] ? state.champions[0].champion_name : null;
+  if (state.selectedChampion && !visibleChampions.some((item) => item.champion_name === state.selectedChampion)) {
+    state.selectedChampion = visibleChampions[0]?.champion_name || null;
   }
   renderRoster();
-  setSidebarStatus(`${state.champions.length} campioni caricati.`);
+  renderSummary();
+  setSidebarStatus(`${visibleChampions.length} campioni 6 stelle caricati.`);
   if (state.selectedChampion) {
     await loadChampionDetail(state.selectedChampion);
   } else {
@@ -367,66 +190,22 @@ async function loadChampions() {
 
 async function loadChampionDetail(name) {
   state.championDetail = await fetchJson(`/api/champion?name=${encodeURIComponent(name)}`);
+  renderSummary();
   renderDetails();
 }
 
 async function selectChampion(name) {
+  if (!name) return;
   state.selectedChampion = name;
   renderRoster();
   await loadChampionDetail(name);
 }
 
-async function postAction(url, body = {}) {
-  return fetchJson(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+if (searchEl) {
+  searchEl.addEventListener("input", () => loadChampions().catch((error) => setSidebarStatus(error.message, true)));
 }
-
-async function rebuildDb() {
-  setSidebarStatus("Ricostruzione DB in corso...");
-  const payload = await postAction("/api/rebuild-db");
-  setSidebarStatus(`DB ricostruito. Catalogo: ${payload.summary.champion_catalog}, target: ${payload.summary.registry_targets}.`);
-  await loadSummary();
-  await loadChampions();
+if (reloadBtn) {
+  reloadBtn.addEventListener("click", () => Promise.all([loadSummary(), loadChampions()]).catch((error) => setSidebarStatus(error.message, true)));
 }
-
-async function recomputeStats() {
-  setSidebarStatus("Ricalcolo stats in corso...");
-  const payload = await postAction("/api/recompute-stats");
-  setSidebarStatus(`Stats ricalcolate per ${payload.summary.updated_champions} campioni.`);
-  await loadSummary();
-  await loadChampions();
-  if (state.selectedChampion) await loadChampionDetail(state.selectedChampion);
-}
-
-async function refreshAll() {
-  setSidebarStatus("Aggiornamento dati esterni di tutti i target in corso...");
-  const payload = await postAction("/api/update-targets");
-  setSidebarStatus(`Aggiornati ${payload.summary.updated}/${payload.summary.requested} target.`);
-  await loadSummary();
-  await loadChampions();
-  if (state.selectedChampion) await loadChampionDetail(state.selectedChampion);
-}
-
-async function refreshSelected() {
-  if (!state.selectedChampion) return;
-  setSidebarStatus(`Aggiornamento dati esterni per ${state.selectedChampion} in corso...`);
-  const payload = await postAction("/api/update-champion", { champion_name: state.selectedChampion });
-  setSidebarStatus(`Aggiornato ${payload.summary.updated}/${payload.summary.requested}: ${state.selectedChampion}.`);
-  await loadSummary();
-  await loadChampions();
-  await loadChampionDetail(state.selectedChampion);
-}
-
-searchEl.addEventListener("input", () => loadChampions().catch((error) => setSidebarStatus(error.message, true)));
-scopeEl.addEventListener("change", () => loadChampions().catch((error) => setSidebarStatus(error.message, true)));
-sortEl.addEventListener("change", () => loadChampions().catch((error) => setSidebarStatus(error.message, true)));
-rebuildBtn.addEventListener("click", () => rebuildDb().catch((error) => setSidebarStatus(error.message, true)));
-recomputeStatsBtn.addEventListener("click", () => recomputeStats().catch((error) => setSidebarStatus(error.message, true)));
-refreshAllBtn.addEventListener("click", () => refreshAll().catch((error) => setSidebarStatus(error.message, true)));
-refreshOneBtn.addEventListener("click", () => refreshSelected().catch((error) => setSidebarStatus(error.message, true)));
-reloadBtn.addEventListener("click", () => Promise.all([loadSummary(), loadChampions()]).catch((error) => setSidebarStatus(error.message, true)));
 
 Promise.all([loadSummary(), loadChampions()]).catch((error) => setSidebarStatus(error.message, true));

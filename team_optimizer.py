@@ -289,11 +289,16 @@ def _team_signature(names: Iterable[str]) -> str:
     return "|".join(normalized)
 
 
-def _merge_history_metric(target: Dict[str, Any], total_damage: float) -> None:
+def _merge_history_metric(target: Dict[str, Any], total_damage: float, boss_turn: float = 0.0) -> None:
     target["run_count"] = int(target.get("run_count") or 0) + 1
     target["total_damage_sum"] = float(target.get("total_damage_sum") or 0.0) + float(total_damage)
     target["avg_total_damage"] = round(float(target["total_damage_sum"]) / max(int(target["run_count"]), 1), 2)
     target["max_total_damage"] = round(max(float(target.get("max_total_damage") or 0.0), float(total_damage)), 2)
+    if float(boss_turn or 0.0) > 0.0:
+        target["boss_turn_sum"] = float(target.get("boss_turn_sum") or 0.0) + float(boss_turn)
+        target["boss_turn_count"] = int(target.get("boss_turn_count") or 0) + 1
+        target["avg_boss_turn"] = round(float(target["boss_turn_sum"]) / max(int(target["boss_turn_count"]), 1), 2)
+        target["max_boss_turn"] = round(max(float(target.get("max_boss_turn") or 0.0), float(boss_turn)), 2)
 
 
 def _build_team_history_index(rows: Iterable[sqlite3.Row]) -> Dict[str, Dict[str, Dict[str, Any]]]:
@@ -304,6 +309,7 @@ def _build_team_history_index(rows: Iterable[sqlite3.Row]) -> Dict[str, Dict[str
             run_id,
             {
                 "total_damage": _to_float(row["total_damage"]),
+                "boss_turn": _to_float(row["boss_turn"]),
                 "champion_names": [],
             },
         )
@@ -316,17 +322,18 @@ def _build_team_history_index(rows: Iterable[sqlite3.Row]) -> Dict[str, Dict[str
     for run in members_by_run.values():
         champion_names = sorted({str(name) for name in list(run.get("champion_names") or []) if str(name)})
         total_damage = _to_float(run.get("total_damage"))
+        boss_turn = _to_float(run.get("boss_turn"))
         if len(champion_names) >= 2:
             for first_index, first_name in enumerate(champion_names):
                 for second_name in champion_names[first_index + 1:]:
                     pair_key = _team_signature((first_name, second_name))
                     pair_row = pair_teams.setdefault(pair_key, {"run_count": 0, "total_damage_sum": 0.0, "avg_total_damage": 0.0, "max_total_damage": 0.0})
-                    _merge_history_metric(pair_row, total_damage)
+                    _merge_history_metric(pair_row, total_damage, boss_turn)
         if champion_names:
             exact_key = _team_signature(champion_names)
             exact_row = exact_teams.setdefault(exact_key, {"run_count": 0, "total_damage_sum": 0.0, "avg_total_damage": 0.0, "max_total_damage": 0.0})
             exact_row["team_size"] = len(champion_names)
-            _merge_history_metric(exact_row, total_damage)
+            _merge_history_metric(exact_row, total_damage, boss_turn)
     return {"exact": exact_teams, "pairs": pair_teams}
 
 
@@ -362,6 +369,46 @@ def _group_equipped_sets_by_champion(
                 }
             )
         output[champ_id] = summary
+    return output
+
+
+REQUIRED_GEAR_SLOTS: tuple[str, ...] = (
+    "weapon",
+    "helmet",
+    "shield",
+    "gloves",
+    "chest",
+    "boots",
+    "ring",
+    "amulet",
+    "banner",
+)
+
+
+def _group_equipped_gear_by_champion(
+    rows: Iterable[sqlite3.Row],
+    set_rules: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    set_rows = _group_equipped_sets_by_champion(rows, set_rules)
+    slots_by_champ: Dict[str, Set[str]] = {}
+    for row in rows:
+        champ_id = str(row["equipped_by"] or "").strip()
+        slot = str(row["slot"] or "").strip().lower()
+        if not champ_id or not slot:
+            continue
+        slots_by_champ.setdefault(champ_id, set()).add(slot)
+
+    output: Dict[str, Dict[str, Any]] = {}
+    for champ_id in set(set_rows) | set(slots_by_champ):
+        equipped_slots = slots_by_champ.get(champ_id, set())
+        missing_slots = [slot for slot in REQUIRED_GEAR_SLOTS if slot not in equipped_slots]
+        output[champ_id] = {
+            "set_summary": list(set_rows.get(champ_id, [])),
+            "equipped_count": len(equipped_slots),
+            "equipped_slots": [slot for slot in REQUIRED_GEAR_SLOTS if slot in equipped_slots],
+            "missing_slots": missing_slots,
+            "has_full_build": len(missing_slots) == 0,
+        }
     return output
 
 
@@ -411,8 +458,9 @@ CHAMPION_HINTS: Dict[str, ChampionHint] = {
 CHAMPION_CAPABILITY_HINTS: Dict[str, Set[str]] = {
     "Doompriest": {"healing", "sustain", "cleanse"},
     "Riho Bonespear": {"healing", "sustain", "cleanse"},
-    "Underpriest Brogni": {"shield", "sustain", "defense_core"},
+    "Underpriest Brogni": {"shield", "sustain", "defense_core", "block_debuffs"},
     "Rakka Viletide": {"revive", "sustain"},
+    "Stag Knight": {"decrease_defense"},
     "Tyrant Ixlimor": {"ally_protect", "sustain", "defense_core"},
     "Teodor the Savant": {"poison", "boss_pressure"},
     "Martyr": {"ally_protect", "defense_core", "counterattack", "sustain"},
@@ -487,7 +535,10 @@ CAPABILITY_INFERENCE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] 
 
 EFFECT_TYPE_ALIASES: Dict[str, str] = {
     "decrease attack": "decrease_attack",
+    "decrease atk": "decrease_attack",
+    "decrease_atk": "decrease_attack",
     "decrease def": "decrease_defense",
+    "decrease_def": "decrease_defense",
     "decrease defense": "decrease_defense",
     "decrease_defense": "decrease_defense",
     "decrease speed": "decrease_speed",
@@ -505,7 +556,10 @@ EFFECT_TYPE_ALIASES: Dict[str, str] = {
     "increase_resistance": "increase_resistance",
     "perfect veil": "perfect_veil",
     "perfect_veil": "perfect_veil",
+    "block debuff": "block_debuffs",
+    "block_debuff": "block_debuffs",
     "block debuffs": "block_debuffs",
+    "block_debuffs": "block_debuffs",
     "ally protect": "ally_protect",
     "counterattack": "counterattack",
     "counter attack": "counterattack",
@@ -520,6 +574,7 @@ EFFECT_TYPE_ALIASES: Dict[str, str] = {
     "cooldown reset": "cooldown_reset",
     "decrease cooldown": "cooldown_reset",
     "turn meter fill": "speed_boost",
+    "turn_meter_fill": "speed_boost",
     "increase speed": "speed_boost",
 }
 
@@ -622,12 +677,10 @@ def build_team_optimizer_report(
         ).fetchall()
         equipped_set_rows = conn.execute(
             """
-            SELECT equipped_by, set_name
+            SELECT equipped_by, set_name, slot
             FROM gear_items
             WHERE equipped_by IS NOT NULL
               AND equipped_by != ''
-              AND set_name IS NOT NULL
-              AND set_name != ''
             """
         ).fetchall()
         set_rules = load_set_rules(conn)
@@ -651,7 +704,9 @@ def build_team_optimizer_report(
                 COUNT(DISTINCT rr.run_id) AS run_count,
                 AVG(COALESCE(rmm.damage_done, 0)) AS avg_damage_done,
                 AVG(COALESCE(rmm.damage_taken, 0)) AS avg_damage_taken,
-                AVG(COALESCE(rmm.healing_done, 0)) AS avg_healing_done
+                AVG(COALESCE(rmm.healing_done, 0)) AS avg_healing_done,
+                AVG(CASE WHEN rr.boss_turn IS NOT NULL THEN rr.boss_turn END) AS avg_boss_turn,
+                MAX(rr.boss_turn) AS max_boss_turn
             FROM run_history_runs rr
             JOIN run_history_members rm
                 ON rm.run_id = rr.run_id
@@ -665,7 +720,7 @@ def build_team_optimizer_report(
         ).fetchall()
         team_history_rows = conn.execute(
             f"""
-            SELECT rr.run_id, rr.total_damage, rm.champion_name
+            SELECT rr.run_id, rr.total_damage, rr.boss_turn, rm.champion_name
             FROM run_history_runs rr
             JOIN run_history_members rm
                 ON rm.run_id = rr.run_id
@@ -676,20 +731,22 @@ def build_team_optimizer_report(
             encounter_history_keys,
         ).fetchall()
 
-    best_roster_rows = _dedupe_roster_by_champion_name(roster_rows)
+    equipped_gear_by_champ_id = _group_equipped_gear_by_champion(equipped_set_rows, set_rules)
+    best_roster_rows = _dedupe_roster_by_champion_name(roster_rows, equipped_gear_by_champ_id)
     stats_by_champ_id = _group_stats_by_champion(stat_rows)
     stat_models_by_champ_id = _group_stat_models_by_champion(stat_model_rows)
     bonus_sources = sorted({str(row["source"] or "").strip() for row in bonus_source_rows if str(row["source"] or "").strip()})
     account_roles_by_name = _group_roles_by_name(role_rows)
     effect_texts_by_name = _group_effect_texts_by_name(skill_rows, effect_rows)
     skills_by_name = _group_skills_by_name(skill_rows, effect_rows)
-    equipped_sets_by_champ_id = _group_equipped_sets_by_champion(equipped_set_rows, set_rules)
     evidence_by_name = {
         str(row["champion_name"] or ""): {
             "run_count": int(row["run_count"] or 0),
             "avg_damage_done": _to_float(row["avg_damage_done"]),
             "avg_damage_taken": _to_float(row["avg_damage_taken"]),
             "avg_healing_done": _to_float(row["avg_healing_done"]),
+            "avg_boss_turn": _to_float(row["avg_boss_turn"]),
+            "max_boss_turn": _to_float(row["max_boss_turn"]),
         }
         for row in evidence_rows
     }
@@ -703,7 +760,8 @@ def build_team_optimizer_report(
             account_roles=account_roles_by_name.get(str(row["champion_name"] or ""), set()),
             effect_texts=effect_texts_by_name.get(str(row["champion_name"] or ""), []),
             skills=skills_by_name.get(str(row["champion_name"] or ""), []),
-            current_set_summary=equipped_sets_by_champ_id.get(str(row["champ_id"] or ""), []),
+            current_set_summary=list(dict(equipped_gear_by_champ_id.get(str(row["champ_id"] or ""), {})).get("set_summary") or []),
+            current_gear_summary=dict(equipped_gear_by_champ_id.get(str(row["champ_id"] or ""), {}) or {}),
             evidence=evidence_by_name.get(str(row["champion_name"] or ""), {}),
             target_key=encounter_key,
             boss_affinity=effective_affinity,
@@ -751,6 +809,7 @@ def build_team_optimizer_report(
                     boss_affinity=effective_affinity,
                     model_path=model_path,
                     hard_rules=ai_hard_rules,
+                    ranking_objective=objective_key,
                 )
                 ai_team = list(ai_payload.get("best_team") or [])
                 if len(ai_team) == profile.team_size:
@@ -758,6 +817,11 @@ def build_team_optimizer_report(
                     selection_notes.extend(
                         [
                             f"Selezione team: AI baseline ({int(ai_payload.get('evaluated_combinations') or 0)} combinazioni).",
+                            (
+                                f"Turno boss previsto: {_to_float(ai_payload.get('predicted_boss_turn')):.1f}."
+                                if _to_float(ai_payload.get("predicted_boss_turn")) > 0.0
+                                else "Turno boss previsto: n/d."
+                            ),
                             f"Danno previsto: {_to_float(ai_payload.get('predicted_total_damage')):.0f}.",
                             f"Obiettivo ranking: {objective_meta.get('label')}.",
                         ]
@@ -774,6 +838,7 @@ def build_team_optimizer_report(
         except Exception as exc:
             source_warnings.append(f"AI non disponibile: {exc}. Uso proposta optimizer.")
             effective_source = "optimizer"
+    selected_team = _annotate_selected_team(selected_team)
     selected_names = {str(item["champion_name"] or "") for item in selected_team}
     bench = [item for item in candidates if str(item["champion_name"] or "") not in selected_names][:5]
 
@@ -863,6 +928,7 @@ def build_team_optimizer_report(
             "target_damage": objective_meta.get("target_damage"),
             "thresholds": dict(thresholds),
         },
+        "team_leader": dict(selected_team[0]) if selected_team else {},
         "selected_team": selected_team,
         "bench": bench,
         "candidates": candidates,
@@ -877,7 +943,11 @@ def build_team_optimizer_report(
             f"Obiettivo attivo: {objective_meta.get('label')}. {objective_meta.get('description')}",
             *(
                 [
-                    f"Storico forte su questa shell: {int(selected_team_history.get('run_count') or 0)} run, media {_to_float(selected_team_history.get('avg_total_damage')):.0f} danni."
+                    (
+                        f"Storico forte su questa shell: {int(selected_team_history.get('run_count') or 0)} run, media turno boss {_to_float(selected_team_history.get('avg_boss_turn')):.1f}, picco {_to_float(selected_team_history.get('max_boss_turn')):.0f}, media {_to_float(selected_team_history.get('avg_total_damage')):.0f} danni."
+                        if _to_float(selected_team_history.get("avg_boss_turn")) > 0.0
+                        else f"Storico forte su questa shell: {int(selected_team_history.get('run_count') or 0)} run, media {_to_float(selected_team_history.get('avg_total_damage')):.0f} danni."
+                    )
                 ]
                 if selected_team_history
                 else []
@@ -893,6 +963,21 @@ def build_team_optimizer_report(
             "I punteggi ora pesano anche sustain, strati difensivi, debuff chiave e sinergia di squadra, ma non sono ancora un simulatore turn-order trusted.",
         ],
     }
+
+
+def _annotate_selected_team(selected_team: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    ordered_team = sorted(
+        (dict(member) for member in selected_team),
+        key=lambda item: (-float(item.get("score") or 0.0), str(item.get("champion_name") or "").lower()),
+    )
+    annotated_team: List[Dict[str, Any]] = []
+    for index, member in enumerate(ordered_team, start=1):
+        row = dict(member)
+        row["team_slot"] = index
+        row["is_team_leader"] = index == 1
+        row["team_role_label"] = "Capo" if index == 1 else "Membro"
+        annotated_team.append(row)
+    return annotated_team
 
 
 def _select_team(
@@ -1091,6 +1176,7 @@ def _build_candidate(
     effect_texts: Sequence[str],
     skills: Sequence[Mapping[str, Any]],
     current_set_summary: Sequence[Mapping[str, Any]],
+    current_gear_summary: Mapping[str, Any],
     evidence: Mapping[str, Any],
     target_key: str,
     boss_affinity: str,
@@ -1151,14 +1237,26 @@ def _build_candidate(
     if affinity_bonus:
         score_breakdown.append({"label": "Affinity", "value": round(affinity_bonus, 2)})
 
-    evidence_bonus = _compute_evidence_bonus(evidence, roles)
+    evidence_bonus = _compute_evidence_bonus(evidence, roles, target_key=target_key)
     if evidence_bonus:
         score += evidence_bonus
         score_breakdown.append({"label": "Run evidence", "value": round(evidence_bonus, 2)})
 
+    equipped_count = int(current_gear_summary.get("equipped_count") or 0)
+    missing_slots = [str(slot) for slot in list(current_gear_summary.get("missing_slots") or []) if str(slot)]
+    if missing_slots:
+        missing_penalty = 16.0 * len(missing_slots)
+        if len(missing_slots) >= 2:
+            missing_penalty += 8.0
+        score -= missing_penalty
+        score_breakdown.append({"label": "Gear completeness", "value": round(-missing_penalty, 2)})
+
     risks = _build_risk_flags(target_key, champion_name, roles, capability_tags, weighted_stat_signals, affinity_state, thresholds)
     risks.extend(stat_reliability["warnings"])
-    reasons = _build_reasons(roles, weighted_stat_signals, evidence, hint, affinity_state, boss_affinity, stat_reliability)
+    reasons = _build_reasons(roles, weighted_stat_signals, evidence, hint, affinity_state, boss_affinity, stat_reliability, target_key=target_key)
+    if missing_slots:
+        risks.append(f"Build incompleta: mancano {', '.join(missing_slots)}.")
+        reasons.append(f"Equip incompleto ({equipped_count}/9): score ridotto finche la build non e completa.")
 
     return {
         "champ_id": str(roster_row["champ_id"] or ""),
@@ -1175,6 +1273,12 @@ def _build_candidate(
         "capability_tags": capability_tags,
         "skills": [dict(skill) for skill in skills],
         "set_summary": [dict(row) for row in current_set_summary],
+        "gear_summary": {
+            "equipped_count": equipped_count,
+            "equipped_slots": [str(slot) for slot in list(current_gear_summary.get("equipped_slots") or []) if str(slot)],
+            "missing_slots": missing_slots,
+            "has_full_build": bool(current_gear_summary.get("has_full_build")),
+        },
         "skill_windows": skill_windows,
         "score": round(score, 2),
         "score_breakdown": score_breakdown,
@@ -1187,6 +1291,8 @@ def _build_candidate(
             "avg_damage_done": round(_to_float(evidence.get("avg_damage_done")), 2),
             "avg_damage_taken": round(_to_float(evidence.get("avg_damage_taken")), 2),
             "avg_healing_done": round(_to_float(evidence.get("avg_healing_done")), 2),
+            "avg_boss_turn": round(_to_float(evidence.get("avg_boss_turn")), 2),
+            "max_boss_turn": round(_to_float(evidence.get("max_boss_turn")), 2),
         },
         "risks": risks,
         "reasons": reasons,
@@ -1387,6 +1493,53 @@ def _sim_priority_for_slot(slot: str) -> int:
     return {"A1": 100, "A2": 240, "A3": 320, "A4": 160}.get(str(slot or "").upper(), 100)
 
 
+def _sim_priority_for_skill(slot: str, effects: Sequence[Mapping[str, Any]]) -> int:
+    priority = _sim_priority_for_slot(slot)
+    normalized_effects = {
+        _normalize_effect_type(effect.get("effect_type"))
+        for effect in effects
+        if _normalize_effect_type(effect.get("effect_type"))
+    }
+    if not normalized_effects:
+        return priority
+
+    low_value_effects = {
+        "turn meter reduce",
+        "turn meter steal",
+        "turn_meter_reduce",
+        "turn_meter_steal",
+        "turn meter fill scaled",
+        "remove buffs",
+        "steal buffs",
+        "decrease acc",
+        "decrease spd",
+        "stun",
+        "freeze",
+        "sleep",
+        "fear",
+        "true fear",
+        "provoke",
+        "hex",
+        "block revive",
+        "revive",
+    }
+    if normalized_effects.issubset(low_value_effects):
+        return 110 if str(slot or "").upper() != "A1" else priority
+
+    if "unkillable" in normalized_effects:
+        priority = max(priority, 360)
+    if normalized_effects & {"block_debuffs", "cleanse"}:
+        priority = max(priority, 340)
+    if normalized_effects & {"counterattack", "ally_protect", "increase_defense", "shield"}:
+        priority = max(priority, 320)
+    if "decrease_attack" in normalized_effects:
+        priority = max(priority, 300 if str(slot or "").upper() == "A1" else 280)
+    if normalized_effects & {"decrease_defense", "weaken", "hp_burn", "poison"}:
+        priority = max(priority, 220 if str(slot or "").upper() != "A1" else 180)
+
+    return priority
+
+
 def _default_sim_target(effect_type: str) -> str:
     if effect_type in {"decrease_attack", "decrease_defense", "weaken", "poison", "hp_burn"}:
         return "boss"
@@ -1492,6 +1645,9 @@ def build_candidate_clan_boss_member_row(
         slot = str(skill.get("slot") or "").upper()
         if slot not in {"A1", "A2", "A3", "A4"}:
             continue
+        skill_type = _normalize_token(skill.get("skill_type"))
+        if skill_type in {"passive", "aura"}:
+            continue
         effects = _sim_effects_for_skill(candidate, skill)
         if not effects:
             continue
@@ -1500,7 +1656,7 @@ def build_candidate_clan_boss_member_row(
             "slot": slot,
             "skill_name": str(skill.get("skill_name") or slot),
             "cooldown": _effective_skill_cooldown(skill, booked=bool(candidate.get("booked"))),
-            "priority": _sim_priority_for_slot(slot),
+            "priority": _sim_priority_for_skill(slot, effects),
             "use_as_opener": slot in {"A2", "A3"} and _effective_skill_cooldown(skill, booked=bool(candidate.get("booked"))) > 0,
             "enabled": True,
             "effects": effects,
@@ -1661,7 +1817,11 @@ def _evaluate_team_fit(
     speed_members = sorted(
         str(member.get("champion_name") or "")
         for member in members
-        if "speed" in list(member.get("roles") or []) or "speed_boost" in capability_sets.get(str(member.get("champion_name") or ""), set())
+        if (
+            "speed" in list(member.get("roles") or [])
+            or "speed_boost" in capability_sets.get(str(member.get("champion_name") or ""), set())
+            or _speed_value(member) >= (_to_float(thresholds.get("required_speed")) + 20.0)
+        )
     )
     weak_affinity_members = sorted(str(member.get("champion_name") or "") for member in members if str(member.get("affinity_matchup") or "") == "weak")
 
@@ -1732,8 +1892,11 @@ def _evaluate_team_fit(
             warnings.append("Mancano cure o sustain affidabile: il team rischia di collassare presto.")
 
         if not healing_members and float(unkillable_window.get("quality") or 0.0) < 0.7:
-            score -= 14.0
-            warnings.append("Sustain reale assente: vedo scudi/protezioni ma non cure o leech affidabili per i turni lunghi.")
+            if len(sustain_members) >= 3:
+                notes.append("Sustain senza healer esplicito: la shell regge tramite scudi/protezione/leech.")
+            else:
+                score -= 14.0
+                warnings.append("Sustain reale assente: vedo scudi/protezioni ma non cure o leech affidabili per i turni lunghi.")
 
         if len(defense_members) >= 2:
             score += 16.0
@@ -1800,6 +1963,9 @@ def _evaluate_team_fit(
                 notes.append(
                     f"Pressione danno appoggiata su {hp_burn_window.get('champion_name') or poison_window.get('champion_name')}."
                 )
+        elif pressure_members:
+            score += 4.0
+            notes.append(f"Pressione danno presente, ma con finestra non ancora chiara: {pressure_members[0]}.")
         else:
             warnings.append("Manca una fonte chiara di Poison o HP Burn per tenere alta la pressione danno.")
 
@@ -1807,6 +1973,9 @@ def _evaluate_team_fit(
             score += 8.0
             if block_debuffs_window:
                 notes.append(f"Risposta a stun/debuff con {block_debuffs_window.get('champion_name')}.")
+        elif cleanse_members:
+            score += 3.0
+            notes.append(f"Risposta a stun/debuff presente, ma non ancora modellata bene: {cleanse_members[0]}.")
         else:
             score -= 10.0
             warnings.append("Manca una risposta affidabile a stun/debuff del Clan Boss.")
@@ -2093,13 +2262,19 @@ def _historical_pair_bonus(
             run_count = int(pair_row.get("run_count") or 0)
             avg_total_damage = _to_float(pair_row.get("avg_total_damage"))
             max_total_damage = _to_float(pair_row.get("max_total_damage"))
+            avg_boss_turn = _to_float(pair_row.get("avg_boss_turn"))
+            max_boss_turn = _to_float(pair_row.get("max_boss_turn"))
             if objective_key == "push_70m":
                 if max_total_damage >= 60_000_000.0:
                     bonus += min(run_count, 2) * 1.5
                     bonus += min(max_total_damage / 10_000_000.0, 8.0) * 2.0
+                if max_boss_turn >= 30.0:
+                    bonus += min(max_boss_turn, 50.0) * 0.08
             else:
                 bonus += min(run_count, 4) * 0.8
                 bonus += min(avg_total_damage / 10_000_000.0, 5.0) * 0.8
+                bonus += min(avg_boss_turn, 50.0) * 0.05
+                bonus += min(max_boss_turn, 50.0) * 0.02
     return round(bonus, 2)
 
 
@@ -2116,18 +2291,23 @@ def _historical_exact_team_bonus(
         return 0.0
     avg_total_damage = _to_float(exact_row.get("avg_total_damage"))
     max_total_damage = _to_float(exact_row.get("max_total_damage"))
+    avg_boss_turn = _to_float(exact_row.get("avg_boss_turn"))
+    max_boss_turn = _to_float(exact_row.get("max_boss_turn"))
     run_count = int(exact_row.get("run_count") or 0)
     if objective_key == "push_70m":
         if max_total_damage < 60_000_000.0:
             return 0.0
         bonus = min(run_count, 3) * 3.0
         bonus += min(max_total_damage / 1_000_000.0, 90.0) * 2.5
+        bonus += min(max_boss_turn, 50.0) * 0.6
         if max_total_damage >= 70_000_000.0:
             bonus += 140.0
     else:
         bonus = min(run_count, 8) * 3.0
         bonus += min(avg_total_damage / 1_000_000.0, 60.0) * 0.35
         bonus += min(max_total_damage / 1_000_000.0, 60.0) * 0.1
+        bonus += min(avg_boss_turn, 50.0) * 1.2
+        bonus += min(max_boss_turn, 50.0) * 0.25
     return round(bonus, 2)
 
 
@@ -2205,6 +2385,8 @@ def _objective_team_bonus(
     exact_history = dict((team_history or {}).get("exact", {}).get(_team_signature(str(member.get("champion_name") or "") for member in team)) or {})
     avg_total_damage = _to_float(exact_history.get("avg_total_damage"))
     max_total_damage = _to_float(exact_history.get("max_total_damage"))
+    avg_boss_turn = _to_float(exact_history.get("avg_boss_turn"))
+    max_boss_turn = _to_float(exact_history.get("max_boss_turn"))
     run_count = int(exact_history.get("run_count") or 0)
     attack_down_members = len(list(fit.get("attack_down_members") or []))
     pressure_members = len(list(fit.get("pressure_members") or []))
@@ -2221,6 +2403,8 @@ def _objective_team_bonus(
         bonus += 4.0 if speed_members >= 1 else 0.0
         bonus += min(max_total_damage / 1_000_000.0, 90.0) * 1.8
         bonus += min(avg_total_damage / 1_000_000.0, 90.0) * 0.8
+        bonus += min(max_boss_turn, 50.0) * 1.0
+        bonus += min(avg_boss_turn, 50.0) * 0.35
         bonus += min(run_count, 3) * 3.0
         if run_count == 0:
             bonus += 28.0
@@ -2244,9 +2428,11 @@ def _objective_team_bonus(
     bonus += min(run_count, 8) * 9.0
     bonus += min(avg_total_damage / 1_000_000.0, 60.0) * 0.8
     bonus += min(max_total_damage / 1_000_000.0, 60.0) * 0.3
+    bonus += min(avg_boss_turn, 50.0) * 1.6
+    bonus += min(max_boss_turn, 50.0) * 0.6
     bonus += attack_down_members * 6.0
     bonus += defense_members * 4.0
-    bonus += cleanse_members * 4.0
+    bonus += cleanse_members * 2.0
     healing_members = len(list(fit.get("healing_members") or []))
     sustain_members = len(list(fit.get("sustain_members") or []))
     undercovered_supports = [
@@ -2261,22 +2447,38 @@ def _objective_team_bonus(
         if not capability_by_name.get(name, set()) & {"healing", "sustain", "shield", "ally_protect", "defense_core", "unkillable"}
     ]
     if str(target_key or "").startswith("demon_lord_"):
+        if run_count > 0 and max_boss_turn >= 50.0:
+            bonus += 120.0
+        elif run_count > 0 and avg_boss_turn >= 40.0:
+            bonus += 70.0
+        elif run_count > 0 and avg_boss_turn >= 30.0:
+            bonus += 32.0
+        elif run_count > 0 and avg_boss_turn < 25.0:
+            bonus -= 40.0
         if healing_members == 0:
-            bonus -= 220.0
+            if sustain_members >= 3:
+                bonus += 0.0
+            elif sustain_members >= 2:
+                bonus -= 18.0
+            else:
+                bonus -= 90.0
         else:
-            bonus += healing_members * 36.0
+            bonus += 18.0 + (max(0, healing_members - 1) * 10.0)
         if sustain_members < 2:
-            bonus -= 70.0
-        else:
-            bonus += sustain_members * 10.0
-        if cleanse_members == 0:
             bonus -= 24.0
+        else:
+            bonus += min(sustain_members, 4) * 8.0
+        if cleanse_members == 0:
+            if capability_union & {"shield", "ally_protect", "defense_core"}:
+                bonus -= 8.0
+            else:
+                bonus -= 24.0
         if undercovered_supports:
-            bonus -= 90.0
+            bonus -= 28.0
         if exposed_attack_down:
-            bonus -= 120.0
+            bonus -= 36.0
     if len(list(fit.get("warnings") or [])) >= 6:
-        bonus -= 12.0
+        bonus -= 8.0
     return round(bonus, 2)
 
 
@@ -2387,9 +2589,14 @@ def _refine_team_selection(
     ranked_history = sorted(
         exact_history_index.items(),
         key=lambda item: (
-            _to_float(dict(item[1]).get("max_total_damage")) if objective_key == "push_70m" else _to_float(dict(item[1]).get("avg_total_damage")),
+            (
+                _to_float(dict(item[1]).get("max_total_damage"))
+                if objective_key == "push_70m"
+                else _to_float(dict(item[1]).get("avg_boss_turn"))
+            ),
             int(dict(item[1]).get("run_count") or 0),
             _to_float(dict(item[1]).get("avg_total_damage")),
+            _to_float(dict(item[1]).get("max_boss_turn")),
         ),
         reverse=True,
     )
@@ -2426,6 +2633,7 @@ def _build_reasons(
     affinity_state: str,
     boss_affinity: str,
     stat_reliability: Mapping[str, Any],
+    target_key: str = "",
 ) -> List[str]:
     reasons: List[str] = []
     if roles:
@@ -2440,6 +2648,10 @@ def _build_reasons(
         reasons.append("Profilo offensivo gia competitivo.")
     if int(evidence.get("run_count") or 0) > 0:
         reasons.append(f"Gia visto in {int(evidence.get('run_count') or 0)} run registrate su questo target.")
+    if str(target_key or "").startswith("demon_lord_") and _to_float(evidence.get("max_boss_turn")) > 0.0:
+        reasons.append(
+            f"Storico Clan Boss fino a turno boss {_to_float(evidence.get('max_boss_turn')):.0f}."
+        )
     if affinity_state == "strong":
         reasons.append(f"Affinita favorevole contro boss {boss_affinity}.")
     elif affinity_state == "weak":
@@ -2497,13 +2709,15 @@ def _build_risk_flags(
     return risks
 
 
-def _compute_evidence_bonus(evidence: Mapping[str, Any], roles: Sequence[str]) -> float:
+def _compute_evidence_bonus(evidence: Mapping[str, Any], roles: Sequence[str], target_key: str = "") -> float:
     run_count = int(evidence.get("run_count") or 0)
     if run_count <= 0:
         return 0.0
     damage_done = _to_float(evidence.get("avg_damage_done"))
     healing_done = _to_float(evidence.get("avg_healing_done"))
     damage_taken = _to_float(evidence.get("avg_damage_taken"))
+    avg_boss_turn = _to_float(evidence.get("avg_boss_turn"))
+    max_boss_turn = _to_float(evidence.get("max_boss_turn"))
     bonus = min(run_count, 8) * 0.8
     if "damage" in roles or "poisoner" in roles or "burner" in roles:
         bonus += min(damage_done / 1_000_000.0, 6.0) * 0.9
@@ -2511,6 +2725,10 @@ def _compute_evidence_bonus(evidence: Mapping[str, Any], roles: Sequence[str]) -
         bonus += min(healing_done / 250_000.0, 4.0) * 0.5
     if "survival" in roles or "ally_protect" in roles:
         bonus += min(damage_taken / 400_000.0, 4.0) * 0.35
+    if str(target_key or "").startswith("demon_lord_") and avg_boss_turn > 0.0:
+        bonus += min(avg_boss_turn, 50.0) * 0.18
+        if {"support", "cleanse", "survival", "ally_protect", "decrease_attack"} & set(roles):
+            bonus += min(max_boss_turn, 50.0) * 0.08
     return bonus
 
 
@@ -2915,7 +3133,7 @@ def _infer_skill_effects_from_text(skill: Mapping[str, Any]) -> List[Dict[str, A
         (("shield",), "shield"),
         (("remove debuff", "remove all debuffs", "cleanse"), "cleanse"),
         (("decrease cooldown", "cooldown"), "cooldown_reset"),
-        (("increase speed", "turn meter", "fill turn meter"), "speed_boost"),
+        (("increase speed", "increase turn meter", "fill turn meter"), "speed_boost"),
     ):
         if any(keyword in text for keyword in keywords):
             inferred.append({"effect_type": effect_type})
@@ -2970,23 +3188,32 @@ def _map_account_roles(account_roles: Iterable[str]) -> Set[str]:
     return roles
 
 
-def _dedupe_roster_by_champion_name(rows: Iterable[sqlite3.Row]) -> List[sqlite3.Row]:
+def _dedupe_roster_by_champion_name(
+    rows: Iterable[sqlite3.Row],
+    gear_by_champ_id: Mapping[str, Mapping[str, Any]] | None = None,
+) -> List[sqlite3.Row]:
     best_by_name: Dict[str, sqlite3.Row] = {}
     for row in rows:
         champion_name = str(row["champion_name"] or "")
         current = best_by_name.get(champion_name)
-        if current is None or _roster_sort_key(row) > _roster_sort_key(current):
+        if current is None or _roster_sort_key(row, gear_by_champ_id) > _roster_sort_key(current, gear_by_champ_id):
             best_by_name[champion_name] = row
     return list(best_by_name.values())
 
 
-def _roster_sort_key(row: sqlite3.Row) -> tuple[int, int, int, int, int]:
+def _roster_sort_key(
+    row: sqlite3.Row,
+    gear_by_champ_id: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[int, int, int, int, int, int, int]:
+    gear_summary = dict((gear_by_champ_id or {}).get(str(row["champ_id"] or ""), {}) or {})
     return (
         int(row["rank"] or 0),
         int(row["level"] or 0),
         1 if bool(row["booked"]) else 0,
         int(row["awakening_level"] or 0),
         int(row["relic_count"] or 0),
+        1 if bool(gear_summary.get("has_full_build")) else 0,
+        int(gear_summary.get("equipped_count") or 0),
     )
 
 

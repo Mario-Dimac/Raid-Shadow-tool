@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from enrichment_sources import ChampionSkillMatch, get_skill_enrichment_provider, register_skill_enrichment_provider
-from forge_db import bootstrap_database, collect_gear_validation_issues, load_source_account, record_run_history, refresh_account_stat_models
+from forge_db import backfill_run_effect_model_fields, bootstrap_database, collect_gear_validation_issues, enrich_placeholder_skills, load_source_account, record_run_history, refresh_account_stat_models
 from hellhades_enrich import HellHadesChampionMatch, enrich_registry_from_hellhades, enrich_registry_from_source
 from providers.local_registry_provider import export_local_skill_registry
 
@@ -658,6 +658,177 @@ def test_record_run_history_persists_ai_friendly_training_rows(tmp_path: Path) -
     ]
 
 
+def test_run_history_effect_timeline_persists_model_fields_for_clan_boss(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-brogni",
+                "name": "Underpriest Brogni",
+                "rarity": "legendary",
+                "affinity": "magic",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 90000, "spd": 220, "acc": 180},
+                "equipped_item_ids": [],
+                "skills": [],
+            },
+            {
+                "champ_id": "champ-stag",
+                "name": "Stag Knight",
+                "rarity": "epic",
+                "affinity": "spirit",
+                "faction": "Banner Lords",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["support"],
+                "base_stats": {"hp": 18000},
+                "total_stats": {"hp": 60000, "spd": 250, "acc": 528},
+                "equipped_item_ids": [],
+                "skills": [],
+            },
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    summary = record_run_history(
+        {
+            "saved_at": "2026-04-12T15:00:00+00:00",
+            "source": "probe_import",
+            "battle_id": "battle-clan-boss-model",
+            "encounter_key": "demon_lord_ultra_nightmare",
+            "encounter_name": "Demon Lord Ultra-Nightmare",
+            "encounter_family": "demon_lord",
+            "area_region": "clan_boss",
+            "game_mode": "clan_boss",
+            "difficulty": "ultra_nightmare",
+            "boss_affinity": "spirit",
+            "success": True,
+            "completed": True,
+            "auto_play": True,
+            "members": [
+                {
+                    "champ_id": "champ-brogni",
+                    "champion_name": "Underpriest Brogni",
+                    "champion_type_id": 5936,
+                    "level": 60,
+                    "rank": 6,
+                    "booked": True,
+                    "stats": {"hp": 90000, "spd": 220, "acc": 180},
+                },
+                {
+                    "champ_id": "champ-stag",
+                    "champion_name": "Stag Knight",
+                    "champion_type_id": 4490,
+                    "level": 60,
+                    "rank": 6,
+                    "booked": True,
+                    "stats": {"hp": 60000, "spd": 250, "acc": 528},
+                },
+            ],
+            "effect_timeline": {
+                "status_timeline_status": "candidate_from_cast_order_plus_skill_metadata",
+                "status_timeline_count": 2,
+                "timeline": [
+                    {
+                        "event_index": 1,
+                        "source_party_role": "player",
+                        "source_member_order": 1,
+                        "source_slot": 0,
+                        "source_name": "Underpriest Brogni",
+                        "source_type_id": 5936,
+                        "target_party_id": 1,
+                        "target_slot": 0,
+                        "skill_order": 3,
+                        "skill_slot": "A3",
+                        "skill_code": "59303",
+                        "skill_name": "Resilient Glow",
+                        "skill_type": "Active",
+                        "skill_provider": "ayumilove",
+                        "status_effects": [
+                            {
+                                "effect_type": "block_debuff",
+                                "category": "buff",
+                                "action": "place",
+                                "target": "all_allies",
+                                "duration": 2,
+                                "chance": None,
+                                "effect_value": None,
+                                "resolution": "candidate_from_skill_metadata",
+                                "condition_text": "Places a [Block Debuff] buff on all allies for 2 turns.",
+                            }
+                        ],
+                    },
+                    {
+                        "event_index": 2,
+                        "source_party_role": "player",
+                        "source_member_order": 2,
+                        "source_slot": 1,
+                        "source_name": "Stag Knight",
+                        "source_type_id": 4490,
+                        "target_party_id": -1,
+                        "target_slot": 0,
+                        "skill_order": 2,
+                        "skill_slot": "A2",
+                        "skill_code": "44902",
+                        "skill_name": "Huntmaster",
+                        "skill_type": "Active",
+                        "skill_provider": "ayumilove",
+                        "status_effects": [
+                            {
+                                "effect_type": "decrease_atk",
+                                "category": "debuff",
+                                "action": "place",
+                                "target": "enemy",
+                                "duration": 2,
+                                "chance": 70.0,
+                                "effect_value": None,
+                                "resolution": "candidate_from_skill_metadata",
+                                "condition_text": "Has a 70% chance of placing a 50% [Decrease ATK] debuff for 2 turns.",
+                            }
+                        ],
+                    },
+                ],
+            },
+        },
+        db_path=db_path,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT source_name, effect_type, cast_certainty, landed_status, landed_confidence,
+                   base_chance_pct, source_acc, target_res_estimate, target_res_source, weak_hit_risk, outcome_model
+            FROM run_history_effect_timeline
+            WHERE run_id = ?
+            ORDER BY timeline_index, effect_index
+            """,
+            (summary["run_id"],),
+        ).fetchall()
+
+    assert rows == [
+        ("Underpriest Brogni", "block_debuff", "observed_cast", "certain_from_cast", 1.0, 100.0, 180.0, None, None, "none", "deterministic_allied_effect_from_cast"),
+        ("Stag Knight", "decrease_atk", "observed_cast", "unknown_from_cast_only", None, 70.0, 528.0, 250.0, "clan_boss_difficulty_estimate", "unlikely", "base_chance_plus_acc_res_and_weak_hit"),
+    ]
+
+    backfill_summary = backfill_run_effect_model_fields(db_path=db_path)
+    assert backfill_summary["runs"] == 1
+    assert backfill_summary["rows"] == 2
+
+
 def test_hellhades_enrichment_updates_skills_and_effects(tmp_path: Path, monkeypatch) -> None:
     source_path = tmp_path / "normalized_account.json"
     db_path = tmp_path / "cbforge.sqlite3"
@@ -1222,6 +1393,206 @@ def test_auto_provider_falls_back_to_hellhades_when_ayumilove_missing(tmp_path: 
         ).fetchall()
 
     assert rows == [("HH A1", "hellhades")]
+
+
+def test_enrich_placeholder_skills_repairs_numeric_skill_rows(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 50000},
+                "equipped_item_ids": [],
+                "skills": [
+                    {"slot": "A1", "skill_id": "48801", "name": "48801", "effects": []},
+                    {"slot": "A2", "skill_id": "48802", "name": "48802", "effects": []},
+                ],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    original_local = get_skill_enrichment_provider("local_registry")
+    original_ayumi = get_skill_enrichment_provider("ayumilove")
+    original_hh = get_skill_enrichment_provider("hellhades")
+
+    class EmptyLocalProvider:
+        source_name = "local_registry"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return None
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return []
+
+    class AyumiLoveProvider:
+        source_name = "ayumilove"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, champion_name, champion_name, "https://example.invalid/ayumi")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "Quicksand Grasp", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Decrease ATK] debuff.</p>", "effects": []},
+                {"name": "Burning Rage", "type": "Active", "cooldown": 3, "description": "<p>Places a [HP Burn] debuff for 3 turns.</p>", "effects": []},
+            ]
+
+    class HellHadesProvider:
+        source_name = "hellhades"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return None
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return []
+
+    register_skill_enrichment_provider(EmptyLocalProvider())
+    register_skill_enrichment_provider(AyumiLoveProvider())
+    register_skill_enrichment_provider(HellHadesProvider())
+    try:
+        summary = enrich_placeholder_skills(db_path=db_path, provider="auto")
+    finally:
+        register_skill_enrichment_provider(original_local)
+        register_skill_enrichment_provider(original_ayumi)
+        register_skill_enrichment_provider(original_hh)
+
+    assert summary["requested"] == 1
+    assert summary["updated"] == 1
+    assert summary["provider_hits"]["ayumilove"] == 1
+
+    with sqlite3.connect(db_path) as conn:
+        skills = conn.execute(
+            """
+            SELECT skill_name, source, description_clean
+            FROM champion_skills
+            WHERE champion_name = 'Geomancer'
+            ORDER BY skill_order ASC
+            """
+        ).fetchall()
+        effect_count = conn.execute(
+            "SELECT COUNT(*) FROM champion_skill_effects WHERE champion_name = 'Geomancer'"
+        ).fetchone()[0]
+
+    assert skills[0][0] == "Quicksand Grasp"
+    assert skills[0][1] == "ayumilove"
+    assert "Decrease ATK" in skills[0][2]
+    assert effect_count >= 2
+
+
+def test_auto_provider_skips_placeholder_local_registry_payload(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 50000},
+                "equipped_item_ids": [],
+                "skills": [
+                    {"slot": "A1", "skill_id": "48801", "name": "48801", "effects": []},
+                    {"slot": "A2", "skill_id": "48802", "name": "48802", "effects": []},
+                ],
+            }
+        ],
+        "gear": [],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    original_local = get_skill_enrichment_provider("local_registry")
+    original_ayumi = get_skill_enrichment_provider("ayumilove")
+    original_hh = get_skill_enrichment_provider("hellhades")
+
+    class PlaceholderLocalProvider:
+        source_name = "local_registry"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, champion_name, champion_name, "")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "48801", "type": None, "cooldown": None, "description": "", "effects": []},
+                {"name": "48802", "type": None, "cooldown": None, "description": "", "effects": []},
+            ]
+
+    class AyumiLoveProvider:
+        source_name = "ayumilove"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, champion_name, champion_name, "https://example.invalid/ayumi")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "Quicksand Grasp", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Decrease ATK] debuff.</p>", "effects": []},
+                {"name": "Burning Rage", "type": "Active", "cooldown": 3, "description": "<p>Places a [HP Burn] debuff for 3 turns.</p>", "effects": []},
+            ]
+
+    class HellHadesProvider:
+        source_name = "hellhades"
+
+        def resolve_champion_match(self, champion_name: str) -> ChampionSkillMatch | None:
+            return ChampionSkillMatch(self.source_name, "17837", champion_name, "https://example.invalid/hh")
+
+        def fetch_champion_skills(self, match: ChampionSkillMatch) -> list[dict[str, object]]:
+            return [
+                {"name": "HH A1", "type": "Basic", "cooldown": 0, "description": "<p>Places a [Decrease DEF] debuff.</p>", "effects": []},
+                {"name": "HH A2", "type": "Active", "cooldown": 4, "description": "<p>Places a [Weaken] debuff.</p>", "effects": []},
+            ]
+
+    register_skill_enrichment_provider(PlaceholderLocalProvider())
+    register_skill_enrichment_provider(AyumiLoveProvider())
+    register_skill_enrichment_provider(HellHadesProvider())
+    try:
+        summary = enrich_placeholder_skills(db_path=db_path, provider="auto")
+    finally:
+        register_skill_enrichment_provider(original_local)
+        register_skill_enrichment_provider(original_ayumi)
+        register_skill_enrichment_provider(original_hh)
+
+    assert summary["requested"] == 1
+    assert summary["updated"] == 1
+    assert summary["provider_hits"]["local_registry"] == 0
+    assert summary["provider_hits"]["ayumilove"] == 1
+    assert summary["provider_hits"]["hellhades"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        skills = conn.execute(
+            """
+            SELECT skill_name, source
+            FROM champion_skills
+            WHERE champion_name = 'Geomancer'
+            ORDER BY skill_order ASC
+            """
+        ).fetchall()
+
+    assert skills == [("Quicksand Grasp", "ayumilove"), ("Burning Rage", "ayumilove")]
 
 
 def test_bootstrap_derives_total_stats_when_raw_dump_is_empty(tmp_path: Path) -> None:

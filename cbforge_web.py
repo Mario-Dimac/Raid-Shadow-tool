@@ -57,6 +57,7 @@ LOCAL_HH_BRIDGE_SOURCES = [
 ]
 TEAM_OPTIMIZER_SNAPSHOT_SCOPE = "team_optimizer"
 TEAM_OPTIMIZER_LAST_RESTORE_KEY = "team_optimizer:last_restore"
+CHAMPION_GEAR_SNAPSHOT_SCOPE = "champion_gear"
 TEAM_OPTIMIZER_CACHE_TTL_SECONDS = 12.0
 TEAM_OPTIMIZER_CACHE_LOCK = threading.Lock()
 TEAM_OPTIMIZER_REPORT_CACHE: Dict[tuple[str, str, str, str, str, int], Dict[str, Any]] = {}
@@ -1532,6 +1533,8 @@ def list_run_history_runs_for_session(session_slug: str, db_path: Path = DB_PATH
                 r.stage_label,
                 r.success,
                 r.elapsed_seconds,
+                r.turns,
+                r.boss_turn,
                 r.total_damage,
                 COUNT(DISTINCT m.member_order) AS members,
                 COUNT(DISTINCT su.member_order || ':' || su.skill_order) AS skill_usages
@@ -1554,6 +1557,8 @@ def list_run_history_runs_for_session(session_slug: str, db_path: Path = DB_PATH
                 r.stage_label,
                 r.success,
                 r.elapsed_seconds,
+                r.turns,
+                r.boss_turn,
                 r.total_damage
             ORDER BY r.run_id DESC
             """,
@@ -1570,6 +1575,8 @@ def list_run_history_runs_for_session(session_slug: str, db_path: Path = DB_PATH
             "stage_label": str(row["stage_label"] or ""),
             "success": bool(row["success"]),
             "elapsed_seconds": parse_float_value(row["elapsed_seconds"]),
+            "turns": int(row["turns"] or 0),
+            "boss_turn": int(row["boss_turn"] or 0),
             "total_damage": parse_float_value(row["total_damage"]),
             "members": int(row["members"] or 0),
             "skill_usages": int(row["skill_usages"] or 0),
@@ -1605,6 +1612,8 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
                 success,
                 completed,
                 elapsed_seconds,
+                turns,
+                boss_turn,
                 total_damage,
                 labels_json,
                 context_json
@@ -1768,6 +1777,15 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
         except Exception:
             effect_timeline = {}
 
+    inferred_boss_turn = 0
+    inferred_turns = 0
+    for timeline_row in list_value(effect_timeline.get("timeline")):
+        row_map = dict_value(timeline_row)
+        if str(row_map.get("source_party_role") or "") == "enemy":
+            inferred_boss_turn = max(inferred_boss_turn, int(row_map.get("enemy_turn_index") or 0))
+        else:
+            inferred_turns = max(inferred_turns, int(row_map.get("source_party_turn_index") or 0))
+
     members = []
     for row in member_rows:
         member_order = int(row["member_order"] or 0)
@@ -1846,6 +1864,8 @@ def run_history_run_detail(run_id: int, db_path: Path = DB_PATH) -> Dict[str, An
             "success": bool(run_row["success"]),
             "completed": bool(run_row["completed"]),
             "elapsed_seconds": parse_float_value(run_row["elapsed_seconds"]),
+            "turns": int(run_row["turns"] or 0) or inferred_turns,
+            "boss_turn": int(run_row["boss_turn"] or 0) or inferred_boss_turn,
             "total_damage": parse_float_value(run_row["total_damage"]),
             "labels": parse_json_text(str(run_row["labels_json"] or ""), {}),
             "context": parse_json_text(str(run_row["context_json"] or ""), {}),
@@ -2012,7 +2032,7 @@ def list_owned_champions(
     search_text = search.strip().lower()
     with open_db(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 ac.champ_id,
                 ac.champion_name,
@@ -2024,6 +2044,8 @@ def list_owned_champions(
                 ac.faction,
                 CASE WHEN rt.champion_name IS NOT NULL THEN 1 ELSE 0 END AS is_registry_target,
                 cc.hellhades_post_id,
+                MAX(CASE WHEN gs.snapshot_key IS NOT NULL THEN 1 ELSE 0 END) AS gear_snapshot_available,
+                MAX(COALESCE(gs.saved_at, '')) AS gear_snapshot_saved_at,
                 COUNT(DISTINCT CASE WHEN cs.slot IS NOT NULL THEN cs.slot || ':' || cs.skill_order END) AS skill_rows,
                 COUNT(DISTINCT CASE WHEN (
                     cs.cooldown IS NOT NULL
@@ -2037,6 +2059,8 @@ def list_owned_champions(
                 ON rt.champion_name = ac.champion_name
             LEFT JOIN champion_catalog cc
                 ON cc.champion_name = ac.champion_name
+            LEFT JOIN gear_snapshots gs
+                ON gs.snapshot_key = '{CHAMPION_GEAR_SNAPSHOT_SCOPE}:' || ac.champ_id
             LEFT JOIN champion_skills cs
                 ON cs.champion_name = ac.champion_name
             LEFT JOIN champion_skill_effects cse
@@ -2069,6 +2093,8 @@ def list_owned_champions(
             "faction": str(row["faction"] or ""),
             "is_registry_target": bool(row["is_registry_target"]),
             "hellhades_post_id": row["hellhades_post_id"],
+            "gear_snapshot_available": bool(row["gear_snapshot_available"]),
+            "gear_snapshot_saved_at": str(row["gear_snapshot_saved_at"] or ""),
             "skill_rows": int(row["skill_rows"] or 0),
             "skill_rows_with_data": int(row["skill_rows_with_data"] or 0),
             "skill_rows_with_effects": int(row["skill_rows_with_effects"] or 0),
@@ -2257,6 +2283,7 @@ def build_clan_boss_recommendations(
             difficulty=normalized_difficulty,
             boss_affinity=normalized_affinity,
             model_path=model_path,
+            ranking_objective="stable",
         )
     except Exception as exc:
         response["ai"]["warnings"] = [f"AI non disponibile: {exc}"]
@@ -2280,6 +2307,7 @@ def build_clan_boss_recommendations(
         "team": ai_team,
         "team_names": [str(member.get("champion_name") or "") for member in ai_team],
         "predicted_total_damage": parse_float_value(ai_payload.get("predicted_total_damage")),
+        "predicted_boss_turn": parse_float_value(ai_payload.get("predicted_boss_turn")),
         "predicted_success_probability": ai_payload.get("predicted_success_probability"),
         "evaluated_combinations": int(ai_payload.get("evaluated_combinations") or 0),
         "pool_size": int(ai_payload.get("pool_size") or 0),
@@ -2287,6 +2315,11 @@ def build_clan_boss_recommendations(
         "warnings": list(dict_value(ai_simulation.get("summary")).get("warnings") or []),
         "notes": [
             f"Combinazioni valutate: {int(ai_payload.get('evaluated_combinations') or 0)}",
+            (
+                f"Turno boss previsto: {parse_float_value(ai_payload.get('predicted_boss_turn')):.1f}"
+                if parse_float_value(ai_payload.get("predicted_boss_turn")) > 0.0
+                else "Turno boss previsto: n/d"
+            ),
             f"Danno previsto: {parse_float_value(ai_payload.get('predicted_total_damage')):.0f}",
         ],
         "simulation": ai_simulation if ai_simulation.get("ok") else {},
@@ -3307,6 +3340,55 @@ def capture_equipped_items_snapshot(champions: List[Dict[str, str]], db_path: Pa
     }
 
 
+def resolve_owned_champion_snapshot_target(
+    champion_name: str = "",
+    champ_id: str = "",
+    db_path: Path = DB_PATH,
+) -> Dict[str, str]:
+    normalized_name = str(champion_name or "").strip()
+    normalized_id = str(champ_id or "").strip()
+    if not normalized_name and not normalized_id:
+        raise KeyError("Campione non specificato.")
+
+    with open_db(db_path) as conn:
+        if normalized_id:
+            row = conn.execute(
+                """
+                SELECT champ_id, champion_name
+                FROM account_champions
+                WHERE champ_id = ?
+                LIMIT 1
+                """,
+                (normalized_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT champ_id, champion_name
+                FROM account_champions
+                WHERE champion_name = ?
+                ORDER BY level DESC, rank DESC, awakening_level DESC, empowerment_level DESC
+                LIMIT 1
+                """,
+                (normalized_name,),
+            ).fetchone()
+    if row is None:
+        if normalized_id:
+            raise KeyError(f"Campione non trovato: {normalized_id}")
+        raise KeyError(f"Campione non trovato: {normalized_name}")
+    return {
+        "champ_id": str(row["champ_id"] or "").strip(),
+        "champion_name": str(row["champion_name"] or "").strip(),
+    }
+
+
+def build_champion_gear_snapshot_key(champ_id: str) -> str:
+    normalized_id = str(champ_id or "").strip()
+    if not normalized_id:
+        raise KeyError("champ_id mancante per snapshot campione.")
+    return f"{CHAMPION_GEAR_SNAPSHOT_SCOPE}:{normalized_id}"
+
+
 def build_team_optimizer_snapshot_key(
     boss_key: str,
     level_key: str,
@@ -3409,6 +3491,48 @@ def build_snapshot_status_payload(record: Optional[Dict[str, Any]]) -> Dict[str,
         "summary": dict(record.get("summary") or {}),
         "champions": list(record.get("champions") or []),
     }
+
+
+def save_champion_gear_snapshot(
+    champion_name: str = "",
+    champ_id: str = "",
+    db_path: Path = DB_PATH,
+) -> Dict[str, Any]:
+    target = resolve_owned_champion_snapshot_target(champion_name=champion_name, champ_id=champ_id, db_path=db_path)
+    snapshot = capture_equipped_items_snapshot([target], db_path=db_path)
+    context = {"champion": dict(target)}
+    return save_gear_snapshot_record(
+        snapshot_key=build_champion_gear_snapshot_key(target["champ_id"]),
+        label=f"Equip {target['champion_name']}",
+        scope=CHAMPION_GEAR_SNAPSHOT_SCOPE,
+        snapshot_kind="manual_champion",
+        context=context,
+        snapshot=snapshot,
+        db_path=db_path,
+    )
+
+
+def build_champion_gear_snapshot_status(
+    champion_name: str = "",
+    champ_id: str = "",
+    db_path: Path = DB_PATH,
+) -> Dict[str, Any]:
+    target = resolve_owned_champion_snapshot_target(champion_name=champion_name, champ_id=champ_id, db_path=db_path)
+    try:
+        record = load_gear_snapshot_record(build_champion_gear_snapshot_key(target["champ_id"]), db_path=db_path)
+    except FileNotFoundError:
+        record = None
+    return build_snapshot_status_payload(record)
+
+
+def restore_champion_gear_snapshot(
+    champion_name: str = "",
+    champ_id: str = "",
+    db_path: Path = DB_PATH,
+) -> Dict[str, Any]:
+    target = resolve_owned_champion_snapshot_target(champion_name=champion_name, champ_id=champ_id, db_path=db_path)
+    record = load_gear_snapshot_record(build_champion_gear_snapshot_key(target["champ_id"]), db_path=db_path)
+    return restore_snapshot_record(record)
 
 
 def save_team_optimizer_snapshot(
@@ -4274,6 +4398,15 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
             """,
             (champion_name,),
         ).fetchall()
+        equipped_item_rows = conn.execute(
+            """
+            SELECT item_id, slot, item_class, set_name, rarity, level, main_stat_type
+            FROM gear_items
+            WHERE equipped_by = ?
+            ORDER BY slot ASC, item_id ASC
+            """,
+            (account_row["champ_id"],),
+        ).fetchall()
 
     unsupported_sets: List[str] = []
     applied_sets: List[Dict[str, Any]] = []
@@ -4340,6 +4473,13 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
         or str(catalog_row["last_enriched_at"] or "").strip()
     ):
         external_provider = "hellhades"
+    try:
+        gear_snapshot = load_gear_snapshot_record(
+            build_champion_gear_snapshot_key(str(account_row["champ_id"] or "").strip()),
+            db_path=db_path,
+        )
+    except FileNotFoundError:
+        gear_snapshot = None
 
     return {
         "account": {
@@ -4403,6 +4543,22 @@ def champion_detail(champion_name: str, db_path: Path = DB_PATH) -> Dict[str, An
             "data_status": skill_data_status,
             "sources": skill_sources,
             "primary_source": skill_sources[0] if len(skill_sources) == 1 else "",
+        },
+        "gear": {
+            "equipped_count": len(equipped_item_rows),
+            "equipped_items": [
+                {
+                    "item_id": str(row["item_id"] or ""),
+                    "slot": str(row["slot"] or ""),
+                    "item_class": str(row["item_class"] or ""),
+                    "set_name": str(row["set_name"] or ""),
+                    "rarity": str(row["rarity"] or ""),
+                    "level": int(row["level"] or 0),
+                    "main_stat_type": str(row["main_stat_type"] or ""),
+                }
+                for row in sorted(equipped_item_rows, key=lambda row: gear_slot_sort_key(str(row["slot"] or "")))
+            ],
+            "snapshot": build_snapshot_status_payload(gear_snapshot),
         },
     }
 
@@ -4762,6 +4918,23 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     champion_names=[champion_name],
                 )
                 self._send_json({"ok": True, "summary": summary})
+                return
+            if parsed.path == "/api/champion-save-gear":
+                result = save_champion_gear_snapshot(
+                    champion_name=str(payload.get("champion_name") or "").strip(),
+                    champ_id=str(payload.get("champ_id") or "").strip(),
+                    db_path=self.app.db_path,
+                )
+                self._send_json({"ok": True, "snapshot": build_snapshot_status_payload(result)})
+                return
+            if parsed.path == "/api/champion-restore-gear":
+                result = restore_champion_gear_snapshot(
+                    champion_name=str(payload.get("champion_name") or "").strip(),
+                    champ_id=str(payload.get("champ_id") or "").strip(),
+                    db_path=self.app.db_path,
+                )
+                emit_attention_beep()
+                self._send_json(result)
                 return
             if parsed.path in {"/api/live-sell-artifacts", "/api/queue-sell-artifacts", "/api/local-sell-artifacts"}:
                 result = sell_artifacts_from_queue(

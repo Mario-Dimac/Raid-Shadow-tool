@@ -15,13 +15,13 @@ def test_ml_team_baseline_builds_rows_and_trains(tmp_path: Path) -> None:
     bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
 
     teams = [
-        (["Valkyrie", "Ninja", "Stag Knight", "Teodor the Savant", "Doompriest"], [171, 177, 219, 214, 198], 28500000.0, 1),
-        (["Valkyrie", "Jintoro", "Stag Knight", "Underpriest Brogni", "Minaya"], [171, 188, 219, 182, 201], 34300000.0, 1),
-        (["Kael", "Frozen Banshee", "Apothecary", "Stag Knight", "Doompriest"], [175, 179, 240, 219, 198], 18100000.0, 0),
-        (["Ninja", "Teodor the Savant", "Doompriest", "Aox the Rememberer", "Valkyrie"], [177, 214, 198, 191, 171], 30100000.0, 1),
+        (["Valkyrie", "Ninja", "Stag Knight", "Teodor the Savant", "Doompriest"], [171, 177, 219, 214, 198], 28500000.0, 36, 1),
+        (["Valkyrie", "Jintoro", "Stag Knight", "Underpriest Brogni", "Minaya"], [171, 188, 219, 182, 201], 34300000.0, 41, 1),
+        (["Kael", "Frozen Banshee", "Apothecary", "Stag Knight", "Doompriest"], [175, 179, 240, 219, 198], 18100000.0, 24, 0),
+        (["Ninja", "Teodor the Savant", "Doompriest", "Aox the Rememberer", "Valkyrie"], [177, 214, 198, 191, 171], 30100000.0, 38, 1),
     ]
 
-    for index, (names, speeds, total_damage, success) in enumerate(teams, start=1):
+    for index, (names, speeds, total_damage, boss_turn, success) in enumerate(teams, start=1):
         record_run_history(
             {
                 "source": "test",
@@ -35,6 +35,7 @@ def test_ml_team_baseline_builds_rows_and_trains(tmp_path: Path) -> None:
                 "boss_affinity": "void",
                 "success": success,
                 "elapsed_seconds": 510.0 + index,
+                "boss_turn": boss_turn,
                 "total_damage": total_damage,
                 "members": [
                     {
@@ -71,6 +72,7 @@ def test_ml_team_baseline_builds_rows_and_trains(tmp_path: Path) -> None:
     assert "spd_avg" in rows[0]["features"]
     assert "sustain_members" in rows[0]["features"]
     assert "speed_floor_hits" in rows[0]["features"]
+    assert rows[0]["target_boss_turn"] is not None
 
     summary = train_team_baseline(rows, model_path)
 
@@ -161,6 +163,8 @@ def test_ml_team_baseline_builds_rows_and_trains(tmp_path: Path) -> None:
     assert recommendation["best_team"]
     assert recommendation["evaluated_combinations"] >= 1
     assert recommendation["predicted_total_damage"] > 0
+    assert recommendation["predicted_boss_turn"] is not None
+    assert recommendation["predicted_boss_turn"] > 0
 
     constrained = recommend_best_team_from_candidates(
         candidates=candidate_pool,

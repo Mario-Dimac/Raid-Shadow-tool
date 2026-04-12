@@ -291,6 +291,7 @@ function renderDbRunList(runs) {
         <span class="pill">${escapeHtml(run.category_label || "Altro")}</span>
         <span class="pill ${run.success ? "ok" : "warn"}">${run.success ? "Success" : "Fail"}</span>
         <span class="pill gold">${escapeHtml(damageLabel(run))}</span>
+        <span class="pill">${escapeHtml(`boss t${String(run.boss_turn || "-")}`)}</span>
         <span class="pill">${escapeHtml(String(run.members || 0))} membri</span>
         <span class="pill">${escapeHtml(String(run.skill_usages || 0))} skill</span>
         <span class="pill">${escapeHtml(run.saved_at || "-")}</span>
@@ -569,6 +570,8 @@ function renderDetails() {
           ${kvRow("Stage", runDetail.run?.stage_label || runDetail.run?.stage_id || "-")}
           ${kvRow("Encounter", runDetail.run?.encounter_name || runDetail.run?.encounter_key || "-")}
           ${kvRow("Saved at", runDetail.run?.saved_at || "-")}
+          ${kvRow("Boss turn", runDetail.run?.boss_turn || "-")}
+          ${kvRow("Turni squadra", runDetail.run?.turns || "-")}
           ${kvRow("Tot danno team", formatNumber(derivedTotals.damage_done || 0))}
           ${kvRow("Tot cure team", formatNumber(derivedTotals.healing_done || 0))}
           ${kvRow("Tot danno preso", formatNumber(derivedTotals.damage_taken || 0))}
@@ -588,6 +591,8 @@ function renderDetails() {
             <div class="kv single-column">
               ${kvRow("Membri salvati", (runDetail.members || []).length)}
               ${kvRow("Asset salvati", (runDetail.assets || []).length)}
+              ${kvRow("Boss turn", runDetail.run?.boss_turn || "-")}
+              ${kvRow("Turni squadra", runDetail.run?.turns || "-")}
               ${kvRow("Tot cast skill", derivedTotals.skill_casts || 0)}
               ${kvRow("Tot danno team", formatNumber(derivedTotals.damage_done || 0))}
               ${kvRow("Tot cure team", formatNumber(derivedTotals.healing_done || 0))}

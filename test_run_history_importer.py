@@ -380,6 +380,7 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
                     "event_index": 13,
                     "source_slot": 0,
                     "source_name": "Rakka Viletide",
+                    "source_party_role": "ally",
                     "source_type_id": 3666,
                     "target_party_id": 83832666,
                     "target_slot": 0,
@@ -389,6 +390,7 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
                     "skill_name": "Oozing Blessing",
                     "skill_type": "Active",
                     "skill_provider": "ayumilove",
+                    "source_party_turn_index": 1,
                     "status_effects": [
                         {
                             "effect_type": "increase_atk",
@@ -413,7 +415,24 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
                             "condition_text": "Places Shield.",
                         },
                     ],
-                }
+                },
+                {
+                    "event_index": 14,
+                    "source_slot": 5,
+                    "source_name": "Demon Lord",
+                    "source_party_role": "enemy",
+                    "source_type_id": 22286,
+                    "target_party_id": 83832666,
+                    "target_slot": 0,
+                    "skill_order": 2,
+                    "skill_slot": "A2",
+                    "skill_code": "222702",
+                    "skill_name": "222702",
+                    "skill_type": "",
+                    "skill_provider": "",
+                    "enemy_turn_index": 38,
+                    "status_effects": [],
+                },
             ],
         },
     )
@@ -431,7 +450,7 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
-            SELECT total_damage, context_json
+            SELECT total_damage, turns, boss_turn, context_json
             FROM run_history_runs
             WHERE battle_id = ?
             """,
@@ -440,11 +459,14 @@ def test_import_probe_session_persists_total_damage_candidate(tmp_path: Path, mo
 
     assert row is not None
     assert row[0] == 41_949_610
-    context = json.loads(row[1])
+    assert row[1] == 1
+    assert row[2] == 38
+    context = json.loads(row[3])
     assert context["total_damage_status"] == "candidate_demon_lord_s_a_dt_high32"
     assert context["member_damage_status"] == "candidate_demon_lord_manual_fit_normalized_total"
     assert context["effect_timeline_status"] == "candidate_from_cast_order_plus_skill_metadata"
     assert context["effect_timeline_rows"] == 1
+    assert context["boss_turn_status"] == "inferred_from_effect_timeline"
 
     with sqlite3.connect(db_path) as conn:
         metric_row = conn.execute(

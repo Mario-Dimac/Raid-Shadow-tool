@@ -2,6 +2,41 @@
 
 Documento unico di riferimento che consolida tutti gli appunti storici del progetto fino al 2026-03-28.
 
+## Aggiornamento 2026-04-12
+
+### UI web semplificata
+
+- La pagina `Campioni` e' stata ridotta a una vista minimale:
+  - lista solo dei campioni `6*`
+  - dettaglio limitato alle `stats totali`
+- La pagina `Optimizer` e' stata ridotta a una vista operativa:
+  - solo i `5` campioni proposti
+  - stato minimale del loadout
+  - pulsante `Equipaggia` per singolo campione quando il piano e' pronto
+- I dettagli tecnici non sono piu' il focus delle due pagine principali e vanno spostati/tenuti nelle pagine debug.
+
+### Limite verificato del simulatore Clan Boss
+
+- Il simulatore locale Clan Boss oggi non modella ancora boss diversi per `void / force / magic / spirit` con:
+  - skill diverse
+  - pattern diverso
+  - stat diverse oltre alla speed per difficolta'
+- Stato reale verificato nel codice:
+  - la `difficulty` cambia `boss_speed`
+  - il boss usa sempre il ciclo fisso `AoE 1 -> AoE 2 -> Stun`
+  - l'`affinity` e' presente nel contesto optimizer e nel simulatore come setting, ma il simulatore non cambia ancora il comportamento del boss in base a quella
+- Conseguenza pratica:
+  - oggi l'affinity viene usata bene soprattutto per il matchmaking dei campioni e per i rischi `weak affinity`
+  - non viene ancora usata per simulare una variante davvero diversa del Demon Lord
+
+### Direzione corretta
+
+- Per rendere il simulatore piu' affidabile serve introdurre un profilo boss per affinity che controlli almeno:
+  - targeting e rischio weak hit sui debuff
+  - logica stun reale
+  - pattern/condizioni specifiche del boss
+  - eventuali differenze modellate di danno e coverage richiesta
+
 ## Stato corrente verificato il 2026-03-28
 
 - Il database runtime canonico e' `data/cbforge.sqlite3`.

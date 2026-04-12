@@ -160,6 +160,86 @@ def test_web_queries_expose_owned_roster_and_detail(tmp_path: Path) -> None:
     assert detail["skills"][1]["effects"][0]["effect_type"] == "hp_burn"
 
 
+def test_champion_detail_exposes_single_champion_gear_snapshot_status(tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000, "spd": 100},
+                "total_stats": {"hp": 50000, "spd": 210},
+                "equipped_item_ids": ["gear-1", "gear-2"],
+                "skills": [],
+            }
+        ],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "artifact",
+                "slot": "weapon",
+                "set_name": "Attack Speed",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": True,
+                "main_stat": {"type": "atk", "value": 265},
+                "substats": [],
+            },
+            {
+                "item_id": "gear-2",
+                "item_class": "artifact",
+                "slot": "boots",
+                "set_name": "Attack Speed",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "spd", "value": 45},
+                "substats": [],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    before = champion_detail("Geomancer", db_path)
+
+    assert before["gear"]["equipped_count"] == 2
+    assert [item["item_id"] for item in before["gear"]["equipped_items"]] == ["gear-1", "gear-2"]
+    assert before["gear"]["snapshot"]["available"] is False
+
+    cbforge_web.save_champion_gear_snapshot(champion_name="Geomancer", db_path=db_path)
+    after = champion_detail("Geomancer", db_path)
+
+    assert after["gear"]["snapshot"]["available"] is True
+    assert after["gear"]["snapshot"]["snapshot_kind"] == "manual_champion"
+    assert after["gear"]["snapshot"]["summary"]["champions"] == 1
+    assert after["gear"]["snapshot"]["summary"]["artifacts"] == 2
+    roster = list_owned_champions(db_path, scope="all", sort="name")
+    assert roster["champions"][0]["gear_snapshot_available"] is True
+    assert roster["champions"][0]["gear_snapshot_saved_at"] != ""
+
+
 def test_web_roster_filters_missing_enrichment(tmp_path: Path) -> None:
     source_path = tmp_path / "normalized_account.json"
     db_path = tmp_path / "cbforge.sqlite3"
@@ -787,7 +867,7 @@ def test_clan_boss_recommendations_expose_heuristic_and_ai(monkeypatch, tmp_path
     monkeypatch.setattr(
         ml_team_baseline,
         "recommend_best_team_from_candidates",
-        lambda candidates, encounter_key, difficulty, boss_affinity, model_path, team_size=5, pool_size=10: {
+        lambda candidates, encounter_key, difficulty, boss_affinity, model_path, team_size=5, pool_size=10, ranking_objective="stable": {
             "best_team": [
                 {
                     "champ_id": "champ-9",
@@ -801,6 +881,7 @@ def test_clan_boss_recommendations_expose_heuristic_and_ai(monkeypatch, tmp_path
             ]
             * 5,
             "predicted_total_damage": 41234567.0,
+            "predicted_boss_turn": 38.0,
             "predicted_success_probability": 0.82,
             "evaluated_combinations": 128,
             "pool_size": 9,
@@ -815,6 +896,8 @@ def test_clan_boss_recommendations_expose_heuristic_and_ai(monkeypatch, tmp_path
     assert payload["ai"]["available"] is True
     assert payload["ai"]["team"][0]["champion_name"] == "Maneater"
     assert payload["ai"]["predicted_total_damage"] == 41234567.0
+    assert payload["ai"]["predicted_boss_turn"] == 38.0
+    assert any("Turno boss previsto: 38.0" in note for note in payload["ai"]["notes"])
 
 
 def test_ai_training_overview_reports_runs_and_models(tmp_path: Path, monkeypatch) -> None:
@@ -1373,6 +1456,85 @@ def test_restore_last_team_optimizer_equip_invokes_local_bridge_from_snapshot(mo
         ("equip", ("9170", "1001,1002")),
         ("equip", ("16571", "2001")),
     ]
+
+
+def test_restore_champion_gear_snapshot_invokes_local_bridge(monkeypatch, tmp_path: Path) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    payload = {
+        "champions": [
+            {
+                "champ_id": "champ-1",
+                "name": "Geomancer",
+                "rarity": "epic",
+                "affinity": "force",
+                "faction": "Dwarves",
+                "level": 60,
+                "rank": 6,
+                "awakening_level": 0,
+                "empowerment_level": 0,
+                "booked": True,
+                "role_tags": ["attack"],
+                "base_stats": {"hp": 20000},
+                "total_stats": {"hp": 50000},
+                "equipped_item_ids": ["gear-1", "gear-2"],
+                "skills": [],
+            }
+        ],
+        "gear": [
+            {
+                "item_id": "gear-1",
+                "item_class": "artifact",
+                "slot": "weapon",
+                "set_name": "Attack Speed",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": True,
+                "main_stat": {"type": "atk", "value": 265},
+                "substats": [],
+            },
+            {
+                "item_id": "gear-2",
+                "item_class": "artifact",
+                "slot": "boots",
+                "set_name": "Attack Speed",
+                "rarity": "legendary",
+                "rank": 6,
+                "level": 16,
+                "ascension_level": 0,
+                "required_faction": "",
+                "required_faction_id": 0,
+                "equipped_by": "champ-1",
+                "locked": False,
+                "main_stat": {"type": "spd", "value": 45},
+                "substats": [],
+            },
+        ],
+        "account_bonuses": [],
+    }
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+    cbforge_web.save_champion_gear_snapshot(champion_name="Geomancer", db_path=db_path)
+
+    captured: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_invoke(command: str, *arguments: str) -> dict:
+        captured.append((command, arguments))
+        return {"ok": True, "action": command}
+
+    monkeypatch.setattr(cbforge_web, "invoke_local_hh_bridge", fake_invoke)
+
+    result = cbforge_web.restore_champion_gear_snapshot(champion_name="Geomancer", db_path=db_path)
+
+    assert result["ok"] is True
+    assert result["summary"]["members_requested"] == 1
+    assert result["summary"]["members_succeeded"] == 1
+    assert captured == [("equip", ("champ-1", "gear-1,gear-2"))]
 
 
 def test_equip_team_optimizer_member_in_game_invokes_local_bridge_for_single_member(monkeypatch) -> None:
@@ -3021,6 +3183,8 @@ def test_run_history_run_detail_exposes_skill_usage_and_raw_payload(tmp_path: Pa
             "stage_label": "Dragon's Lair. Stage 10",
             "success": True,
             "completed": True,
+            "turns": 41,
+            "boss_turn": 0,
             "members": [
                 {
                     "champion_name": "Ninja",
@@ -3080,9 +3244,13 @@ def test_run_history_run_detail_exposes_skill_usage_and_raw_payload(tmp_path: Pa
 
     assert session_runs[0]["battle_id"] == "368e1bb0-a147-4b58-9c85-668f395e3cb7"
     assert session_runs[0]["skill_usages"] == 2
+    assert session_runs[0]["turns"] == 41
+    assert session_runs[0]["boss_turn"] == 0
     assert session_runs[0]["category_key"] == "dungeon_boss"
     assert detail["run"]["battle_id"] == "368e1bb0-a147-4b58-9c85-668f395e3cb7"
     assert detail["run"]["category_label"] == "Dungeon / Boss PvE"
+    assert detail["run"]["turns"] == 41
+    assert detail["run"]["boss_turn"] == 0
     assert detail["members"][0]["skill_usage"][0]["skill_slot"] == "A1"
     assert detail["members"][0]["raw"]["member_payload"]["dt"] == 113494749388923
     assert detail["members"][0]["pressure"]["incoming_target_events"] == 4
@@ -3112,6 +3280,8 @@ def test_run_history_run_detail_falls_back_to_run_total_damage_when_member_metri
             "stage_label": "Demon Lord. Ultra-Nightmare",
             "success": True,
             "completed": True,
+            "turns": 197,
+            "boss_turn": 38,
             "total_damage": 29_557_649,
             "members": [
                 {
@@ -3130,6 +3300,8 @@ def test_run_history_run_detail_falls_back_to_run_total_damage_when_member_metri
     detail = run_history_run_detail(summary["run_id"], db_path=db_path)
 
     assert detail["run"]["total_damage"] == 29_557_649
+    assert detail["run"]["turns"] == 197
+    assert detail["run"]["boss_turn"] == 38
     assert detail["derived_totals"]["damage_done"] == 29_557_649
     assert detail["derived_totals"]["damage_done_members_total"] == 0
     assert detail["derived_totals"]["damage_done_run_total"] == 29_557_649

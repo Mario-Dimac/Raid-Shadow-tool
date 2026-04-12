@@ -941,6 +941,15 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
         chance_pct REAL,
         effect_value REAL,
         resolution_status TEXT,
+        cast_certainty TEXT,
+        landed_status TEXT,
+        landed_confidence REAL,
+        base_chance_pct REAL,
+        source_acc REAL,
+        target_res_estimate REAL,
+        target_res_source TEXT,
+        weak_hit_risk TEXT,
+        outcome_model TEXT,
         condition_text TEXT,
         payload_json TEXT NOT NULL DEFAULT '{}',
         PRIMARY KEY (run_id, timeline_index, effect_index)
@@ -1056,6 +1065,60 @@ def ensure_schema_columns(conn: sqlite3.Connection) -> None:
         table_name="account_champions",
         column_name="relic_count",
         column_sql="INTEGER NOT NULL DEFAULT 0",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="cast_certainty",
+        column_sql="TEXT",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="landed_status",
+        column_sql="TEXT",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="landed_confidence",
+        column_sql="REAL",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="base_chance_pct",
+        column_sql="REAL",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="source_acc",
+        column_sql="REAL",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="target_res_estimate",
+        column_sql="REAL",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="target_res_source",
+        column_sql="TEXT",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="weak_hit_risk",
+        column_sql="TEXT",
+    )
+    ensure_column(
+        conn,
+        table_name="run_history_effect_timeline",
+        column_name="outcome_model",
+        column_sql="TEXT",
     )
 
 
@@ -1402,6 +1465,122 @@ def bootstrap_database(
     return database_status(db_path)
 
 
+def list_placeholder_skill_champions(
+    db_path: Path = DB_PATH,
+    champion_names: Optional[Iterable[str]] = None,
+) -> List[str]:
+    ensure_schema(db_path)
+    selected_names = [str(name).strip() for name in (champion_names or []) if str(name).strip()]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        if selected_names:
+            placeholders = ", ".join("?" for _ in selected_names)
+            rows = conn.execute(
+                f"""
+                SELECT
+                    cs.champion_name,
+                    COUNT(*) AS skill_count,
+                    SUM(
+                        CASE
+                            WHEN TRIM(COALESCE(cs.description_clean, '')) != ''
+                              OR TRIM(COALESCE(cs.description, '')) != ''
+                            THEN 1 ELSE 0
+                        END
+                    ) AS rich_skill_count,
+                    SUM(
+                        CASE
+                            WHEN TRIM(COALESCE(cs.skill_name, '')) != ''
+                              AND TRIM(COALESCE(cs.skill_name, '')) GLOB '*[^0-9]*'
+                            THEN 1 ELSE 0
+                        END
+                    ) AS named_skill_count,
+                    COUNT(cse.effect_type) AS effect_count
+                FROM champion_skills cs
+                LEFT JOIN champion_skill_effects cse
+                    ON cse.champion_name = cs.champion_name
+                    AND cse.slot = cs.slot
+                WHERE cs.champion_name IN ({placeholders})
+                GROUP BY cs.champion_name
+                ORDER BY cs.champion_name ASC
+                """,
+                selected_names,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT
+                    cs.champion_name,
+                    COUNT(*) AS skill_count,
+                    SUM(
+                        CASE
+                            WHEN TRIM(COALESCE(cs.description_clean, '')) != ''
+                              OR TRIM(COALESCE(cs.description, '')) != ''
+                            THEN 1 ELSE 0
+                        END
+                    ) AS rich_skill_count,
+                    SUM(
+                        CASE
+                            WHEN TRIM(COALESCE(cs.skill_name, '')) != ''
+                              AND TRIM(COALESCE(cs.skill_name, '')) GLOB '*[^0-9]*'
+                            THEN 1 ELSE 0
+                        END
+                    ) AS named_skill_count,
+                    COUNT(cse.effect_type) AS effect_count
+                FROM champion_skills cs
+                LEFT JOIN champion_skill_effects cse
+                    ON cse.champion_name = cs.champion_name
+                    AND cse.slot = cs.slot
+                GROUP BY cs.champion_name
+                ORDER BY cs.champion_name ASC
+                """
+            ).fetchall()
+
+    missing: List[str] = []
+    for row in rows:
+        skill_count = int(row["skill_count"] or 0)
+        rich_skill_count = int(row["rich_skill_count"] or 0)
+        named_skill_count = int(row["named_skill_count"] or 0)
+        effect_count = int(row["effect_count"] or 0)
+        if skill_count <= 0:
+            continue
+        if rich_skill_count > 0 and effect_count > 0 and named_skill_count >= skill_count:
+            continue
+        missing.append(str(row["champion_name"] or ""))
+    return [name for name in missing if name]
+
+
+def enrich_placeholder_skills(
+    db_path: Path = DB_PATH,
+    provider: str = "auto",
+    champion_names: Optional[Iterable[str]] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    targets = list_placeholder_skill_champions(db_path=db_path, champion_names=champion_names)
+    if limit is not None:
+        targets = targets[: max(0, int(limit))]
+    if not targets:
+        return {
+            "provider": str(provider or "auto"),
+            "requested": 0,
+            "updated": 0,
+            "effect_rows_written": 0,
+            "provider_hits": {},
+            "not_found": [],
+            "champions": [],
+        }
+
+    from hellhades_enrich import enrich_registry_from_source
+
+    summary = enrich_registry_from_source(
+        source_name=str(provider or "auto"),
+        db_path=db_path,
+        champion_names=targets,
+        limit=None,
+    )
+    summary["champions"] = targets
+    return summary
+
+
 def database_status(path: Path = DB_PATH) -> Dict[str, Any]:
     ensure_schema(path)
     status: Dict[str, Any] = {
@@ -1493,6 +1672,7 @@ def clear_all_tables(conn: sqlite3.Connection) -> None:
 def insert_run_effect_timeline(conn: sqlite3.Connection, run_id: int, effect_timeline: Dict[str, Any]) -> int:
     timeline_rows = list_value(dict_value(effect_timeline).get("timeline"))
     inserted = 0
+    effect_model_context = load_run_effect_model_context(conn, run_id)
 
     for timeline_index, timeline_row in enumerate(timeline_rows, start=1):
         timeline_map = dict_value(timeline_row)
@@ -1503,6 +1683,12 @@ def insert_run_effect_timeline(conn: sqlite3.Connection, run_id: int, effect_tim
 
         for effect_index, raw_effect in enumerate(list_value(timeline_map.get("status_effects")), start=1):
             effect_map = dict_value(raw_effect)
+            model_fields = build_effect_model_fields(
+                effect_model_context,
+                timeline_map=timeline_map,
+                effect_map=effect_map,
+                source_member_order=source_member_order,
+            )
             conn.execute(
                 """
                 INSERT INTO run_history_effect_timeline (
@@ -1510,8 +1696,10 @@ def insert_run_effect_timeline(conn: sqlite3.Connection, run_id: int, effect_tim
                     source_slot, source_name, source_type_id, target_party_id, target_slot,
                     skill_order, skill_slot, skill_code, skill_name, skill_type, skill_provider,
                     effect_type, effect_category, effect_action, effect_target, duration_turns,
-                    chance_pct, effect_value, resolution_status, condition_text, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    chance_pct, effect_value, resolution_status, cast_certainty, landed_status,
+                    landed_confidence, base_chance_pct, source_acc, target_res_estimate, target_res_source,
+                    weak_hit_risk, outcome_model, condition_text, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -1538,6 +1726,15 @@ def insert_run_effect_timeline(conn: sqlite3.Connection, run_id: int, effect_tim
                     nullable_float(effect_map.get("chance")),
                     nullable_float(effect_map.get("effect_value")),
                     optional_string(effect_map.get("resolution")),
+                    optional_string(model_fields.get("cast_certainty")),
+                    optional_string(model_fields.get("landed_status")),
+                    nullable_float(model_fields.get("landed_confidence")),
+                    nullable_float(model_fields.get("base_chance_pct")),
+                    nullable_float(model_fields.get("source_acc")),
+                    nullable_float(model_fields.get("target_res_estimate")),
+                    optional_string(model_fields.get("target_res_source")),
+                    optional_string(model_fields.get("weak_hit_risk")),
+                    optional_string(model_fields.get("outcome_model")),
                     optional_string(effect_map.get("condition_text")),
                     json_text({"timeline_event": timeline_map, "effect": effect_map}, {}),
                 ),
@@ -1545,6 +1742,231 @@ def insert_run_effect_timeline(conn: sqlite3.Connection, run_id: int, effect_tim
             inserted += 1
 
     return inserted
+
+
+CLAN_BOSS_RESISTANCE_ESTIMATES: Dict[str, float] = {
+    "easy": 100.0,
+    "normal": 140.0,
+    "hard": 180.0,
+    "brutal": 210.0,
+    "nightmare": 230.0,
+    "nm": 230.0,
+    "ultra_nightmare": 250.0,
+    "unm": 250.0,
+}
+
+
+def estimate_target_resistance(encounter_key: Any, difficulty: Any) -> Tuple[float | None, str | None]:
+    encounter = string_value(encounter_key).strip().lower()
+    difficulty_key = string_value(difficulty).strip().lower()
+    if encounter.startswith("demon_lord_"):
+        resistance = CLAN_BOSS_RESISTANCE_ESTIMATES.get(difficulty_key) or CLAN_BOSS_RESISTANCE_ESTIMATES.get(encounter.removeprefix("demon_lord_"))
+        if resistance is not None:
+            return resistance, "clan_boss_difficulty_estimate"
+    return None, None
+
+
+def affinity_is_weak(source_affinity: Any, boss_affinity: Any) -> bool:
+    source = string_value(source_affinity).strip().lower()
+    boss = string_value(boss_affinity).strip().lower()
+    if not source or not boss or source == "void" or boss == "void":
+        return False
+    weak_pairs = {
+        ("magic", "force"),
+        ("force", "spirit"),
+        ("spirit", "magic"),
+    }
+    return (source, boss) in weak_pairs
+
+
+def load_run_effect_model_context(conn: sqlite3.Connection, run_id: int) -> Dict[str, Any]:
+    run_row = conn.execute(
+        """
+        SELECT encounter_key, difficulty, boss_affinity
+        FROM run_history_runs
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    encounter_key = string_value(run_row[0] if run_row else "")
+    difficulty = string_value(run_row[1] if run_row else "")
+    boss_affinity = string_value(run_row[2] if run_row else "")
+    target_res_estimate, target_res_source = estimate_target_resistance(encounter_key, difficulty)
+
+    member_rows = conn.execute(
+        """
+        SELECT m.member_order, m.champion_name, cc.affinity,
+               MAX(CASE WHEN lower(ms.stat_name) = 'acc' THEN ms.stat_value END) AS acc
+        FROM run_history_members m
+        LEFT JOIN run_history_member_stats ms
+          ON ms.run_id = m.run_id
+         AND ms.member_order = m.member_order
+        LEFT JOIN champion_catalog cc
+          ON cc.champion_name = m.champion_name
+        WHERE m.run_id = ?
+        GROUP BY m.member_order, m.champion_name, cc.affinity
+        """,
+        (run_id,),
+    ).fetchall()
+    members_by_order = {
+        int(row[0]): {
+            "champion_name": string_value(row[1]),
+            "affinity": string_value(row[2]),
+            "acc": nullable_float(row[3]),
+        }
+        for row in member_rows
+    }
+
+    return {
+        "encounter_key": encounter_key,
+        "difficulty": difficulty,
+        "boss_affinity": boss_affinity,
+        "target_res_estimate": target_res_estimate,
+        "target_res_source": target_res_source,
+        "members_by_order": members_by_order,
+    }
+
+
+def build_effect_model_fields(
+    effect_model_context: Dict[str, Any],
+    *,
+    timeline_map: Dict[str, Any],
+    effect_map: Dict[str, Any],
+    source_member_order: int | None,
+) -> Dict[str, Any]:
+    source_party_role = string_value(timeline_map.get("source_party_role")).strip().lower()
+    effect_category = string_value(first_non_empty(effect_map.get("category"), effect_map.get("effect_category"))).strip().lower()
+    effect_target = string_value(first_non_empty(effect_map.get("target"), effect_map.get("effect_target"))).strip().lower()
+    skill_type = string_value(timeline_map.get("skill_type")).strip().lower()
+    raw_chance = nullable_float(first_non_empty(effect_map.get("chance"), effect_map.get("chance_pct")))
+    source_context = dict_value(dict(effect_model_context.get("members_by_order") or {}).get(int(source_member_order or 0)))
+    source_acc = nullable_float(source_context.get("acc"))
+    source_affinity = string_value(source_context.get("affinity"))
+    boss_affinity = string_value(effect_model_context.get("boss_affinity"))
+    target_res_estimate = nullable_float(effect_model_context.get("target_res_estimate"))
+    target_res_source = optional_string(effect_model_context.get("target_res_source"))
+
+    deterministic_target = effect_target in {"self", "ally", "all_allies"}
+    if source_party_role == "player" and deterministic_target and effect_category in {"buff", "utility"}:
+        base_chance = raw_chance if raw_chance is not None else 100.0
+        return {
+            "cast_certainty": "observed_cast",
+            "landed_status": "certain_from_cast",
+            "landed_confidence": 1.0,
+            "base_chance_pct": base_chance,
+            "source_acc": source_acc,
+            "target_res_estimate": None,
+            "target_res_source": None,
+            "weak_hit_risk": "none",
+            "outcome_model": "deterministic_allied_effect_from_cast",
+        }
+
+    if source_party_role == "player" and effect_category == "debuff":
+        weak_hit_risk = "none"
+        if skill_type in {"basic", "active"}:
+            weak_hit_risk = "possible" if affinity_is_weak(source_affinity, boss_affinity) else "unlikely"
+        return {
+            "cast_certainty": "observed_cast",
+            "landed_status": "unknown_from_cast_only",
+            "landed_confidence": None,
+            "base_chance_pct": raw_chance if raw_chance is not None else 100.0,
+            "source_acc": source_acc,
+            "target_res_estimate": target_res_estimate,
+            "target_res_source": target_res_source,
+            "weak_hit_risk": weak_hit_risk,
+            "outcome_model": "base_chance_plus_acc_res_and_weak_hit",
+        }
+
+    return {
+        "cast_certainty": "observed_cast",
+        "landed_status": "not_modeled",
+        "landed_confidence": None,
+        "base_chance_pct": raw_chance,
+        "source_acc": source_acc,
+        "target_res_estimate": target_res_estimate if effect_category == "debuff" else None,
+        "target_res_source": target_res_source if effect_category == "debuff" else None,
+        "weak_hit_risk": "unknown",
+        "outcome_model": "not_modeled",
+    }
+
+
+def backfill_run_effect_model_fields(db_path: Path = DB_PATH) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    updated_rows = 0
+    updated_runs: set[int] = set()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        run_ids = [
+            int(row[0])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT run_id
+                FROM run_history_effect_timeline
+                ORDER BY run_id ASC
+                """
+            ).fetchall()
+        ]
+
+        for run_id in run_ids:
+            effect_model_context = load_run_effect_model_context(conn, run_id)
+            rows = conn.execute(
+                """
+                SELECT timeline_index, effect_index, source_member_order, payload_json
+                FROM run_history_effect_timeline
+                WHERE run_id = ?
+                ORDER BY timeline_index ASC, effect_index ASC
+                """,
+                (run_id,),
+            ).fetchall()
+            for row in rows:
+                payload = dict_value(json.loads(string_value(row["payload_json"]) or "{}"))
+                timeline_map = dict_value(payload.get("timeline_event"))
+                effect_map = dict_value(payload.get("effect"))
+                model_fields = build_effect_model_fields(
+                    effect_model_context,
+                    timeline_map=timeline_map,
+                    effect_map=effect_map,
+                    source_member_order=nullable_int(row["source_member_order"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE run_history_effect_timeline
+                    SET cast_certainty = ?,
+                        landed_status = ?,
+                        landed_confidence = ?,
+                        base_chance_pct = ?,
+                        source_acc = ?,
+                        target_res_estimate = ?,
+                        target_res_source = ?,
+                        weak_hit_risk = ?,
+                        outcome_model = ?
+                    WHERE run_id = ? AND timeline_index = ? AND effect_index = ?
+                    """,
+                    (
+                        optional_string(model_fields.get("cast_certainty")),
+                        optional_string(model_fields.get("landed_status")),
+                        nullable_float(model_fields.get("landed_confidence")),
+                        nullable_float(model_fields.get("base_chance_pct")),
+                        nullable_float(model_fields.get("source_acc")),
+                        nullable_float(model_fields.get("target_res_estimate")),
+                        optional_string(model_fields.get("target_res_source")),
+                        optional_string(model_fields.get("weak_hit_risk")),
+                        optional_string(model_fields.get("outcome_model")),
+                        run_id,
+                        int(row["timeline_index"]),
+                        int(row["effect_index"]),
+                    ),
+                )
+                updated_rows += 1
+                updated_runs.add(run_id)
+
+        conn.commit()
+
+    return {
+        "runs": len(updated_runs),
+        "rows": updated_rows,
+    }
 
 
 def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> Dict[str, Any]:

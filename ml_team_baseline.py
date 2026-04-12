@@ -163,6 +163,7 @@ def load_training_rows(
                 boss_affinity,
                 stage_id,
                 elapsed_seconds,
+                boss_turn,
                 total_damage,
                 success,
                 leader_slot
@@ -253,6 +254,7 @@ def load_training_rows(
                 "boss_affinity": string_value(row["boss_affinity"]).strip(),
                 "stage_id": string_value(row["stage_id"]).strip(),
                 "elapsed_seconds": float_value(row["elapsed_seconds"]),
+                "boss_turn": int_value(row["boss_turn"]) or None,
                 "total_damage": float_value(row["total_damage"]),
                 "success": int_value(row["success"]),
                 "leader_slot": int_value(row["leader_slot"]),
@@ -425,6 +427,7 @@ def build_supervised_rows(
                 "run_id": int_value(row.get("run_id")),
                 "features": features,
                 "target_total_damage": float_value(row.get("total_damage")),
+                "target_boss_turn": int_value(row.get("boss_turn")) or None,
                 "target_success": int_value(row.get("success")),
                 "elapsed_seconds": float_value(row.get("elapsed_seconds")),
                 "team_signature": string_value(features.get("team_signature")),
@@ -433,15 +436,18 @@ def build_supervised_rows(
     return output
 
 
-def _split_feature_target_rows(rows: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[float], List[int]]:
+def _split_feature_target_rows(rows: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[float], List[int], List[int | None]]:
     feature_rows: List[Dict[str, Any]] = []
     damage_targets: List[float] = []
     success_targets: List[int] = []
+    boss_turn_targets: List[int | None] = []
     for row in rows:
         feature_rows.append(dict(dict_value(row.get("features"))))
         damage_targets.append(float_value(row.get("target_total_damage")))
         success_targets.append(int_value(row.get("target_success")))
-    return feature_rows, damage_targets, success_targets
+        boss_turn = int_value(row.get("target_boss_turn"))
+        boss_turn_targets.append(boss_turn if boss_turn > 0 else None)
+    return feature_rows, damage_targets, success_targets, boss_turn_targets
 
 
 def vectorizer_feature_names(vectorizer: Any) -> List[str]:
@@ -465,9 +471,13 @@ def score_feature_dicts(model_bundle: Dict[str, Any], feature_rows: List[Dict[st
         return []
     vectorizer = model_bundle["vectorizer"]
     regressor = model_bundle["damage_regressor"]
+    boss_turn_regressor = model_bundle.get("boss_turn_regressor")
     classifier = model_bundle.get("success_classifier")
     matrix = vectorizer.transform(feature_rows)
     damage_predictions = list(regressor.predict(matrix))
+    boss_turn_predictions: List[float | None] = [None] * len(feature_rows)
+    if boss_turn_regressor is not None:
+        boss_turn_predictions = [max(0.0, float(value)) for value in boss_turn_regressor.predict(matrix)]
 
     success_probabilities: List[float | None] = [None] * len(feature_rows)
     if classifier is not None and hasattr(classifier, "predict_proba"):
@@ -479,6 +489,11 @@ def score_feature_dicts(model_bundle: Dict[str, Any], feature_rows: List[Dict[st
     return [
         {
             "predicted_total_damage": round(float(damage_predictions[index]), 3),
+            "predicted_boss_turn": (
+                round(float(boss_turn_predictions[index]), 3)
+                if boss_turn_predictions[index] is not None
+                else None
+            ),
             "predicted_success_probability": (
                 round(float(success_probabilities[index]), 4)
                 if success_probabilities[index] is not None
@@ -585,6 +600,7 @@ def recommend_best_team_from_candidates(
     team_size: int = 5,
     pool_size: int = 10,
     hard_rules: Dict[str, Any] | None = None,
+    ranking_objective: str = "stable",
 ) -> Dict[str, Any]:
     if not model_path.exists():
         raise FileNotFoundError(f"Modello baseline non trovato: {model_path}")
@@ -622,15 +638,22 @@ def recommend_best_team_from_candidates(
             {
                 "team": [dict(candidate) for candidate in team],
                 "predicted_total_damage": float_value(prediction.get("predicted_total_damage")),
+                "predicted_boss_turn": (
+                    float_value(prediction.get("predicted_boss_turn"))
+                    if prediction.get("predicted_boss_turn") is not None
+                    else None
+                ),
                 "predicted_success_probability": prediction.get("predicted_success_probability"),
                 "optimizer_score_sum": round(sum(float_value(candidate.get("score")) for candidate in team), 3),
                 "team_signature": "|".join(sorted(string_value(candidate.get("champion_name")) for candidate in team)),
             }
         )
 
+    is_demon_lord = string_value(encounter_key).strip().lower().startswith("demon_lord_")
     ranked_rows.sort(
         key=lambda row: (
             (-1.0 if row.get("predicted_success_probability") is None else float_value(row.get("predicted_success_probability"))),
+            (-1.0 if (not is_demon_lord or row.get("predicted_boss_turn") is None) else float_value(row.get("predicted_boss_turn"))),
             float_value(row.get("predicted_total_damage")),
             float_value(row.get("optimizer_score_sum")),
         ),
@@ -645,6 +668,11 @@ def recommend_best_team_from_candidates(
         "hard_rules": dict(dict_value(hard_rules)),
         "best_team": list(best.get("team") or []),
         "predicted_total_damage": round(float_value(best.get("predicted_total_damage")), 3),
+        "predicted_boss_turn": (
+            round(float_value(best.get("predicted_boss_turn")), 3)
+            if best.get("predicted_boss_turn") is not None
+            else None
+        ),
         "predicted_success_probability": (
             round(float_value(best.get("predicted_success_probability")), 4)
             if best.get("predicted_success_probability") is not None
@@ -654,6 +682,11 @@ def recommend_best_team_from_candidates(
             {
                 "team_signature": string_value(row.get("team_signature")),
                 "predicted_total_damage": round(float_value(row.get("predicted_total_damage")), 3),
+                "predicted_boss_turn": (
+                    round(float_value(row.get("predicted_boss_turn")), 3)
+                    if row.get("predicted_boss_turn") is not None
+                    else None
+                ),
                 "predicted_success_probability": (
                     round(float_value(row.get("predicted_success_probability")), 4)
                     if row.get("predicted_success_probability") is not None
@@ -682,12 +715,17 @@ def train_team_baseline(
     accuracy_score = deps["accuracy_score"]
     train_test_split = deps["train_test_split"]
 
-    feature_rows, damage_targets, success_targets = _split_feature_target_rows(rows)
+    feature_rows, damage_targets, success_targets, boss_turn_targets = _split_feature_target_rows(rows)
     vectorizer = DictVectorizer(sparse=False)
     matrix = vectorizer.fit_transform(feature_rows)
 
     regressor = RandomForestRegressor(
         n_estimators=300,
+        random_state=random_state,
+        min_samples_leaf=1,
+    )
+    boss_turn_regressor = RandomForestRegressor(
+        n_estimators=250,
         random_state=random_state,
         min_samples_leaf=1,
     )
@@ -715,6 +753,34 @@ def train_team_baseline(
         predictions = regressor.predict(matrix)
         metrics["damage_mae_train"] = round(mean_absolute_error(damage_targets, predictions), 3)
         metrics["damage_r2_train"] = round(r2_score(damage_targets, predictions), 4)
+
+    boss_turn_pairs = [
+        (matrix[index], int(boss_turn))
+        for index, boss_turn in enumerate(boss_turn_targets)
+        if boss_turn is not None and int(boss_turn) > 0
+    ]
+    if len(boss_turn_pairs) >= 3:
+        x_boss = [row for row, _ in boss_turn_pairs]
+        y_boss = [target for _, target in boss_turn_pairs]
+        if len(y_boss) >= 6:
+            x_train, x_test, y_train, y_test = train_test_split(
+                x_boss,
+                y_boss,
+                test_size=0.33,
+                random_state=random_state,
+            )
+            boss_turn_regressor.fit(x_train, y_train)
+            boss_predictions = boss_turn_regressor.predict(x_test)
+            metrics["boss_turn_mae_holdout"] = round(mean_absolute_error(y_test, boss_predictions), 3)
+            metrics["boss_turn_r2_holdout"] = round(r2_score(y_test, boss_predictions), 4)
+        else:
+            boss_turn_regressor.fit(x_boss, y_boss)
+            boss_predictions = boss_turn_regressor.predict(x_boss)
+            metrics["boss_turn_mae_train"] = round(mean_absolute_error(y_boss, boss_predictions), 3)
+            metrics["boss_turn_r2_train"] = round(r2_score(y_boss, boss_predictions), 4)
+    else:
+        boss_turn_regressor = None
+        metrics["boss_turn_model"] = "skipped_insufficient_rows"
 
     success_class_count = len(set(success_targets))
     if success_class_count >= 2:
@@ -749,6 +815,7 @@ def train_team_baseline(
         "model_version": MODEL_VERSION,
         "vectorizer": vectorizer,
         "damage_regressor": regressor,
+        "boss_turn_regressor": boss_turn_regressor,
         "success_classifier": classifier,
         "metrics": metrics,
         "feature_importances": feature_importances,

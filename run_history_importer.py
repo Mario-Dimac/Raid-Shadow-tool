@@ -315,6 +315,26 @@ def build_member_skill_usage_by_slot(raw_path: str) -> Dict[int, List[Dict[str, 
     return usage_by_slot
 
 
+def infer_turn_counts_from_effect_timeline(effect_timeline: Dict[str, Any]) -> Dict[str, Optional[int]]:
+    timeline_rows = list_value(dict_value(effect_timeline).get("timeline"))
+    if not timeline_rows:
+        return {"boss_turn": None, "turns": None}
+
+    boss_turn = 0
+    allied_turns = 0
+    for row in timeline_rows:
+        row_map = dict_value(row)
+        if string_value(row_map.get("source_party_role")) == "enemy":
+            boss_turn = max(boss_turn, int_value(row_map.get("enemy_turn_index")))
+            continue
+        allied_turns = max(allied_turns, int_value(row_map.get("source_party_turn_index")))
+
+    return {
+        "boss_turn": boss_turn or None,
+        "turns": allied_turns or None,
+    }
+
+
 def build_assets(
     client_event: Dict[str, Any],
     live_events: List[Dict[str, Any]],
@@ -450,6 +470,7 @@ def build_run_payload(
             effect_timeline = extract_effect_timeline(raw_path, hero_types_path=hero_types_path)
         except Exception:
             effect_timeline = {}
+    turn_counts = infer_turn_counts_from_effect_timeline(effect_timeline)
     damage_members_by_order = {
         int_value(row.get("member_order")): dict_value(row)
         for row in list_value(damage_summary.get("members"))
@@ -517,6 +538,8 @@ def build_run_payload(
         "success": True,
         "completed": True,
         "elapsed_seconds": elapsed_seconds(started_at, finished_at),
+        "turns": turn_counts.get("turns"),
+        "boss_turn": turn_counts.get("boss_turn"),
         "total_damage": total_damage_value,
         "notes": "Imported from probe session. success is inferred from a completed battleResults capture.",
         "labels": {
@@ -534,6 +557,7 @@ def build_run_payload(
             "skill_usage_status": "imported_from_raw_events" if skill_usage_by_slot else "not_available",
             "effect_timeline_status": string_value(effect_timeline.get("status_timeline_status")) or "not_available",
             "effect_timeline_rows": int_value(effect_timeline.get("status_timeline_count")),
+            "boss_turn_status": "inferred_from_effect_timeline" if turn_counts.get("boss_turn") else "not_available",
         },
         "members": members,
         "assets": build_assets(client_event, live_events, battle_id),
@@ -769,6 +793,79 @@ def backfill_probe_effect_timeline(db_path: Path = DB_PATH, hero_types_path: Pat
         "backfilled_runs": len(imported),
         "skipped_runs": len(skipped),
         "imported": imported,
+        "skipped": skipped,
+    }
+
+
+def backfill_probe_boss_turns(db_path: Path = DB_PATH, hero_types_path: Path = HH_HERO_TYPES_PATH) -> Dict[str, Any]:
+    ensure_schema(db_path)
+    updated: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        run_rows = conn.execute(
+            """
+            SELECT r.run_id, r.battle_id, r.context_json, a.asset_path
+            FROM run_history_runs r
+            JOIN run_history_assets a
+              ON a.run_id = r.run_id
+            WHERE r.source = 'probe_import'
+              AND a.asset_kind = 'client_probe_battle_results_bin'
+            ORDER BY r.run_id ASC
+            """
+        ).fetchall()
+
+        for run_row in run_rows:
+            run_id = int(run_row["run_id"])
+            battle_id = string_value(run_row["battle_id"])
+            raw_path = Path(string_value(run_row["asset_path"]))
+            if not raw_path.exists() or not raw_path.is_file():
+                skipped.append({"run_id": run_id, "battle_id": battle_id, "reason": "raw_asset_missing"})
+                continue
+
+            try:
+                effect_timeline = extract_effect_timeline(raw_path, hero_types_path=hero_types_path)
+            except Exception:
+                skipped.append({"run_id": run_id, "battle_id": battle_id, "reason": "decode_failed"})
+                continue
+
+            turn_counts = infer_turn_counts_from_effect_timeline(effect_timeline)
+            boss_turn = turn_counts.get("boss_turn")
+            turns = turn_counts.get("turns")
+            if boss_turn is None and turns is None:
+                skipped.append({"run_id": run_id, "battle_id": battle_id, "reason": "turns_not_available"})
+                continue
+
+            try:
+                context = dict_value(json.loads(string_value(run_row["context_json"]) or "{}"))
+            except json.JSONDecodeError:
+                context = {}
+            context["boss_turn_status"] = "inferred_from_effect_timeline" if boss_turn else "not_available"
+
+            conn.execute(
+                """
+                UPDATE run_history_runs
+                SET turns = COALESCE(?, turns),
+                    boss_turn = COALESCE(?, boss_turn),
+                    context_json = ?
+                WHERE run_id = ?
+                """,
+                (
+                    turns,
+                    boss_turn,
+                    json.dumps(context, ensure_ascii=False, separators=(",", ":")),
+                    run_id,
+                ),
+            )
+            updated.append({"run_id": run_id, "battle_id": battle_id, "turns": turns, "boss_turn": boss_turn})
+
+        conn.commit()
+
+    return {
+        "backfilled_runs": len(updated),
+        "skipped_runs": len(skipped),
+        "updated": updated,
         "skipped": skipped,
     }
 

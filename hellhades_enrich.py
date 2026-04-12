@@ -251,6 +251,22 @@ def normalize_explicit_effect_rows(effects: Any) -> List[Dict[str, Any]]:
     return rows
 
 
+def is_placeholder_skill_payload(skills: Sequence[Dict[str, Any]]) -> bool:
+    useful_rows = 0
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        name = normalize_space(str(first_non_empty(skill.get("name"), skill.get("skill_name"), "")))
+        description = html_to_text(first_non_empty(skill.get("description"), skill.get("description_clean"), ""))
+        effects = normalize_explicit_effect_rows(skill.get("effects"))
+        has_named_title = bool(name) and not name.isdigit()
+        has_description = bool(description.strip())
+        has_effects = bool(effects)
+        if has_named_title or has_description or has_effects:
+            useful_rows += 1
+    return useful_rows <= 0
+
+
 def load_target_champions(
     conn: sqlite3.Connection,
     champion_names: Optional[Sequence[str]] = None,
@@ -378,6 +394,9 @@ def enrich_registry_from_provider(
 
             if not remote_skills:
                 summary["not_found"].append(f"{champion_name}:empty_remote_skills")
+                continue
+            if is_placeholder_skill_payload(remote_skills):
+                summary["not_found"].append(f"{champion_name}:placeholder_remote_skills")
                 continue
 
             if len(existing_rows) != len(remote_skills):
@@ -546,6 +565,9 @@ def enrich_registry_from_provider_chain(
                     continue
                 if not candidate_skills:
                     provider_errors.append(f"{provider_name}:empty_remote_skills")
+                    continue
+                if is_placeholder_skill_payload(candidate_skills):
+                    provider_errors.append(f"{provider_name}:placeholder_remote_skills")
                     continue
 
                 selected_provider = provider
