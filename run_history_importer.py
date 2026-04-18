@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from account_stats import summarize_sets
 from battle_event_decoder import extract_skill_usage_counts
 from forge_db import DB_PATH, ensure_schema, insert_run_effect_timeline, load_equipped_gear_by_owner, load_set_rules, record_run_history
-from run_damage_decoder import extract_damage_summary
+from run_damage_decoder import extract_damage_summary, inspect_battle_results_payload
 from run_effect_timeline import extract_effect_timeline
 from run_mapper import HH_HERO_TYPES_PATH, derive_run_mapping
 
@@ -315,6 +315,80 @@ def build_member_skill_usage_by_slot(raw_path: str) -> Dict[int, List[Dict[str, 
     return usage_by_slot
 
 
+def build_member_skill_features_by_slot(raw_path: str) -> Dict[int, List[Dict[str, Any]]]:
+    path_text = string_value(raw_path).strip()
+    if not path_text:
+        return {}
+    path = Path(path_text)
+    if not path.exists() or not path.is_file():
+        return {}
+
+    try:
+        report = inspect_battle_results_payload(path)
+    except Exception:
+        return {}
+
+    features_by_slot: Dict[int, List[Dict[str, Any]]] = {}
+    for member_row in list_value(report.get("members")):
+        member = dict_value(member_row)
+        slot_index = int_value(member.get("slot_index"))
+        champion_type_id = int_value(member.get("champion_type_id"))
+        features: List[Dict[str, Any]] = []
+        for skill_block in list_value(member.get("skill_blocks")):
+            skill = dict_value(skill_block)
+            skill_order = int_value(skill.get("skill_order"))
+            skill_slot = string_value(skill.get("skill_slot")).strip().upper()
+            if skill_order <= 0 or not skill_slot.startswith("A"):
+                continue
+            features.append(
+                {
+                    "skill_order": skill_order,
+                    "skill_slot": skill_slot,
+                    "skill_code": string_value(skill.get("skill_code")),
+                    "champion_type_id": champion_type_id,
+                    "enabled": bool(skill.get("enabled")),
+                    "internal_i": bool(skill.get("internal_i")),
+                    "internal_d": bool(skill.get("internal_d")),
+                    "c": int_value(skill.get("c")),
+                    "m": int_value(skill.get("m")),
+                    "x": int_value(skill.get("x")),
+                    "r": int_value(skill.get("r")),
+                    "a": int_value(skill.get("a")),
+                    "h": int_value(skill.get("h")),
+                    "s": int_value(skill.get("s")),
+                    "ir": int_value(skill.get("ir")),
+                    "y": int_value(skill.get("y")),
+                }
+            )
+        if features:
+            features_by_slot[slot_index] = features
+    return features_by_slot
+
+
+def build_member_incoming_context_by_slot(raw_path: str) -> Dict[int, Dict[str, Any]]:
+    path_text = string_value(raw_path).strip()
+    if not path_text:
+        return {}
+    path = Path(path_text)
+    if not path.exists() or not path.is_file():
+        return {}
+
+    try:
+        report = inspect_battle_results_payload(path)
+    except Exception:
+        return {}
+
+    context_by_slot: Dict[int, Dict[str, Any]] = {}
+    for member_row in list_value(report.get("members")):
+        member = dict_value(member_row)
+        context_by_slot[int_value(member.get("slot_index"))] = {
+            "incoming_target_events": int_value(member.get("incoming_target_events")),
+            "incoming_boss_target_events": int_value(member.get("incoming_boss_target_events")),
+            "incoming_boss_skill_codes": dict_value(member.get("incoming_boss_skill_codes")),
+        }
+    return context_by_slot
+
+
 def infer_turn_counts_from_effect_timeline(effect_timeline: Dict[str, Any]) -> Dict[str, Optional[int]]:
     timeline_rows = list_value(dict_value(effect_timeline).get("timeline"))
     if not timeline_rows:
@@ -464,6 +538,8 @@ def build_run_payload(
     raw_path = Path(string_value(saved.get("raw_path")))
     damage_summary = extract_damage_summary(raw_path)
     skill_usage_by_slot = build_member_skill_usage_by_slot(string_value(saved.get("raw_path")))
+    skill_features_by_slot = build_member_skill_features_by_slot(string_value(saved.get("raw_path")))
+    incoming_context_by_slot = build_member_incoming_context_by_slot(string_value(saved.get("raw_path")))
     effect_timeline: Dict[str, Any] = {}
     if raw_path.exists() and raw_path.is_file():
         try:
@@ -523,9 +599,16 @@ def build_run_payload(
             if damage_member.get("raw_damage_done") is not None:
                 metrics["damage_done_weight"] = damage_member.get("raw_damage_done")
             metrics["raw_damage_taken"] = damage_member.get("raw_damage_taken")
+        incoming_context = dict_value(incoming_context_by_slot.get(slot_index))
+        if incoming_context:
+            metrics["incoming_target_events"] = int_value(incoming_context.get("incoming_target_events"))
+            metrics["incoming_boss_target_events"] = int_value(incoming_context.get("incoming_boss_target_events"))
+            if dict_value(incoming_context.get("incoming_boss_skill_codes")):
+                metrics["incoming_boss_skill_codes"] = dict_value(incoming_context.get("incoming_boss_skill_codes"))
         if metrics:
             member["metrics"] = metrics
         member["skill_usage"] = list_value(skill_usage_by_slot.get(slot_index))
+        member["skill_features"] = list_value(skill_features_by_slot.get(slot_index))
 
     payload: Dict[str, Any] = {
         "saved_at": string_value(client_event.get("captured_at")) or finished_at,

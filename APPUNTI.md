@@ -2,6 +2,109 @@
 
 Documento unico di riferimento che consolida tutti gli appunti storici del progetto fino al 2026-03-28.
 
+## Aggiornamento 2026-04-18
+
+### Dataset AI materializzato nel DB
+
+- Le feature skill estratte dai `battleResults` ricchi non restano piu' solo nei file raw o in report CLI:
+  - nuova tabella `run_history_member_skill_features`
+  - nuova tabella `ai_training_skill_samples`
+- La pipeline aggiornata salva nel DB, per ogni `champion_skill_run`:
+  - target `event_usage_count`
+  - feature raw per skill (`x`, `c`, `m`, `r`, `a`, `h`, `s`, `ir`, `y`)
+  - contesto run (`damage_taken`, `incoming_target_events`, `incoming_boss_target_events`)
+  - versione normalizzata per training AI
+- Nuovo modulo dedicato:
+  - `ai_training_dataset.py`
+- Il dataset AI viene ora costruito e mantenuto dal DB, senza richiedere comandi manuali ripetuti.
+
+### UI AI Lab semplificata per umano
+
+- La pagina `AI Lab` ha ora un bottone esplicito `Aggiorna Dataset AI`.
+- La pagina mostra anche lo stato del dataset materializzato:
+  - numero sample
+  - numero run
+  - numero sample normalizzati
+  - ultimo refresh
+- Obiettivo pratico:
+  - non costringere l'utente a ricordare pipeline da console tipo `fai questo`, `poi fai quello`, `poi rilancia quest'altro`
+  - tenere il training AI dentro il flusso normale della web UI
+
+### Import automatico e refresh automatico
+
+- L'import delle sessioni recorder aggiorna ora automaticamente anche il dataset AI quando entra almeno una nuova run nel DB.
+- Questo vale per:
+  - stop recorder con import immediato della sessione
+  - import singolo session slug
+  - import tutte le sessioni
+- Quindi il flusso corretto oggi e':
+  - fai una run
+  - la sessione viene importata
+  - il dataset AI si aggiorna da solo
+  - `AI Lab` mostra i nuovi numeri senza passaggi extra richiesti all'utente
+
+### Problema reale emerso sul capture di `battleResults`
+
+- Dopo il primo rollout del refresh automatico, due run consecutive non sono entrate nel DB:
+  - sessione `20260418T075527Z`
+  - sessione `20260418T080335Z`
+- In entrambi i casi il recorder aveva catturato solo il placeholder da `11` byte:
+  - `battle_results_11_ed75d766d9c5.bin`
+- Il problema non era nell'import o nel refresh dataset:
+  - il flusso a valle si comportava correttamente
+  - semplicemente mancava il `battleResults` ricco a monte
+
+### Root cause verificata
+
+- Il probe `deep_battle_probe.py` faceva il forced snapshot del `battleResults` troppo tardi:
+  - accumulava un intero blocco di log
+  - poi decideva il forced snapshot alla fine del blocco
+- Nelle run fallite, nello stesso blocco di log erano gia' presenti anche righe tipo:
+  - `BattleResult deleted: ...`
+- Risultato:
+  - al momento del salvataggio il file ricco era gia' collassato al placeholder da `11` byte
+
+### Fix applicato
+
+- Il forced snapshot di `battle_results` ora parte subito quando compare la riga giusta, non a fine blocco log.
+- Il salvataggio forzato salva immediatamente il payload corrente e solo dopo esegue gli eventuali burst follow-up.
+- In pratica:
+  - se il file ricco esiste anche solo per un attimo in corrispondenza di `BattleResult added`, viene salvato prima del collasso a `11` byte
+
+### Verifica finale riuscita
+
+- Nuova sessione di test riuscita:
+  - `20260418T081208Z`
+- Catture `battle_results` osservate:
+  - file ricco da `14055` byte
+  - poi placeholder da `11` byte
+- Questa volta il flusso completo ha funzionato:
+  - run importata nel DB come `run_id = 9`
+  - `probe_session_slug = 20260418T081208Z`
+  - `battle_id = ca28394c-4924-421c-bf05-a1941ede8715`
+  - encounter `2062010 / Venus`
+- Il dataset AI si e' aggiornato automaticamente:
+  - sample `149 -> 169`
+  - run `8 -> 9`
+  - sample normalizzati `129 -> 154`
+  - ultimo refresh dataset: `2026-04-18T08:17:42+00:00`
+
+### Stato pratico chiuso oggi
+
+- Il flusso desiderato ora e' finalmente coerente:
+  - registri una run
+  - se viene catturato il `battleResults` ricco, la run entra nel DB
+  - il dataset AI viene aggiornato in automatico
+  - l'utente non deve ricordarsi comandi extra
+- Restano ovviamente aperti i limiti del dato:
+  - per encounter non `Demon Lord`, `total_damage` puo' restare non disponibile
+  - i target finali `damage/heal/shield per skill` non sono ancora risolti in modo trusted
+- Pero' il layer operativo richiesto dall'utente e' chiuso:
+  - dati nel DB
+  - bottone umano in UI
+  - refresh automatico dopo import
+  - fix reale del capture del `battleResults` ricco
+
 ## Aggiornamento 2026-04-12
 
 ### UI web semplificata

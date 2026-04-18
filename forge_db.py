@@ -887,6 +887,30 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS run_history_member_skill_features (
+        run_id INTEGER NOT NULL,
+        member_order INTEGER NOT NULL,
+        skill_order INTEGER NOT NULL,
+        skill_slot TEXT,
+        skill_code TEXT,
+        champion_type_id INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        internal_i INTEGER NOT NULL DEFAULT 0,
+        internal_d INTEGER NOT NULL DEFAULT 0,
+        feature_c INTEGER NOT NULL DEFAULT 0,
+        feature_m INTEGER NOT NULL DEFAULT 0,
+        feature_x INTEGER NOT NULL DEFAULT 0,
+        feature_r INTEGER NOT NULL DEFAULT 0,
+        feature_a INTEGER NOT NULL DEFAULT 0,
+        feature_h INTEGER NOT NULL DEFAULT 0,
+        feature_s INTEGER NOT NULL DEFAULT 0,
+        feature_ir INTEGER NOT NULL DEFAULT 0,
+        feature_y INTEGER NOT NULL DEFAULT 0,
+        feature_payload_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, member_order, skill_order)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS run_history_assets (
         run_id INTEGER NOT NULL,
         asset_order INTEGER NOT NULL,
@@ -970,6 +994,37 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_run_history_effect_timeline_effect
     ON run_history_effect_timeline (run_id, effect_type, source_name)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ai_training_skill_samples (
+        sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dataset_key TEXT NOT NULL DEFAULT 'skill_usage_v1',
+        run_id INTEGER NOT NULL,
+        battle_id TEXT,
+        encounter_key TEXT,
+        encounter_name TEXT,
+        stage_id TEXT,
+        member_order INTEGER NOT NULL,
+        champion_name TEXT,
+        champion_type_id INTEGER,
+        skill_order INTEGER NOT NULL,
+        skill_slot TEXT,
+        skill_code TEXT NOT NULL,
+        target_label TEXT NOT NULL DEFAULT 'event_usage_count',
+        target_value REAL NOT NULL DEFAULT 0,
+        raw_features_json TEXT NOT NULL DEFAULT '{}',
+        normalized_features_json TEXT NOT NULL DEFAULT '{}',
+        normalization_scope TEXT NOT NULL DEFAULT 'per_skill_code_minmax',
+        normalization_ready INTEGER NOT NULL DEFAULT 0,
+        source_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (dataset_key, run_id, member_order, skill_code)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ai_training_skill_samples_lookup
+    ON ai_training_skill_samples (dataset_key, encounter_key, champion_type_id, skill_code)
     """,
     """
     CREATE TABLE IF NOT EXISTS app_state (
@@ -1614,9 +1669,11 @@ def database_status(path: Path = DB_PATH) -> Dict[str, Any]:
         "run_history_member_stats",
         "run_history_member_metrics",
         "run_history_member_skill_usage",
+        "run_history_member_skill_features",
         "run_history_assets",
         "run_history_events",
         "run_history_effect_timeline",
+        "ai_training_skill_samples",
         "app_state",
     )
     with sqlite3.connect(path) as conn:
@@ -1660,9 +1717,11 @@ def clear_all_tables(conn: sqlite3.Connection) -> None:
         "run_history_assets",
         "run_history_member_metrics",
         "run_history_member_skill_usage",
+        "run_history_member_skill_features",
         "run_history_member_stats",
         "run_history_members",
         "run_history_runs",
+        "ai_training_skill_samples",
         "app_state",
     ):
         conn.execute(f"DELETE FROM {table}")
@@ -2137,6 +2196,40 @@ def record_run_history(run_payload: Dict[str, Any], db_path: Path = DB_PATH) -> 
                     ),
                 )
 
+            for skill_feature in list_value(member_map.get("skill_features")):
+                skill_feature_map = dict_value(skill_feature)
+                conn.execute(
+                    """
+                    INSERT INTO run_history_member_skill_features (
+                        run_id, member_order, skill_order, skill_slot, skill_code, champion_type_id,
+                        enabled, internal_i, internal_d,
+                        feature_c, feature_m, feature_x, feature_r, feature_a, feature_h, feature_s, feature_ir, feature_y,
+                        feature_payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        member_order,
+                        nullable_int(skill_feature_map.get("skill_order")),
+                        optional_string(skill_feature_map.get("skill_slot")),
+                        optional_string(skill_feature_map.get("skill_code")),
+                        nullable_int(skill_feature_map.get("champion_type_id")),
+                        1 if bool(skill_feature_map.get("enabled")) else 0,
+                        1 if bool(skill_feature_map.get("internal_i")) else 0,
+                        1 if bool(skill_feature_map.get("internal_d")) else 0,
+                        int_value(skill_feature_map.get("c")),
+                        int_value(skill_feature_map.get("m")),
+                        int_value(skill_feature_map.get("x")),
+                        int_value(skill_feature_map.get("r")),
+                        int_value(skill_feature_map.get("a")),
+                        int_value(skill_feature_map.get("h")),
+                        int_value(skill_feature_map.get("s")),
+                        int_value(skill_feature_map.get("ir")),
+                        int_value(skill_feature_map.get("y")),
+                        json_text(skill_feature_map, {}),
+                    ),
+                )
+
         for asset_order, asset in enumerate(assets, start=1):
             asset_map = dict_value(asset)
             conn.execute(
@@ -2212,8 +2305,10 @@ def cleanup_duplicate_run_history_runs(db_path: Path = DB_PATH, source: str = ""
         "run_history_assets",
         "run_history_member_metrics",
         "run_history_member_skill_usage",
+        "run_history_member_skill_features",
         "run_history_member_stats",
         "run_history_members",
+        "ai_training_skill_samples",
     )
 
     groups: List[Dict[str, Any]] = []

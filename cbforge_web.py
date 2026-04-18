@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from account_stats import materialize_base_totals
+from ai_training_dataset import build_ai_training_skill_dataset_overview, refresh_ai_training_skill_dataset
 from battle_event_decoder import extract_incoming_target_counts
 from boss_modules import build_boss_intel
 from build_planner import build_champion_plan, list_area_bonus_regions, list_build_profiles
@@ -1328,11 +1329,17 @@ class RunRecorderController:
         script_path: Path = BASE_DIR / "deep_battle_probe.py",
         output_root: Path = deep_battle_probe.OUTPUT_ROOT,
         python_executable: Optional[str] = None,
+        discover_runtime_files: bool = True,
+        runtime_discovery_interval: float = 0.2,
+        runtime_discovery_max_bytes: int = 262_144,
     ) -> None:
         self.base_dir = base_dir
         self.script_path = script_path
         self.output_root = output_root
         self.python_executable = python_executable or sys.executable
+        self.discover_runtime_files = bool(discover_runtime_files)
+        self.runtime_discovery_interval = max(parse_float_value(runtime_discovery_interval, 0.2), 0.2)
+        self.runtime_discovery_max_bytes = max(int(runtime_discovery_max_bytes or 0), 0)
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen[str]] = None
         self._stdout_handle: Any = None
@@ -1368,6 +1375,9 @@ class RunRecorderController:
             "script_path": str(self.script_path),
             "output_root": str(self.output_root),
             "last_exit_code": self._last_exit_code,
+            "discover_runtime_files": self.discover_runtime_files,
+            "runtime_discovery_interval": self.runtime_discovery_interval,
+            "runtime_discovery_max_bytes": self.runtime_discovery_max_bytes,
         }
 
     def _next_session_slug_locked(self) -> str:
@@ -1407,6 +1417,16 @@ class RunRecorderController:
                 "--session-slug",
                 session_slug,
             ]
+            if self.discover_runtime_files:
+                command.extend(
+                    [
+                        "--discover-runtime-files",
+                        "--discover-interval",
+                        str(self.runtime_discovery_interval),
+                        "--discover-max-bytes",
+                        str(self.runtime_discovery_max_bytes),
+                    ]
+                )
             try:
                 process = subprocess.Popen(
                     command,
@@ -1959,6 +1979,8 @@ def import_run_recorder_session(
         db_path=db_path,
         hero_types_path=hero_types_path,
     )
+    if int(summary.get("imported_runs") or 0) > 0:
+        summary["training_dataset_refresh"] = refresh_ai_training_skill_dataset(db_path=db_path)
     summary["ok"] = True
     summary["db_import"] = build_run_recorder_db_import_index(db_path)["by_session"].get(clean_slug, default_run_recorder_db_import())
     return summary
@@ -1991,6 +2013,8 @@ def import_all_run_recorder_sessions(
         db_path=db_path,
         hero_types_path=hero_types_path,
     )
+    if int(summary.get("imported_runs") or 0) > 0:
+        summary["training_dataset_refresh"] = refresh_ai_training_skill_dataset(db_path=db_path)
     summary["ok"] = True
     summary["selected_sessions"] = len(selected_slugs)
     summary["skipped_sessions"] = skipped_sessions
@@ -2579,6 +2603,7 @@ def build_ai_training_advisor(
 
 def build_ai_training_overview(db_path: Path = DB_PATH) -> Dict[str, Any]:
     ensure_schema(db_path)
+    skill_dataset = build_ai_training_skill_dataset_overview(db_path=db_path)
     try:
         from ml_team_baseline import MODEL_VERSION, ai_dependency_status, default_model_path
     except Exception as exc:
@@ -2590,6 +2615,7 @@ def build_ai_training_overview(db_path: Path = DB_PATH) -> Dict[str, Any]:
             "encounters": [],
             "categories": [],
             "summary": {"encounters": 0, "models_present": 0, "runs": 0, "runs_with_damage": 0},
+            "skill_dataset": skill_dataset,
         }
     dependency_status = ai_dependency_status()
 
@@ -2705,6 +2731,7 @@ def build_ai_training_overview(db_path: Path = DB_PATH) -> Dict[str, Any]:
             "runs": total_runs,
             "runs_with_damage": total_runs_with_damage,
         },
+        "skill_dataset": skill_dataset,
         "advisor": build_ai_training_advisor(
             encounters=encounters,
             categories=categories,
@@ -2746,6 +2773,17 @@ def cleanup_ai_training_duplicates(
     return {
         "ok": True,
         "cleanup": cleanup,
+        "overview": build_ai_training_overview(db_path=db_path),
+    }
+
+
+def refresh_ai_training_dataset_materialized(
+    db_path: Path = DB_PATH,
+) -> Dict[str, Any]:
+    refresh = refresh_ai_training_skill_dataset(db_path=db_path)
+    return {
+        "ok": True,
+        "refresh": refresh,
         "overview": build_ai_training_overview(db_path=db_path),
     }
 
@@ -5029,6 +5067,13 @@ class CBForgeHandler(BaseHTTPRequestHandler):
                     cleanup_ai_training_duplicates(
                         db_path=self.app.db_path,
                         source=str(payload.get("source") or "").strip() or "probe_import",
+                    )
+                )
+                return
+            if parsed.path == "/api/ai-refresh-training-dataset":
+                self._send_json(
+                    refresh_ai_training_dataset_materialized(
+                        db_path=self.app.db_path,
                     )
                 )
                 return

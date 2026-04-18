@@ -2650,6 +2650,10 @@ def test_run_recorder_controller_starts_and_stops_probe_process(tmp_path: Path, 
     assert status["session_slug"]
     assert started["command"][:2] == ["python-test", str(tmp_path / "deep_battle_probe.py")]
     assert "--session-slug" in started["command"]
+    assert "--discover-runtime-files" in started["command"]
+    assert "--discover-interval" in started["command"]
+    assert "--discover-max-bytes" in started["command"]
+    assert status["discover_runtime_files"] is True
     assert started["cwd"] == tmp_path
     assert started["stderr"] == cbforge_web.subprocess.STDOUT
     assert started["text"] is True
@@ -2660,6 +2664,43 @@ def test_run_recorder_controller_starts_and_stops_probe_process(tmp_path: Path, 
     assert stopped["running"] is False
     assert stopped["last_exit_code"] == 0
     assert build_run_recorder_status(controller)["session_slug"] == status["session_slug"]
+
+
+def test_run_recorder_can_disable_runtime_discovery(tmp_path: Path, monkeypatch) -> None:
+    started: dict[str, object] = {}
+
+    class FakeProcess:
+        def __init__(self, command, cwd=None, stdout=None, stderr=None, text=None):
+            started["command"] = list(command)
+            self.pid = 9876
+            self._returncode = None
+
+        def poll(self):
+            return self._returncode
+
+        def terminate(self):
+            self._returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self._returncode = -9
+
+    monkeypatch.setattr(cbforge_web.subprocess, "Popen", FakeProcess)
+
+    controller = RunRecorderController(
+        base_dir=tmp_path,
+        script_path=tmp_path / "deep_battle_probe.py",
+        output_root=tmp_path / "client_probe",
+        python_executable="python-test",
+        discover_runtime_files=False,
+    )
+
+    status = controller.start(interval_seconds=0.2, duration_seconds=10)
+
+    assert status["discover_runtime_files"] is False
+    assert "--discover-runtime-files" not in started["command"]
 
 
 def test_run_recorder_session_queries_expose_saved_probe_data(tmp_path: Path) -> None:
@@ -3054,6 +3095,79 @@ def test_import_run_recorder_session_persists_into_db_and_exposes_import_status(
     assert detail["db_import"]["pending_runs_estimate"] == 0
 
 
+def test_import_run_recorder_session_refreshes_training_dataset_after_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    output_root = tmp_path / "client_probe"
+    live_root = tmp_path / "live_storage_probe"
+    session_slug = "20260322T114745Z"
+    session_dir = output_root / session_slug
+    live_session_dir = live_root / session_slug
+    session_dir.mkdir(parents=True)
+    live_session_dir.mkdir(parents=True)
+
+    hero_types_path = tmp_path / "hh_hero_types.json"
+    hero_types_path.write_text(json.dumps([{"id": 22296, "name": "Demon Lord", "forms": [{"element": 4}]}]), encoding="utf-8")
+    (session_dir / "battle_results.bin").write_bytes(b"rich-battle-results")
+    (session_dir / "battle_results.json").write_text("{}", encoding="utf-8")
+    (live_session_dir / "battleResults_12201.bin").write_bytes(b"live-storage-rich-battle-results")
+    battle = {
+        "battle_id": "5d46944e-8521-4640-a635-f2d4a609b05f",
+        "stage_id": "4019021",
+        "formation_index": 0,
+        "player_team": [{"slot": 1, "type_id": 3666, "name": "Rakka Viletide", "grade": "Stars6", "level": 60}],
+        "enemy_rows": [{"slot": 1, "type_id": 22296, "name": "Type 22296", "grade": "Stars6", "level": 250}],
+    }
+    client_events = [
+        {"captured_at": "2026-03-22T11:47:51+00:00", "event_type": "battle_context", "battle": battle},
+        {"captured_at": "2026-03-22T11:47:51+00:00", "event_type": "sqlite_event", "db_name": "raidV2.db", "row": {"parsed": {"p": {"r": {"t": "CreateAllianceBossBattle"}}}}},
+        {"captured_at": "2026-03-22T11:47:53+00:00", "event_type": "log_line", "line": "Change battle state [Loading -> Started]"},
+        {
+            "captured_at": "2026-03-22T11:56:40+00:00",
+            "event_type": "forced_file_snapshot",
+            "source_name": "battle_results",
+            "saved": {"raw_path": str(session_dir / "battle_results.bin"), "meta_path": str(session_dir / "battle_results.json"), "marker": {"size": 12201}},
+            "battle": battle,
+        },
+        {"captured_at": "2026-03-22T11:56:40+00:00", "event_type": "log_line", "line": "Change battle state [Started -> Finished]"},
+        {"captured_at": "2026-03-22T11:56:41+00:00", "event_type": "log_line", "line": "BattleResult added: [Id=5d46944e-8521-4640-a635-f2d4a609b05f] TotalCount=1"},
+    ]
+    live_events = [
+        {"captured_at": "2026-03-22T11:56:40+00:00", "event_type": "live_battle_results", "snapshot": {"saved_path": str(live_session_dir / "battleResults_12201.bin"), "marker": {"size": 12201}}, "battle": battle}
+    ]
+    (session_dir / "events.jsonl").write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in client_events) + "\n", encoding="utf-8")
+    (live_session_dir / "events.jsonl").write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in live_events) + "\n", encoding="utf-8")
+
+    controller = RunRecorderController(
+        base_dir=tmp_path,
+        script_path=tmp_path / "deep_battle_probe.py",
+        output_root=output_root,
+        python_executable="python-test",
+    )
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        cbforge_web,
+        "refresh_ai_training_skill_dataset",
+        lambda db_path=cbforge_web.DB_PATH: calls.append(db_path) or {"ok": True, "overview": {"sample_count": 0}},
+    )
+
+    result = import_run_recorder_session(
+        session_slug,
+        db_path=db_path,
+        client_root=output_root,
+        live_root=live_root,
+        hero_types_path=hero_types_path,
+        recorder=controller,
+    )
+
+    assert result["imported_runs"] == 1
+    assert result["training_dataset_refresh"]["ok"] is True
+    assert calls == [db_path]
+
+
 def test_import_all_run_recorder_sessions_skips_running_session(tmp_path: Path) -> None:
     source_path = tmp_path / "normalized_account.json"
     db_path = tmp_path / "cbforge.sqlite3"
@@ -3152,6 +3266,78 @@ def test_import_all_run_recorder_sessions_skips_running_session(tmp_path: Path) 
     assert result["selected_sessions"] == 1
     assert result["imported_runs"] == 1
     assert result["skipped_sessions"] == [{"session_slug": "20260323T210000Z", "reason": "running"}]
+
+
+def test_import_all_run_recorder_sessions_refreshes_training_dataset_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_path = tmp_path / "normalized_account.json"
+    db_path = tmp_path / "cbforge.sqlite3"
+    source_path.write_text(json.dumps({"champions": [], "gear": [], "account_bonuses": []}), encoding="utf-8")
+    bootstrap_database(source_path=source_path, db_path=db_path, rebuild=True)
+
+    output_root = tmp_path / "client_probe"
+    live_root = tmp_path / "live_storage_probe"
+    session_ready = output_root / "20260322T114745Z"
+    live_ready = live_root / "20260322T114745Z"
+    session_ready.mkdir(parents=True)
+    live_ready.mkdir(parents=True)
+
+    hero_types_path = tmp_path / "hh_hero_types.json"
+    hero_types_path.write_text(json.dumps([{"id": 22296, "name": "Demon Lord", "forms": [{"element": 4}]}]), encoding="utf-8")
+    (session_ready / "battle_results.bin").write_bytes(b"rich-battle-results")
+    (session_ready / "battle_results.json").write_text("{}", encoding="utf-8")
+    (live_ready / "battleResults_12201.bin").write_bytes(b"live-storage-rich-battle-results")
+    battle = {
+        "battle_id": "5d46944e-8521-4640-a635-f2d4a609b05f",
+        "stage_id": "4019021",
+        "formation_index": 0,
+        "player_team": [{"slot": 1, "type_id": 3666, "name": "Rakka Viletide", "grade": "Stars6", "level": 60}],
+        "enemy_rows": [{"slot": 1, "type_id": 22296, "name": "Type 22296", "grade": "Stars6", "level": 250}],
+    }
+    client_events = [
+        {"captured_at": "2026-03-22T11:47:51+00:00", "event_type": "battle_context", "battle": battle},
+        {"captured_at": "2026-03-22T11:47:51+00:00", "event_type": "sqlite_event", "db_name": "raidV2.db", "row": {"parsed": {"p": {"r": {"t": "CreateAllianceBossBattle"}}}}},
+        {"captured_at": "2026-03-22T11:47:53+00:00", "event_type": "log_line", "line": "Change battle state [Loading -> Started]"},
+        {
+            "captured_at": "2026-03-22T11:56:40+00:00",
+            "event_type": "forced_file_snapshot",
+            "source_name": "battle_results",
+            "saved": {"raw_path": str(session_ready / "battle_results.bin"), "meta_path": str(session_ready / "battle_results.json"), "marker": {"size": 12201}},
+            "battle": battle,
+        },
+        {"captured_at": "2026-03-22T11:56:40+00:00", "event_type": "log_line", "line": "Change battle state [Started -> Finished]"},
+        {"captured_at": "2026-03-22T11:56:41+00:00", "event_type": "log_line", "line": "BattleResult added: [Id=5d46944e-8521-4640-a635-f2d4a609b05f] TotalCount=1"},
+    ]
+    live_events = [
+        {"captured_at": "2026-03-22T11:56:40+00:00", "event_type": "live_battle_results", "snapshot": {"saved_path": str(live_ready / "battleResults_12201.bin"), "marker": {"size": 12201}}, "battle": battle}
+    ]
+    (session_ready / "events.jsonl").write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in client_events) + "\n", encoding="utf-8")
+    (live_ready / "events.jsonl").write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in live_events) + "\n", encoding="utf-8")
+
+    controller = RunRecorderController(
+        base_dir=tmp_path,
+        script_path=tmp_path / "deep_battle_probe.py",
+        output_root=output_root,
+        python_executable="python-test",
+    )
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        cbforge_web,
+        "refresh_ai_training_skill_dataset",
+        lambda db_path=cbforge_web.DB_PATH: calls.append(db_path) or {"ok": True, "overview": {"sample_count": 0}},
+    )
+
+    result = import_all_run_recorder_sessions(
+        db_path=db_path,
+        output_root=output_root,
+        live_root=live_root,
+        hero_types_path=hero_types_path,
+        recorder=controller,
+        include_running=False,
+    )
+
+    assert result["imported_runs"] == 1
+    assert result["training_dataset_refresh"]["ok"] is True
+    assert calls == [db_path]
 
 
 def test_run_history_run_detail_exposes_skill_usage_and_raw_payload(tmp_path: Path, monkeypatch) -> None:

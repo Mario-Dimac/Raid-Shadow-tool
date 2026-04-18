@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -223,6 +225,509 @@ def extract_damage_summary(path: Path) -> Dict[str, Any]:
     }
 
 
+def summarize_battle_event_log(path: Path) -> Dict[str, Any]:
+    root = decode_battle_results_root(path)
+    event_rows = [dict_value(row) for row in list_value(dict_value(root.get("r")).get("c"))]
+    event_type_counts = Counter(int_value(row.get("t")) for row in event_rows)
+    source_party_counts = Counter(int_value(dict_value(dict_value(row.get("s")).get("p")).get("p")) for row in event_rows)
+    target_party_counts = Counter(int_value(dict_value(dict_value(row.get("s")).get("t")).get("p")) for row in event_rows)
+    non_null_c = sum(1 for row in event_rows if row.get("c") is not None)
+    non_null_f = sum(1 for row in event_rows if row.get("f") is not None)
+    source_target_pairs = Counter(
+        (
+            int_value(dict_value(dict_value(row.get("s")).get("p")).get("p")),
+            int_value(dict_value(dict_value(row.get("s")).get("t")).get("p")),
+        )
+        for row in event_rows
+    )
+    return {
+        "event_count": len(event_rows),
+        "event_type_counts": dict(sorted(event_type_counts.items())),
+        "source_party_counts": dict(sorted(source_party_counts.items())),
+        "target_party_counts": dict(sorted(target_party_counts.items())),
+        "source_target_pair_counts": [
+            {
+                "source_party_id": source_party_id,
+                "target_party_id": target_party_id,
+                "count": count,
+            }
+            for (source_party_id, target_party_id), count in source_target_pairs.most_common(10)
+        ],
+        "non_null_c_count": non_null_c,
+        "non_null_f_count": non_null_f,
+        "raw_r_v": int_value(dict_value(root.get("r")).get("v")),
+        "raw_r_r": int_value(dict_value(root.get("r")).get("r")),
+    }
+
+
+def summarize_member_skill_blocks(member_row: Dict[str, Any], event_skill_usage_counts: Dict[str, int] | None = None) -> List[Dict[str, Any]]:
+    champion_type_id = int_value(member_row.get("champion_type_id"))
+    skill_usage_counts = dict(event_skill_usage_counts or {})
+    payload = dict_value(member_row.get("member_payload"))
+    blocks: List[Dict[str, Any]] = []
+    for skill in list_value(payload.get("k")):
+        skill_map = dict_value(skill)
+        raw_skill_code = int_value(skill_map.get("t"))
+        if raw_skill_code <= 0:
+            continue
+        skill_order = raw_skill_code % 100 if champion_type_id > 0 and raw_skill_code // 100 == champion_type_id // 10 else None
+        skill_slot = f"A{skill_order}" if skill_order is not None and skill_order > 0 else ""
+        blocks.append(
+            {
+                "skill_code": raw_skill_code,
+                "skill_order": skill_order,
+                "skill_slot": skill_slot,
+                "enabled": bool(skill_map.get("l")),
+                "internal_i": bool(skill_map.get("i")),
+                "internal_d": bool(skill_map.get("d")),
+                "c": int_value(skill_map.get("c")),
+                "m": int_value(skill_map.get("m")),
+                "x": int_value(skill_map.get("x")),
+                "r": int_value(skill_map.get("r")),
+                "a": int_value(skill_map.get("a")),
+                "h": int_value(skill_map.get("h")),
+                "s": int_value(skill_map.get("s")),
+                "ir": int_value(skill_map.get("ir")),
+                "y": int_value(skill_map.get("y")),
+                "event_usage_count": int_value(skill_usage_counts.get(skill_slot)),
+            }
+        )
+    return blocks
+
+
+def inspect_battle_results_payload(path: Path) -> Dict[str, Any]:
+    root = decode_battle_results_root(path)
+    battle_id = string_value(dict_value(root.get("p")).get("z")).strip()
+    stage_id = string_value(dict_value(root.get("p")).get("i")).strip()
+    encounter_duration_seconds = float(dict_value(root.get("r")).get("v") or 0) / 1000.0
+    member_rows = extract_member_result_rows(path)
+    damage_summary = extract_damage_summary(path)
+
+    from battle_event_decoder import extract_incoming_target_counts, extract_skill_usage_counts
+
+    usage_rows = {
+        int_value(row.get("member_order")): dict_value(row)
+        for row in list_value(extract_skill_usage_counts(path))
+    }
+    incoming_rows = {
+        int_value(row.get("member_order")): dict_value(row)
+        for row in list_value(extract_incoming_target_counts(path))
+    }
+
+    members: List[Dict[str, Any]] = []
+    for member_row in member_rows:
+        member_order = int_value(member_row.get("member_order"))
+        usage_row = usage_rows.get(member_order, {})
+        incoming_row = incoming_rows.get(member_order, {})
+        members.append(
+            {
+                "member_order": member_order,
+                "champion_type_id": int_value(member_row.get("champion_type_id")),
+                "slot_index": member_row.get("slot_index"),
+                "damage_taken": int_value(member_row.get("damage_taken")),
+                "damage_taken_status": next(
+                    (
+                        string_value(member.get("damage_taken_status"))
+                        for member in list_value(damage_summary.get("members"))
+                        if int_value(dict_value(member).get("member_order")) == member_order
+                    ),
+                    "",
+                ),
+                "skill_usage_counts": dict_value(usage_row).get("skill_usage_counts") or {},
+                "raw_skill_codes": dict_value(usage_row).get("raw_skill_codes") or {},
+                "incoming_target_events": int_value(incoming_row.get("incoming_target_events")),
+                "incoming_boss_target_events": int_value(incoming_row.get("incoming_boss_target_events")),
+                "incoming_boss_skill_codes": dict_value(incoming_row.get("incoming_boss_skill_codes")),
+                "skill_blocks": summarize_member_skill_blocks(
+                    member_row,
+                    event_skill_usage_counts=dict_value(usage_row).get("skill_usage_counts") or {},
+                ),
+            }
+        )
+
+    return {
+        "battle_id": battle_id,
+        "stage_id": stage_id,
+        "source_path": str(path),
+        "duration_seconds_candidate": encounter_duration_seconds,
+        "damage_summary": damage_summary,
+        "event_log": summarize_battle_event_log(path),
+        "members": members,
+    }
+
+
+def extract_session_slug_from_path(path: Path) -> str:
+    parts = list(path.parts)
+    if "client_probe" not in parts:
+        return ""
+    index = parts.index("client_probe")
+    if index + 1 >= len(parts):
+        return ""
+    return parts[index + 1]
+
+
+def build_skill_block_sample_rows(path: Path) -> List[Dict[str, Any]]:
+    report = inspect_battle_results_payload(path)
+    rows: List[Dict[str, Any]] = []
+    for member in list_value(report.get("members")):
+        member_row = dict_value(member)
+        for skill in list_value(member_row.get("skill_blocks")):
+            skill_row = dict_value(skill)
+            rows.append(
+                {
+                    "battle_id": string_value(report.get("battle_id")),
+                    "stage_id": string_value(report.get("stage_id")),
+                    "session_slug": extract_session_slug_from_path(path),
+                    "source_path": str(path),
+                    "duration_seconds_candidate": float(report.get("duration_seconds_candidate") or 0.0),
+                    "member_order": int_value(member_row.get("member_order")),
+                    "slot_index": member_row.get("slot_index"),
+                    "champion_type_id": int_value(member_row.get("champion_type_id")),
+                    "damage_taken": int_value(member_row.get("damage_taken")),
+                    "damage_taken_status": string_value(member_row.get("damage_taken_status")),
+                    "incoming_target_events": int_value(member_row.get("incoming_target_events")),
+                    "incoming_boss_target_events": int_value(member_row.get("incoming_boss_target_events")),
+                    "skill_code": int_value(skill_row.get("skill_code")),
+                    "skill_order": skill_row.get("skill_order"),
+                    "skill_slot": string_value(skill_row.get("skill_slot")),
+                    "enabled": bool(skill_row.get("enabled")),
+                    "internal_i": bool(skill_row.get("internal_i")),
+                    "internal_d": bool(skill_row.get("internal_d")),
+                    "event_usage_count": int_value(skill_row.get("event_usage_count")),
+                    "c": int_value(skill_row.get("c")),
+                    "m": int_value(skill_row.get("m")),
+                    "x": int_value(skill_row.get("x")),
+                    "r": int_value(skill_row.get("r")),
+                    "a": int_value(skill_row.get("a")),
+                    "h": int_value(skill_row.get("h")),
+                    "s": int_value(skill_row.get("s")),
+                    "ir": int_value(skill_row.get("ir")),
+                    "y": int_value(skill_row.get("y")),
+                }
+            )
+    return rows
+
+
+def pearson_correlation(xs: Iterable[int], ys: Iterable[int]) -> float | None:
+    x_values = [int_value(value) for value in xs]
+    y_values = [int_value(value) for value in ys]
+    if len(x_values) != len(y_values) or len(x_values) < 2:
+        return None
+    x_mean = sum(x_values) / len(x_values)
+    y_mean = sum(y_values) / len(y_values)
+    x_delta = [value - x_mean for value in x_values]
+    y_delta = [value - y_mean for value in y_values]
+    x_norm = math.sqrt(sum(delta * delta for delta in x_delta))
+    y_norm = math.sqrt(sum(delta * delta for delta in y_delta))
+    if x_norm <= 0 or y_norm <= 0:
+        return None
+    numerator = sum(xd * yd for xd, yd in zip(x_delta, y_delta))
+    return numerator / (x_norm * y_norm)
+
+
+def summarize_numeric_series(values: Iterable[int]) -> Dict[str, Any]:
+    rows = [int_value(value) for value in values]
+    if not rows:
+        return {"count": 0, "min": 0, "max": 0, "distinct_values": []}
+    return {
+        "count": len(rows),
+        "min": min(rows),
+        "max": max(rows),
+        "distinct_values": sorted(set(rows)),
+    }
+
+
+def summarize_skill_block_group(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+    numeric_fields = ("event_usage_count", "damage_taken", "incoming_target_events", "incoming_boss_target_events", "c", "m", "x", "r", "a", "h", "s", "ir", "y")
+    event_usage = [int_value(sample.get("event_usage_count")) for sample in samples]
+    field_correlations: Dict[str, float | None] = {}
+    for field_name in ("c", "m", "x", "r", "a", "h", "s", "ir", "y", "damage_taken", "incoming_target_events", "incoming_boss_target_events"):
+        field_correlations[field_name] = pearson_correlation(
+            [int_value(sample.get(field_name)) for sample in samples],
+            event_usage,
+        )
+
+    best_field = ""
+    best_score = -1.0
+    for field_name, correlation in field_correlations.items():
+        if correlation is None:
+            continue
+        score = abs(float(correlation))
+        if score > best_score:
+            best_score = score
+            best_field = field_name
+
+    return {
+        "sample_count": len(samples),
+        "field_ranges": {
+            field_name: summarize_numeric_series(int_value(sample.get(field_name)) for sample in samples)
+            for field_name in numeric_fields
+        },
+        "event_usage_correlations": field_correlations,
+        "best_event_usage_field": best_field,
+        "best_event_usage_abs_correlation": None if best_score < 0 else round(best_score, 6),
+    }
+
+
+def distinct_ratio(values: Iterable[int]) -> float:
+    rows = [int_value(value) for value in values]
+    if len(rows) <= 1:
+        return 0.0
+    return len(set(rows)) / len(rows)
+
+
+def distinct_ratio_from_group_range(
+    sample_count: int,
+    field_range: Dict[str, Any],
+    samples: List[Dict[str, Any]],
+    feature_name: str,
+) -> float:
+    if samples:
+        return distinct_ratio(int_value(sample.get(feature_name)) for sample in samples)
+    distinct_values = list_value(dict_value(field_range).get("distinct_values"))
+    if sample_count <= 1:
+        return 0.0
+    return min(len(distinct_values) / sample_count, 1.0)
+
+
+def classify_feature_reliability(
+    sample_count: int,
+    correlation: float | None,
+    value_distinct_ratio: float,
+) -> str:
+    if sample_count < 2 or correlation is None:
+        return "insufficient_signal"
+    score = abs(float(correlation))
+    if sample_count >= 3 and score >= 0.95 and value_distinct_ratio >= 0.66:
+        return "strong_candidate"
+    if sample_count >= 2 and score >= 0.80 and value_distinct_ratio >= 0.50:
+        return "candidate"
+    if score >= 0.50 and value_distinct_ratio > 0.0:
+        return "weak_candidate"
+    return "non_informative"
+
+
+def build_skill_training_view(
+    report: Dict[str, Any],
+    include_rows: bool = False,
+    max_features_per_skill: int = 4,
+) -> Dict[str, Any]:
+    feature_names = ("x", "c", "m", "r", "a", "h", "s", "ir", "y", "damage_taken", "incoming_target_events", "incoming_boss_target_events")
+    training_groups: List[Dict[str, Any]] = []
+    training_rows: List[Dict[str, Any]] = []
+
+    for group in list_value(report.get("skill_groups")):
+        group_row = dict_value(group)
+        samples = [dict_value(sample) for sample in list_value(group_row.get("samples"))]
+        feature_candidates: List[Dict[str, Any]] = []
+        non_informative_fields: List[str] = []
+
+        for feature_name in feature_names:
+            field_range = dict_value(dict_value(group_row.get("field_ranges")).get(feature_name))
+            correlation = dict_value(group_row.get("event_usage_correlations")).get(feature_name)
+            value_distinct_ratio = distinct_ratio_from_group_range(
+                sample_count=int_value(group_row.get("sample_count")),
+                field_range=field_range,
+                samples=samples,
+                feature_name=feature_name,
+            )
+            reliability = classify_feature_reliability(
+                sample_count=int_value(group_row.get("sample_count")),
+                correlation=float(correlation) if correlation is not None else None,
+                value_distinct_ratio=value_distinct_ratio,
+            )
+            candidate_row = {
+                "field": feature_name,
+                "reliability": reliability,
+                "correlation_to_event_usage": correlation,
+                "direction": (
+                    "positive"
+                    if correlation is not None and float(correlation) > 0
+                    else "negative"
+                    if correlation is not None and float(correlation) < 0
+                    else "flat_or_unknown"
+                ),
+                "value_distinct_ratio": round(value_distinct_ratio, 6),
+                "distinct_values": list_value(field_range.get("distinct_values")),
+            }
+            if reliability == "non_informative" or reliability == "insufficient_signal":
+                non_informative_fields.append(feature_name)
+            else:
+                feature_candidates.append(candidate_row)
+
+        feature_candidates.sort(
+            key=lambda row: (
+                {"strong_candidate": 0, "candidate": 1, "weak_candidate": 2}.get(string_value(row.get("reliability")), 9),
+                -abs(float(row.get("correlation_to_event_usage") or 0.0)),
+                -float(row.get("value_distinct_ratio") or 0.0),
+                string_value(row.get("field")),
+            )
+        )
+
+        primary_feature = dict_value(feature_candidates[0]) if feature_candidates else {}
+        training_group = {
+            "champion_type_id": int_value(group_row.get("champion_type_id")),
+            "skill_code": int_value(group_row.get("skill_code")),
+            "skill_slot": string_value(group_row.get("skill_slot")),
+            "skill_order": group_row.get("skill_order"),
+            "sample_count": int_value(group_row.get("sample_count")),
+            "target_label": "event_usage_count",
+            "recommended_primary_feature": string_value(primary_feature.get("field")),
+            "recommended_primary_reliability": string_value(primary_feature.get("reliability")),
+            "recommended_feature_candidates": feature_candidates[: max(max_features_per_skill, 0)],
+            "non_informative_fields": non_informative_fields,
+        }
+        training_groups.append(training_group)
+
+        if include_rows:
+            for sample in samples:
+                training_rows.append(
+                    {
+                        "battle_id": string_value(sample.get("battle_id")),
+                        "stage_id": string_value(sample.get("stage_id")),
+                        "session_slug": string_value(sample.get("session_slug")),
+                        "source_path": string_value(sample.get("source_path")),
+                        "champion_type_id": int_value(group_row.get("champion_type_id")),
+                        "skill_code": int_value(group_row.get("skill_code")),
+                        "skill_slot": string_value(group_row.get("skill_slot")),
+                        "member_order": int_value(sample.get("member_order")),
+                        "target_event_usage_count": int_value(sample.get("event_usage_count")),
+                        "features": {
+                            feature_name: int_value(sample.get(feature_name))
+                            for feature_name in feature_names
+                        },
+                    }
+                )
+
+    training_groups.sort(
+        key=lambda row: (
+            -int_value(row.get("sample_count")),
+            {"strong_candidate": 0, "candidate": 1, "weak_candidate": 2, "": 9}.get(string_value(row.get("recommended_primary_reliability")), 9),
+            string_value(row.get("recommended_primary_feature")),
+            int_value(row.get("champion_type_id")),
+            int_value(row.get("skill_code")),
+        )
+    )
+
+    return {
+        "target_label": "event_usage_count",
+        "sample_unit": "champion_skill_run",
+        "feature_space": list(feature_names),
+        "group_count": len(training_groups),
+        "groups": training_groups,
+        "rows": training_rows if include_rows else [],
+        "row_count": len(training_rows) if include_rows else 0,
+    }
+
+
+def compare_battle_results_skill_blocks(paths: Iterable[Path]) -> Dict[str, Any]:
+    sample_rows: List[Dict[str, Any]] = []
+    runs: List[Dict[str, Any]] = []
+    for path in paths:
+        report = inspect_battle_results_payload(path)
+        sample_rows.extend(build_skill_block_sample_rows(path))
+        runs.append(
+            {
+                "battle_id": string_value(report.get("battle_id")),
+                "stage_id": string_value(report.get("stage_id")),
+                "session_slug": extract_session_slug_from_path(path),
+                "source_path": str(path),
+                "duration_seconds_candidate": float(report.get("duration_seconds_candidate") or 0.0),
+                "member_count": len(list_value(report.get("members"))),
+                "event_count": int_value(dict_value(report.get("event_log")).get("event_count")),
+            }
+        )
+
+    groups: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+    for row in sample_rows:
+        key = (int_value(row.get("champion_type_id")), int_value(row.get("skill_code")))
+        groups.setdefault(key, []).append(row)
+
+    skill_groups: List[Dict[str, Any]] = []
+    for (champion_type_id, skill_code), samples in groups.items():
+        ordered_samples = sorted(
+            samples,
+            key=lambda row: (
+                string_value(row.get("session_slug")),
+                string_value(row.get("battle_id")),
+                int_value(row.get("member_order")),
+            ),
+        )
+        summary = summarize_skill_block_group(ordered_samples)
+        skill_groups.append(
+            {
+                "champion_type_id": champion_type_id,
+                "skill_code": skill_code,
+                "skill_order": ordered_samples[0].get("skill_order"),
+                "skill_slot": string_value(ordered_samples[0].get("skill_slot")),
+                **summary,
+                "samples": ordered_samples,
+            }
+        )
+
+    skill_groups.sort(
+        key=lambda row: (
+            -int_value(row.get("sample_count")),
+            -float(row.get("best_event_usage_abs_correlation") or 0.0),
+            int_value(row.get("champion_type_id")),
+            int_value(row.get("skill_code")),
+        )
+    )
+
+    global_correlations = {
+        field_name: pearson_correlation(
+            [int_value(row.get(field_name)) for row in sample_rows],
+            [int_value(row.get("event_usage_count")) for row in sample_rows],
+        )
+        for field_name in ("c", "m", "x", "r", "a", "h", "s", "ir", "y", "damage_taken", "incoming_target_events", "incoming_boss_target_events")
+    }
+
+    return {
+        "run_count": len(runs),
+        "skill_sample_count": len(sample_rows),
+        "runs": runs,
+        "global_event_usage_correlations": global_correlations,
+        "skill_groups": skill_groups,
+    }
+
+
+def filter_skill_block_comparison_report(
+    report: Dict[str, Any],
+    min_samples: int = 1,
+    skill_slots: Iterable[str] | None = None,
+    max_groups: int = 0,
+    include_samples: bool = True,
+) -> Dict[str, Any]:
+    allowed_skill_slots = {string_value(slot).strip() for slot in (skill_slots or []) if string_value(slot).strip()}
+    filtered_groups: List[Dict[str, Any]] = []
+    for group in list_value(report.get("skill_groups")):
+        group_row = dict_value(group)
+        if int_value(group_row.get("sample_count")) < max(min_samples, 1):
+            continue
+        if allowed_skill_slots and string_value(group_row.get("skill_slot")) not in allowed_skill_slots:
+            continue
+        if include_samples:
+            filtered_groups.append(group_row)
+        else:
+            compact_row = dict(group_row)
+            compact_row.pop("samples", None)
+            filtered_groups.append(compact_row)
+
+    if max_groups > 0:
+        filtered_groups = filtered_groups[:max_groups]
+
+    filtered_report = dict(report)
+    filtered_report["skill_groups"] = filtered_groups
+    filtered_report["filtered_skill_group_count"] = len(filtered_groups)
+    filtered_report["filter"] = {
+        "min_samples": max(min_samples, 1),
+        "skill_slots": sorted(allowed_skill_slots),
+        "max_groups": max(max_groups, 0),
+        "include_samples": include_samples,
+    }
+    return filtered_report
+
+
 def parse_manual_battle_damage_notes(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
@@ -330,6 +835,32 @@ def index_rich_battle_result_assets(client_probe_root: Path) -> Dict[str, Dict[s
         if current is None or size_bytes >= int_value(current.get("size_bytes")):
             index[battle_id] = candidate
     return index
+
+
+def latest_rich_battle_result_paths(client_probe_root: Path, limit: int) -> List[Path]:
+    candidates: List[Tuple[float, Path]] = []
+    for meta_path in client_probe_root.glob("**/snapshots/battle_results/*.json"):
+        payload = dict_value(json.loads(meta_path.read_text(encoding="utf-8")))
+        marker = dict_value(payload.get("marker"))
+        size_bytes = int_value(marker.get("size"))
+        if size_bytes <= 11:
+            continue
+        bin_path = meta_path.with_suffix(".bin")
+        if not bin_path.exists():
+            continue
+        candidates.append((meta_path.stat().st_mtime, bin_path))
+    candidates.sort(key=lambda row: row[0], reverse=True)
+    unique_paths: List[Path] = []
+    seen: set[str] = set()
+    for _, path in candidates:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_paths.append(path)
+        if len(unique_paths) >= max(limit, 0):
+            break
+    return unique_paths
 
 
 def flatten_numeric_leaf_paths(value: Any, prefix: str = "") -> Dict[str, int]:
@@ -650,12 +1181,108 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=Path("data_sources") / "manual_battle_result_metrics.json",
         help="Dataset JSON con danno/cure/subito manuali.",
     )
+    parser.add_argument(
+        "--inspect-path",
+        type=Path,
+        default=None,
+        help="Path diretto a un battleResults .bin ricco da ispezionare.",
+    )
+    parser.add_argument(
+        "--compare-paths",
+        type=Path,
+        nargs="+",
+        default=None,
+        help="Uno o piu path a battleResults .bin ricchi da confrontare fra loro.",
+    )
+    parser.add_argument(
+        "--compare-rich-latest",
+        type=int,
+        default=0,
+        help="Confronta automaticamente gli ultimi N battleResults ricchi trovati sotto client_probe.",
+    )
+    parser.add_argument(
+        "--compare-min-samples",
+        type=int,
+        default=1,
+        help="Tiene solo le skill presenti almeno in N sample nel report comparativo.",
+    )
+    parser.add_argument(
+        "--compare-skill-slots",
+        nargs="+",
+        default=None,
+        help="Filtra il confronto a slot skill specifici, per esempio A1 A2 A3.",
+    )
+    parser.add_argument(
+        "--compare-max-groups",
+        type=int,
+        default=0,
+        help="Limita il numero di gruppi skill restituiti nel report comparativo.",
+    )
+    parser.add_argument(
+        "--compare-omit-samples",
+        action="store_true",
+        help="Nel report comparativo rimuove il dump completo dei sample per gruppo skill.",
+    )
+    parser.add_argument(
+        "--compare-training-view",
+        action="store_true",
+        help="Trasforma il report comparativo in una vista orientata al training AI.",
+    )
+    parser.add_argument(
+        "--compare-training-rows",
+        action="store_true",
+        help="Nella vista training include anche le righe sample-level con target e feature.",
+    )
+    parser.add_argument(
+        "--compare-training-max-features",
+        type=int,
+        default=4,
+        help="Numero massimo di feature candidate da tenere per skill nella vista training.",
+    )
     return parser
 
 
 def main() -> None:
     parser = build_argument_parser()
     args = parser.parse_args()
+    if args.inspect_path:
+        print(json.dumps(inspect_battle_results_payload(args.inspect_path), indent=2, ensure_ascii=False))
+        return
+    compare_paths = list(args.compare_paths or [])
+    if int(args.compare_rich_latest or 0) > 0:
+        compare_paths.extend(latest_rich_battle_result_paths(args.client_probe_root, int(args.compare_rich_latest)))
+    if compare_paths:
+        unique_paths: List[Path] = []
+        seen = set()
+        for path in compare_paths:
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_paths.append(path)
+        comparison = compare_battle_results_skill_blocks(unique_paths)
+        filtered = filter_skill_block_comparison_report(
+            comparison,
+            min_samples=int(args.compare_min_samples or 1),
+            skill_slots=args.compare_skill_slots,
+            max_groups=int(args.compare_max_groups or 0),
+            include_samples=not bool(args.compare_omit_samples),
+        )
+        if args.compare_training_view:
+            print(
+                json.dumps(
+                    build_skill_training_view(
+                        filtered,
+                        include_rows=bool(args.compare_training_rows),
+                        max_features_per_skill=int(args.compare_training_max_features or 0),
+                    ),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(json.dumps(filtered, indent=2, ensure_ascii=False))
+        return
     summary = analyze_manual_damage_notes(
         notes_path=args.notes,
         client_probe_root=args.client_probe_root,

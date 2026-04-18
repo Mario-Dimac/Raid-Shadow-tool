@@ -11,6 +11,7 @@ const summaryEl = document.getElementById("aiSummary");
 const detailsEl = document.getElementById("aiDetails");
 const statusEl = document.getElementById("aiStatus");
 const refreshBtn = document.getElementById("aiRefreshBtn");
+const datasetBtn = document.getElementById("aiDatasetBtn");
 const cleanupBtn = document.getElementById("aiCleanupBtn");
 const trainBtn = document.getElementById("aiTrainBtn");
 
@@ -72,11 +73,13 @@ function firstTrainReadyEncounter() {
 
 function renderSummary() {
   const summary = state.overview?.summary || {};
+  const skillDataset = state.overview?.skill_dataset || {};
   const selected = selectedEncounterRow();
   summaryEl.innerHTML = [
     metricCard("Encounter", summary.encounters || 0, "Contenuti con run storiche"),
     metricCard("Runs", summary.runs || 0, "Run totali importate"),
     metricCard("Con Danno", summary.runs_with_damage || 0, "Run utili al baseline"),
+    metricCard("Dataset Skill", skillDataset.sample_count || 0, "Righe AI normalizzate nel DB"),
     metricCard("Modelli", summary.models_present || 0, selected?.model_exists ? "Il selezionato esiste gia'" : "Non tutti allenati"),
   ].join("");
 }
@@ -206,6 +209,7 @@ function renderAdvisor() {
 
 function renderDetails() {
   const selected = selectedEncounterRow();
+  const skillDataset = state.overview?.skill_dataset || {};
   const runtime = state.overview?.dependency_runtime || {};
   const runtimeBits = [
     runtime.python_executable ? `Python server: ${runtime.python_executable}` : "",
@@ -246,6 +250,25 @@ function renderDetails() {
   }
   detailsEl.innerHTML = `
     <div class="details-grid">
+      <div class="list-card">
+        <h3>Dataset Skill AI</h3>
+        <div class="list-row">
+          <strong>Righe materializzate</strong>
+          <span class="subtext">${escapeHtml(`${formatNumber(skillDataset.sample_count || 0, 0)} sample | ${formatNumber(skillDataset.normalized_sample_count || 0, 0)} normalizzati`)}</span>
+        </div>
+        <div class="list-row">
+          <strong>Copertura</strong>
+          <span class="subtext">${escapeHtml(`${formatNumber(skillDataset.run_count || 0, 0)} run | ${formatNumber(skillDataset.encounter_count || 0, 0)} encounter`)}</span>
+        </div>
+        <div class="list-row">
+          <strong>Ultimo refresh</strong>
+          <span class="subtext">${escapeHtml(skillDataset.last_built_at || "Mai costruito da questa UI")}</span>
+        </div>
+        <div class="list-row">
+          <strong>Uso pratico</strong>
+          <span class="subtext">Questo dataset vive nel database ed evita di dover rileggere i file raw o ricordare comandi manuali.</span>
+        </div>
+      </div>
       <div class="list-card">
         <h3>Encounter Selezionato</h3>
         <div class="list-row">
@@ -310,6 +333,7 @@ async function loadOverview() {
   state.trainingResult = null;
   syncSelectedEncounter();
   trainBtn.disabled = state.overview?.training_available === false;
+  datasetBtn.disabled = false;
   cleanupBtn.disabled = false;
   renderAll();
   if (state.overview?.training_available === false) {
@@ -373,6 +397,29 @@ async function cleanupDuplicates() {
   }
 }
 
+async function refreshSkillDataset() {
+  datasetBtn.disabled = true;
+  setStatus("Sto importando le novita' nel DB e preparando il dataset AI normalizzato...");
+  try {
+    const payload = await fetchJson("/api/ai-refresh-training-dataset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    state.overview = payload.overview || state.overview;
+    state.trainingResult = null;
+    syncSelectedEncounter();
+    renderAll();
+    const refresh = payload.refresh || {};
+    const overview = refresh.overview || {};
+    setStatus(`Dataset AI aggiornato: ${formatNumber(overview.sample_count || 0, 0)} righe da ${formatNumber(overview.run_count || 0, 0)} run. Ultimo refresh ${overview.last_built_at || "-"}.`);
+  } catch (error) {
+    setStatus(error.message || "Aggiornamento dataset AI non riuscito.", true);
+  } finally {
+    datasetBtn.disabled = false;
+  }
+}
+
 encounterEl.addEventListener("change", () => {
   state.selectedEncounter = encounterEl.value || "";
   syncSelectedEncounter();
@@ -380,6 +427,7 @@ encounterEl.addEventListener("change", () => {
 });
 
 refreshBtn.addEventListener("click", loadOverview);
+datasetBtn.addEventListener("click", refreshSkillDataset);
 cleanupBtn.addEventListener("click", cleanupDuplicates);
 trainBtn.addEventListener("click", trainModel);
 

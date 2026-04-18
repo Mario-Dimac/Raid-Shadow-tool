@@ -4,18 +4,27 @@ from pathlib import Path
 
 import pytest
 
+import battle_event_decoder
 import run_damage_decoder
 from run_damage_decoder import (
     FIXED_POINT_32_SCALE,
     build_manual_result_metrics_dataset,
+    build_skill_training_view,
+    compare_battle_results_skill_blocks,
     decode_metric_high32,
     detect_battle_id_from_meta_payload,
     extract_damage_summary,
     extract_member_result_rows,
+    filter_skill_block_comparison_report,
+    inspect_battle_results_payload,
     index_rich_battle_result_assets,
+    latest_rich_battle_result_paths,
     parse_manual_battle_damage_notes,
+    pearson_correlation,
     rank_member_composite_metric_candidates,
     rank_member_metric_candidates,
+    summarize_battle_event_log,
+    summarize_member_skill_blocks,
 )
 
 
@@ -226,3 +235,329 @@ def test_extract_damage_summary_keeps_non_clan_boss_damage_taken_trusted(
     assert summary["damage_taken_trusted"] is True
     assert summary["damage_taken_status"] == "trusted_member_dt_high32"
     assert summary["members"][0]["damage_taken_status"] == "trusted_member_dt_high32"
+
+
+def test_summarize_battle_event_log_counts_parties_and_non_null_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        run_damage_decoder,
+        "decode_battle_results_root",
+        lambda path: {
+            "r": {
+                "v": 12345,
+                "r": 7,
+                "c": [
+                    {"t": 0, "s": {"p": {"p": 10}, "t": {"p": -1}}, "c": None, "f": None},
+                    {"t": 1, "s": {"p": {"p": -1}, "t": {"p": 10}}, "c": {"delta": 1}, "f": None},
+                    {"t": 1, "s": {"p": {"p": 10}, "t": {"p": 10}}, "c": None, "f": {"flag": True}},
+                ]
+            }
+        },
+    )
+
+    summary = summarize_battle_event_log(tmp_path / "sample.bin")
+
+    assert summary["event_count"] == 3
+    assert summary["event_type_counts"] == {0: 1, 1: 2}
+    assert summary["source_party_counts"] == {-1: 1, 10: 2}
+    assert summary["target_party_counts"] == {-1: 1, 10: 2}
+    assert summary["non_null_c_count"] == 1
+    assert summary["non_null_f_count"] == 1
+    assert summary["raw_r_v"] == 12345
+    assert summary["raw_r_r"] == 7
+
+
+def test_summarize_member_skill_blocks_merges_event_usage_counts() -> None:
+    member_row = {
+        "champion_type_id": 6206,
+        "member_payload": {
+            "k": [
+                {"t": 62001, "l": True, "c": 1, "m": 2, "x": 3, "r": 4, "a": 5, "h": 6, "s": 7, "ir": 8, "y": 9, "i": False, "d": False},
+                {"t": 3000012, "l": False, "c": 0, "m": 0, "x": 0, "r": 0, "a": 0, "h": 0, "s": 0, "ir": 0, "y": 1, "i": False, "d": False},
+            ]
+        },
+    }
+
+    rows = summarize_member_skill_blocks(member_row, event_skill_usage_counts={"A1": 4})
+
+    assert rows[0]["skill_slot"] == "A1"
+    assert rows[0]["event_usage_count"] == 4
+    assert rows[0]["x"] == 3
+    assert rows[1]["skill_slot"] == ""
+    assert rows[1]["skill_order"] is None
+
+
+def test_pearson_correlation_returns_none_for_flat_series() -> None:
+    assert pearson_correlation([1, 1, 1], [2, 3, 4]) is None
+    assert pearson_correlation([1], [1]) is None
+    assert pearson_correlation([1, 2, 3], [2, 4, 6]) == pytest.approx(1.0)
+
+
+def test_compare_battle_results_skill_blocks_groups_skill_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    reports = {
+        str(tmp_path / "input" / "client_probe" / "session-a" / "snapshots" / "battle_results" / "a.bin"): {
+            "battle_id": "battle-a",
+            "stage_id": "4019021",
+            "duration_seconds_candidate": 120.0,
+            "event_log": {"event_count": 10},
+            "members": [
+                {
+                    "member_order": 1,
+                    "champion_type_id": 6206,
+                    "slot_index": 0,
+                    "damage_taken": 100,
+                    "damage_taken_status": "candidate",
+                    "incoming_target_events": 5,
+                    "incoming_boss_target_events": 4,
+                    "skill_blocks": [
+                        {"skill_code": 62001, "skill_order": 1, "skill_slot": "A1", "enabled": True, "internal_i": False, "internal_d": False, "event_usage_count": 7, "c": 1, "m": 0, "x": 11, "r": 0, "a": 0, "h": 0, "s": 0, "ir": 0, "y": 0}
+                    ],
+                }
+            ],
+        },
+        str(tmp_path / "input" / "client_probe" / "session-b" / "snapshots" / "battle_results" / "b.bin"): {
+            "battle_id": "battle-b",
+            "stage_id": "4019021",
+            "duration_seconds_candidate": 130.0,
+            "event_log": {"event_count": 12},
+            "members": [
+                {
+                    "member_order": 1,
+                    "champion_type_id": 6206,
+                    "slot_index": 0,
+                    "damage_taken": 120,
+                    "damage_taken_status": "candidate",
+                    "incoming_target_events": 6,
+                    "incoming_boss_target_events": 5,
+                    "skill_blocks": [
+                        {"skill_code": 62001, "skill_order": 1, "skill_slot": "A1", "enabled": True, "internal_i": False, "internal_d": False, "event_usage_count": 9, "c": 2, "m": 0, "x": 15, "r": 0, "a": 0, "h": 0, "s": 0, "ir": 0, "y": 0}
+                    ],
+                }
+            ],
+        },
+    }
+
+    monkeypatch.setattr(
+        run_damage_decoder,
+        "inspect_battle_results_payload",
+        lambda path: reports[str(path)],
+    )
+
+    comparison = compare_battle_results_skill_blocks([Path(path) for path in reports])
+
+    assert comparison["run_count"] == 2
+    assert comparison["skill_sample_count"] == 2
+    assert len(comparison["skill_groups"]) == 1
+    assert comparison["skill_groups"][0]["champion_type_id"] == 6206
+    assert comparison["skill_groups"][0]["skill_code"] == 62001
+    assert comparison["skill_groups"][0]["event_usage_correlations"]["x"] == pytest.approx(1.0)
+    assert comparison["skill_groups"][0]["best_event_usage_abs_correlation"] == pytest.approx(1.0)
+    assert comparison["skill_groups"][0]["samples"][0]["session_slug"] == "session-a"
+
+
+def test_latest_rich_battle_result_paths_skips_placeholder_files(tmp_path: Path) -> None:
+    session_root = tmp_path / "input" / "client_probe" / "session-1" / "snapshots" / "battle_results"
+    session_root.mkdir(parents=True)
+    rich_meta = session_root / "rich.json"
+    rich_bin = session_root / "rich.bin"
+    rich_bin.write_bytes(b"rich")
+    rich_meta.write_text('{"marker": {"size": 100}}', encoding="utf-8")
+
+    placeholder_meta = session_root / "placeholder.json"
+    placeholder_bin = session_root / "placeholder.bin"
+    placeholder_bin.write_bytes(b"placeholder")
+    placeholder_meta.write_text('{"marker": {"size": 11}}', encoding="utf-8")
+
+    latest = latest_rich_battle_result_paths(tmp_path / "input" / "client_probe", limit=5)
+
+    assert latest == [rich_bin]
+
+
+def test_filter_skill_block_comparison_report_applies_cli_style_filters() -> None:
+    report = {
+        "skill_groups": [
+            {"skill_slot": "A1", "sample_count": 3, "samples": [{"a": 1}]},
+            {"skill_slot": "A4", "sample_count": 2, "samples": [{"a": 2}]},
+            {"skill_slot": "A2", "sample_count": 1, "samples": [{"a": 3}]},
+        ]
+    }
+
+    filtered = filter_skill_block_comparison_report(
+        report,
+        min_samples=2,
+        skill_slots=["A1", "A2", "A3"],
+        max_groups=1,
+        include_samples=False,
+    )
+
+    assert filtered["filtered_skill_group_count"] == 1
+    assert filtered["skill_groups"] == [{"skill_slot": "A1", "sample_count": 3}]
+    assert filtered["filter"] == {
+        "min_samples": 2,
+        "skill_slots": ["A1", "A2", "A3"],
+        "max_groups": 1,
+        "include_samples": False,
+    }
+
+
+def test_build_skill_training_view_ranks_features_and_emits_rows() -> None:
+    report = {
+        "skill_groups": [
+            {
+                "champion_type_id": 6206,
+                "skill_code": 62002,
+                "skill_slot": "A2",
+                "skill_order": 2,
+                "sample_count": 3,
+                "field_ranges": {
+                    "x": {"distinct_values": [11, 21, 27]},
+                    "c": {"distinct_values": [1, 3]},
+                    "m": {"distinct_values": [3]},
+                    "r": {"distinct_values": [1]},
+                    "a": {"distinct_values": [1]},
+                    "h": {"distinct_values": [0]},
+                    "s": {"distinct_values": [0]},
+                    "ir": {"distinct_values": [0]},
+                    "y": {"distinct_values": [6]},
+                    "damage_taken": {"distinct_values": [52096, 94439, 223896]},
+                    "incoming_target_events": {"distinct_values": [0]},
+                    "incoming_boss_target_events": {"distinct_values": [0]},
+                },
+                "event_usage_correlations": {
+                    "x": 0.96,
+                    "c": 0.91,
+                    "m": None,
+                    "r": None,
+                    "a": None,
+                    "h": None,
+                    "s": None,
+                    "ir": None,
+                    "y": None,
+                    "damage_taken": 0.98,
+                    "incoming_target_events": None,
+                    "incoming_boss_target_events": None,
+                },
+                "samples": [
+                    {"battle_id": "b1", "stage_id": "4019024", "session_slug": "s1", "source_path": "p1", "member_order": 1, "event_usage_count": 7, "x": 11, "c": 1, "m": 3, "r": 1, "a": 1, "h": 0, "s": 0, "ir": 0, "y": 6, "damage_taken": 52096, "incoming_target_events": 0, "incoming_boss_target_events": 0},
+                    {"battle_id": "b2", "stage_id": "4019024", "session_slug": "s2", "source_path": "p2", "member_order": 1, "event_usage_count": 9, "x": 21, "c": 1, "m": 3, "r": 1, "a": 1, "h": 0, "s": 0, "ir": 0, "y": 6, "damage_taken": 94439, "incoming_target_events": 0, "incoming_boss_target_events": 0},
+                    {"battle_id": "b3", "stage_id": "4019024", "session_slug": "s3", "source_path": "p3", "member_order": 1, "event_usage_count": 12, "x": 27, "c": 3, "m": 3, "r": 1, "a": 1, "h": 0, "s": 0, "ir": 0, "y": 6, "damage_taken": 223896, "incoming_target_events": 0, "incoming_boss_target_events": 0},
+                ],
+            }
+        ]
+    }
+
+    training_view = build_skill_training_view(report, include_rows=True, max_features_per_skill=3)
+
+    assert training_view["target_label"] == "event_usage_count"
+    assert training_view["sample_unit"] == "champion_skill_run"
+    assert training_view["group_count"] == 1
+    assert training_view["groups"][0]["recommended_primary_feature"] == "damage_taken"
+    assert training_view["groups"][0]["recommended_feature_candidates"][1]["field"] == "x"
+    assert "m" in training_view["groups"][0]["non_informative_fields"]
+    assert training_view["row_count"] == 3
+    assert training_view["rows"][0]["target_event_usage_count"] == 7
+    assert training_view["rows"][0]["features"]["x"] == 11
+
+
+def test_build_skill_training_view_uses_field_ranges_when_samples_are_omitted() -> None:
+    report = {
+        "skill_groups": [
+            {
+                "champion_type_id": 6206,
+                "skill_code": 62002,
+                "skill_slot": "A2",
+                "skill_order": 2,
+                "sample_count": 2,
+                "field_ranges": {
+                    "x": {"distinct_values": [21, 27]},
+                    "c": {"distinct_values": [1, 3]},
+                    "m": {"distinct_values": [3]},
+                    "r": {"distinct_values": [1]},
+                    "a": {"distinct_values": [1]},
+                    "h": {"distinct_values": [0]},
+                    "s": {"distinct_values": [0]},
+                    "ir": {"distinct_values": [0]},
+                    "y": {"distinct_values": [6]},
+                    "damage_taken": {"distinct_values": [94439, 223896]},
+                    "incoming_target_events": {"distinct_values": [0]},
+                    "incoming_boss_target_events": {"distinct_values": [0]},
+                },
+                "event_usage_correlations": {
+                    "x": 1.0,
+                    "c": 1.0,
+                    "m": None,
+                    "r": None,
+                    "a": None,
+                    "h": None,
+                    "s": None,
+                    "ir": None,
+                    "y": None,
+                    "damage_taken": 1.0,
+                    "incoming_target_events": None,
+                    "incoming_boss_target_events": None,
+                },
+            }
+        ]
+    }
+
+    training_view = build_skill_training_view(report, include_rows=False, max_features_per_skill=2)
+
+    assert training_view["groups"][0]["recommended_primary_feature"] == "c"
+    assert training_view["groups"][0]["recommended_feature_candidates"][1]["field"] == "damage_taken"
+
+
+def test_inspect_battle_results_payload_merges_member_usage_and_incoming_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        run_damage_decoder,
+        "decode_battle_results_root",
+        lambda path: {
+            "p": {"z": "battle-42", "i": "2062010"},
+            "r": {"v": 4500, "r": 3, "c": [{"t": 0, "s": {"p": {"p": 1}, "t": {"p": -1}}, "c": None, "f": None}]},
+        },
+    )
+    monkeypatch.setattr(
+        run_damage_decoder,
+        "extract_member_result_rows",
+        lambda path: [
+            {
+                "member_order": 1,
+                "champion_type_id": 6206,
+                "slot_index": 0,
+                "damage_taken": 123,
+                "member_payload": {"k": [{"t": 62001, "l": True, "c": 0, "m": 0, "x": 9, "r": 0, "a": 0, "h": 0, "s": 0, "ir": 0, "y": 5, "i": False, "d": False}]},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        run_damage_decoder,
+        "extract_damage_summary",
+        lambda path: {
+            "members": [{"member_order": 1, "damage_taken_status": "trusted_member_dt_high32"}],
+            "damage_taken_trusted": True,
+        },
+    )
+    monkeypatch.setattr(
+        battle_event_decoder,
+        "extract_skill_usage_counts",
+        lambda path: [{"member_order": 1, "skill_usage_counts": {"A1": 4}, "raw_skill_codes": {"62001": 4}}],
+    )
+    monkeypatch.setattr(
+        battle_event_decoder,
+        "extract_incoming_target_counts",
+        lambda path: [{"member_order": 1, "incoming_target_events": 7, "incoming_boss_target_events": 3, "incoming_boss_skill_codes": {"35001": 3}}],
+    )
+
+    report = inspect_battle_results_payload(tmp_path / "sample.bin")
+
+    assert report["battle_id"] == "battle-42"
+    assert report["stage_id"] == "2062010"
+    assert report["duration_seconds_candidate"] == 4.5
+    assert report["event_log"]["event_count"] == 1
+    assert report["members"][0]["skill_usage_counts"] == {"A1": 4}
+    assert report["members"][0]["incoming_boss_target_events"] == 3
+    assert report["members"][0]["skill_blocks"][0]["event_usage_count"] == 4
